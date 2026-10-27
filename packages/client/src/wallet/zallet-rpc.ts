@@ -5,8 +5,6 @@ import { DepositStatusUnknownError, ZalletRpcError } from "../errors.js";
 const ZAT_PER_ZEC = 100_000_000n;
 const INSUFFICIENT_RE = /insufficient/i;
 const CONNECT_FAILURES: ReadonlySet<unknown> = new Set(["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH"]);
-/** Empty z_getoperationresult answers in a row after which the opid counts as lost, e.g. by a Zallet restart */
-const LOST_OP_POLLS = 8;
 
 export interface ZalletRpcWalletOptions {
   /** Zallet JSON-RPC endpoint, the regtest default is on port 50232 */
@@ -43,8 +41,8 @@ class ZalletRefusedError extends ZalletRpcError {}
 type Attempt = { txid: string } | { insufficient: string };
 
 type OperationState =
-  | { kind: "pending" }
-  | { kind: "missing" }
+  | { kind: "running" }
+  | { kind: "lost" }
   | { kind: "success"; txid: string | undefined }
   | { kind: "failed"; message: string; code: number | undefined }
   | { kind: "cancelled" }
@@ -202,20 +200,21 @@ export class ZalletRpcWallet implements ZcashWallet {
     const deadline = this.#clock.now() + this.#opTimeoutMs;
     let reconciling = opid === undefined;
     let lastError = firstCause;
-    const lookup = async (): Promise<string | undefined> => {
+    /** The operation's own failure, which stands once the ledger answers without a row */
+    let failure: ZalletRpcError | undefined;
+    const lookup = async (): Promise<{ txid: string } | "none" | "error"> => {
       try {
-        return (await this.findSentByMemo(memo))?.txid;
+        const found = await this.findSentByMemo(memo);
+        return found === undefined ? "none" : { txid: found.txid };
       } catch (e) {
         lastError = e;
-        return undefined;
+        return "error";
       }
     };
 
-    let missing = 0;
     for (;;) {
       if (opid !== undefined) {
         const op = await this.#pollOperation(opid);
-        missing = op.kind === "missing" ? missing + 1 : 0;
         switch (op.kind) {
           case "success":
             if (op.txid !== undefined) return { txid: op.txid };
@@ -224,29 +223,33 @@ export class ZalletRpcWallet implements ZcashWallet {
             reconciling = true;
             lastError = new ZalletRpcError("operation succeeded without a txid");
             break;
-          case "failed": {
+          case "failed":
             if (INSUFFICIENT_RE.test(op.message)) return { insufficient: op.message };
             // A failure while broadcasting can leave a stored transaction that still mines
-            const txid = await lookup();
-            if (txid !== undefined) return { txid };
-            throw new ZalletRpcError(`Zallet operation failed: ${op.message}`, { code: op.code });
-          }
+            opid = undefined;
+            reconciling = true;
+            failure = new ZalletRpcError(`Zallet operation failed: ${op.message}`, { code: op.code });
+            lastError = failure;
+            break;
           case "cancelled":
             throw new ZalletRpcError("Zallet operation was cancelled and nothing was sent");
+          case "lost":
+            lastError = new ZalletRpcError(`Zallet no longer knows operation ${opid}`);
+            opid = undefined;
+            reconciling = true;
+            break;
           case "error":
             reconciling = true;
             lastError = op.cause;
             break;
-          case "missing":
-            if (missing >= LOST_OP_POLLS) reconciling = true;
-            break;
-          case "pending":
+          case "running":
             break;
         }
       }
       if (reconciling) {
-        const txid = await lookup();
-        if (txid !== undefined) return { txid };
+        const found = await lookup();
+        if (typeof found === "object") return found;
+        if (found === "none" && failure !== undefined) throw failure;
       }
       const left = deadline - this.#clock.now();
       if (left <= 0) break;
@@ -254,24 +257,22 @@ export class ZalletRpcWallet implements ZcashWallet {
     }
 
     if (!reconciling) {
-      const txid = await lookup();
-      if (txid !== undefined) return { txid };
+      const found = await lookup();
+      if (typeof found === "object") return found;
     }
     throw new DepositStatusUnknownError(memo, { cause: lastError });
   }
 
+  /** z_getoperationresult lists an operation only once it has finished, and forgets it once listed */
   async #pollOperation(opid: string): Promise<OperationState> {
-    let entries: unknown;
-    try {
-      entries = await this.#call("z_getoperationresult", [[opid]]);
-    } catch (cause) {
-      return { kind: "error", cause };
+    const entry = await this.#operationEntry("z_getoperationresult", opid);
+    if (entry instanceof ZalletRpcError) return { kind: "error", cause: entry };
+    if (entry === undefined) {
+      // An empty result is normal while the operation runs, and only z_getoperationstatus tells it from a lost opid
+      const status = await this.#operationEntry("z_getoperationstatus", opid);
+      if (status instanceof ZalletRpcError) return { kind: "error", cause: status };
+      return status === undefined ? { kind: "lost" } : { kind: "running" };
     }
-    if (!Array.isArray(entries)) {
-      return { kind: "error", cause: new ZalletRpcError("z_getoperationresult did not return an array") };
-    }
-    const entry = entries.find((e): e is Record<string, unknown> => isRecord(e) && e.id === opid);
-    if (entry === undefined) return { kind: "missing" };
     // Unknown statuses count as still running
     switch (entry.status) {
       case "success":
@@ -281,8 +282,20 @@ export class ZalletRpcWallet implements ZcashWallet {
       case "cancelled":
         return { kind: "cancelled" };
       default:
-        return { kind: "pending" };
+        return { kind: "running" };
     }
+  }
+
+  /** The entry for `opid`, undefined when the method does not list it, or the error that kept it from answering */
+  async #operationEntry(method: string, opid: string): Promise<Record<string, unknown> | undefined | ZalletRpcError> {
+    let entries: unknown;
+    try {
+      entries = await this.#call(method, [[opid]]);
+    } catch (e) {
+      return e instanceof ZalletRpcError ? e : new ZalletRpcError(`Zallet ${method}: ${String(e)}`, { cause: e });
+    }
+    if (!Array.isArray(entries)) return new ZalletRpcError(`${method} did not return an array`);
+    return entries.find((e): e is Record<string, unknown> => isRecord(e) && e.id === opid);
   }
 
   #accountUuid(): Promise<string> {

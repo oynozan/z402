@@ -27,21 +27,26 @@ export interface FakeZallet {
   readonly url: string;
   readonly requests: RecordedRequest[];
   on(method: string, ...replies: Script[]): void;
+  /** Scripts z_getoperationresult and z_getoperationstatus for one operation that runs, finishes and is then read once */
+  runOperation(o: { finish: unknown; runningPolls?: number; opid?: string }): void;
   calls(method: string): RecordedRequest[];
   close(): Promise<void>;
 }
 
-/** Shapes observed on the live Z3 regtest stack (docs/research/client/z3-live.md) */
+const CREATED = 1_700_000_000;
+
+/** Zallet's `OperationStatus` (zallet-core asyncop.rs `to_status`), as z_getoperationstatus and z_getoperationresult return it */
 export function opSuccess(txid: string, opid = OPID): unknown {
-  return { id: opid, status: "success", result: { txid, txids: [txid] }, execution_secs: 9 };
+  return { id: opid, method: "z_sendmany", status: "success", creation_time: CREATED, result: { txid, txids: [txid] }, execution_secs: 9 };
 }
 
-export function opPending(status: "queued" | "executing" = "executing", opid = OPID): unknown {
-  return { id: opid, status, creation_time: 1_700_000_000 };
+/** Only z_getoperationstatus ever shows a running operation, z_getoperationresult lists finished ones alone */
+export function opRunning(status: "queued" | "executing" = "executing", opid = OPID): unknown {
+  return { id: opid, method: "z_sendmany", status, creation_time: CREATED };
 }
 
 export function opFailed(code: number, message: string, opid = OPID): unknown {
-  return { id: opid, status: "failed", error: { code, message }, execution_secs: 1 };
+  return { id: opid, method: "z_sendmany", status: "failed", creation_time: CREATED, error: { code, message } };
 }
 
 export interface TxRowInit {
@@ -166,12 +171,35 @@ export async function startFakeZallet(): Promise<FakeZallet> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
 
+  const on = (method: string, ...replies: Script[]): void => {
+    scripts.set(method, replies);
+    cursors.set(method, 0);
+  };
+  const asks = (params: unknown, opid: string): boolean =>
+    Array.isArray(params) && Array.isArray(params[0]) && (params[0] as unknown[]).includes(opid);
+
   return {
     url: `http://127.0.0.1:${port}`,
     requests,
-    on(method, ...replies) {
-      scripts.set(method, replies);
-      cursors.set(method, 0);
+    on,
+    runOperation({ finish, runningPolls = 0, opid = OPID }) {
+      let running = runningPolls;
+      let read = false;
+      // z_getoperationresult only returns a finished operation, and forgets it once returned (get_operation.rs)
+      on("z_getoperationresult", (params) => {
+        if (!asks(params, opid)) return { result: [] };
+        if (running > 0) {
+          running -= 1;
+          return { result: [] };
+        }
+        if (read) return { result: [] };
+        read = true;
+        return { result: [finish] };
+      });
+      on("z_getoperationstatus", (params) => {
+        if (!asks(params, opid) || read) return { result: [] };
+        return { result: [running > 0 ? opRunning("executing", opid) : finish] };
+      });
     },
     calls: (method) => requests.filter((r) => r.method === method),
     close: () =>

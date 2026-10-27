@@ -1,18 +1,22 @@
+import type { PaymentRequirements } from "@x402/core/types";
+import { DEMO_TERMS, encodeTerms, NETWORK_REGTEST, SCHEME } from "@z402/protocol";
+import { FakeChain } from "@z402/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DepositStatusUnknownError, ZalletRpcError } from "../src/errors.js";
+import { PrepaidVoucherScheme, type ClientEvent } from "../src/index.js";
 import {
   InsufficientFundsError,
   ZalletRpcWallet,
   zatToZecString,
   type ZalletRpcWalletOptions,
 } from "../src/wallet/zallet-rpc.js";
-import { txid } from "./fixtures.js";
+import { PAY_TO, SEED, txid } from "./fixtures.js";
 import {
   ACCOUNT,
   AGENT_UA,
   OPID,
   opFailed,
-  opPending,
+  opRunning,
   opSuccess,
   PASSWORD,
   startFakeZallet,
@@ -118,7 +122,7 @@ describe("ZalletRpcWallet", () => {
 
   describe("sendDeposit", () => {
     it("sends one z_sendmany with the hex memo and exact amount", async () => {
-      fake.on("z_getoperationresult", { result: [opPending()] }, { result: [opPending()] }, { result: [opSuccess(txid(7))] });
+      fake.runOperation({ runningPolls: 2, finish: opSuccess(txid(7)) });
 
       const sent = await send(make());
 
@@ -129,14 +133,28 @@ describe("ZalletRpcWallet", () => {
       expect(calls[0]!.authorization).toBe("Basic " + Buffer.from(`${USER}:${PASSWORD}`).toString("base64"));
       expect(fake.calls("z_getoperationresult")).toHaveLength(3);
       expect(fake.calls("z_getoperationresult")[0]!.params).toEqual([[OPID]]);
+      expect(fake.calls("z_getoperationstatus")).toHaveLength(2);
+      expect(fake.calls("z_getoperationstatus")[0]!.params).toEqual([[OPID]]);
+      expect(fake.calls("z_listtransactions")).toHaveLength(0);
       expect(clock.sleeps).toEqual([POLL, POLL]);
     });
 
-    it("keeps polling through an empty result and a queued operation", async () => {
-      fake.on("z_getoperationresult", { result: [] }, { result: [opPending("queued")] }, { result: [opSuccess(txid(8))] });
+    it("waits while z_getoperationresult is empty and z_getoperationstatus lists the op as queued, then executing", async () => {
+      fake.on("z_getoperationresult", { result: [] }, { result: [] }, { result: [opSuccess(txid(8))] });
+      fake.on("z_getoperationstatus", { result: [opRunning("queued")] }, { result: [opRunning("executing")] });
 
       await expect(send(make())).resolves.toEqual({ txid: txid(8) });
       expect(fake.calls("z_sendmany")).toHaveLength(1);
+      expect(fake.calls("z_getoperationstatus")).toHaveLength(2);
+      expect(fake.calls("z_listtransactions")).toHaveLength(0);
+    });
+
+    it("an operation that finished between the two calls is read on the next poll", async () => {
+      fake.on("z_getoperationresult", { result: [] }, { result: [opSuccess(txid(8))] });
+      fake.on("z_getoperationstatus", { result: [opSuccess(txid(8))] });
+
+      await expect(send(make())).resolves.toEqual({ txid: txid(8) });
+      expect(fake.calls("z_listtransactions")).toHaveLength(0);
     });
 
     it("falls back to txids[0] when the result has no txid", async () => {
@@ -220,6 +238,73 @@ describe("ZalletRpcWallet", () => {
       expect(clock.sleeps).toEqual([]);
     });
 
+    describe("a failed operation whose ledger lookup cannot answer", () => {
+      const failed = { result: [opFailed(-26, "Failed to broadcast transaction: connection reset")] };
+
+      it("ends in DepositStatusUnknownError, never in a definite failure, after one z_sendmany", async () => {
+        fake.on("z_getoperationresult", failed);
+        fake.on("z_listtransactions", { drop: true });
+
+        const error = await send(make()).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(DepositStatusUnknownError);
+        expect((error as Error).cause).toBeDefined();
+        expect(fake.calls("z_sendmany")).toHaveLength(1);
+        expect(fake.calls("z_listtransactions")).toHaveLength(5);
+        expect(clock.sleeps).toEqual([POLL, POLL, POLL, POLL]);
+      });
+
+      it("keeps asking the ledger, and a later answer with the row returns its txid", async () => {
+        fake.on("z_getoperationresult", failed);
+        fake.on("z_listtransactions", { status: 502, body: "Bad Gateway" }, { result: [txRow({ txid: txid(5), outputs: [{ memo: MEMO }] })] });
+
+        await expect(send(make())).resolves.toEqual({ txid: txid(5) });
+        expect(fake.calls("z_sendmany")).toHaveLength(1);
+      });
+
+      it("keeps asking the ledger, and a later answer without the row is the operation's own failure", async () => {
+        fake.on("z_getoperationresult", failed);
+        fake.on("z_listtransactions", { drop: true }, { result: [] });
+
+        const error = await send(make()).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(ZalletRpcError);
+        expect(error).not.toBeInstanceOf(DepositStatusUnknownError);
+        expect((error as ZalletRpcError).code).toBe(-26);
+        expect(fake.calls("z_listtransactions")).toHaveLength(2);
+      });
+
+      it("through PrepaidVoucherScheme, halts the session instead of paying again under a new memo", async () => {
+        fake.on("z_getoperationresult", failed);
+        fake.on("z_listtransactions", { drop: true });
+        const events: ClientEvent[] = [];
+        const scheme = new PrepaidVoucherScheme({
+          wallet: make(),
+          chain: new FakeChain().statusSource(),
+          seed: SEED,
+          clock: new ManualClock(),
+          onEvent: (e) => events.push(e),
+        });
+        const req = (): PaymentRequirements => ({
+          scheme: SCHEME,
+          network: NETWORK_REGTEST,
+          amount: "500",
+          asset: "ZEC",
+          payTo: PAY_TO,
+          maxTimeoutSeconds: 60,
+          extra: { ...encodeTerms(DEMO_TERMS), termsVersion: "0123456789abcdef" },
+        });
+
+        await expect(drive(clock, scheme.createPaymentPayload(2, req()))).rejects.toBeInstanceOf(DepositStatusUnknownError);
+        await expect(scheme.createPaymentPayload(2, req())).rejects.toThrow("deposit_status_unknown");
+
+        expect(fake.calls("z_sendmany")).toHaveLength(1);
+        expect(events.filter((e) => e.type === "fatal").map((e) => (e as { code: string }).code)).toEqual([
+          "deposit_status_unknown",
+        ]);
+      });
+    });
+
     it("an insufficient-funds failure never looks in the ledger", async () => {
       fake.on("z_getoperationresult", { result: [opFailed(-6, "Insufficient balance")] });
 
@@ -227,55 +312,62 @@ describe("ZalletRpcWallet", () => {
       expect(fake.calls("z_listtransactions")).toHaveLength(0);
     });
 
-    describe("an operation id Zallet no longer knows", () => {
-      const LONG = 10_000;
+    describe("operation tracking against Zallet's real z_getoperationresult", () => {
+      it("a normal 5 s operation is only waited for, with no ledger lookup", async () => {
+        fake.runOperation({ runningPolls: 20, finish: opSuccess(txid(4)) });
 
-      it("after 8 empty results in a row, keeps polling and finds the late ledger row with one z_sendmany", async () => {
-        fake.on("z_getoperationresult", { result: [] });
-        fake.on(
-          "z_listtransactions",
-          { result: [] },
-          { result: [] },
-          { result: [txRow({ txid: txid(4), minedHeight: null, outputs: [{ memo: MEMO }] })] },
-        );
-
-        await expect(send(make({ opTimeoutMs: LONG }))).resolves.toEqual({ txid: txid(4) });
+        await expect(send(make({ opTimeoutMs: 10_000 }))).resolves.toEqual({ txid: txid(4) });
 
         expect(fake.calls("z_sendmany")).toHaveLength(1);
-        expect(fake.calls("z_getoperationresult")).toHaveLength(10);
-        expect(fake.calls("z_listtransactions")).toHaveLength(3);
-        expect(clock.sleeps).toEqual(Array<number>(9).fill(POLL));
-      });
-
-      it("fewer than 8 empty results in a row never look in the ledger", async () => {
-        const empty: Reply = { result: [] };
-        fake.on(
-          "z_getoperationresult",
-          ...Array<Reply>(7).fill(empty),
-          { result: [opPending()] },
-          ...Array<Reply>(7).fill(empty),
-          { result: [opSuccess(txid(3))] },
-        );
-
-        await expect(send(make({ opTimeoutMs: LONG }))).resolves.toEqual({ txid: txid(3) });
-
-        expect(fake.calls("z_getoperationresult")).toHaveLength(16);
+        expect(fake.calls("z_getoperationresult")).toHaveLength(21);
+        expect(fake.calls("z_getoperationstatus")).toHaveLength(20);
         expect(fake.calls("z_listtransactions")).toHaveLength(0);
+        expect(clock.sleeps).toEqual(Array<number>(20).fill(POLL));
       });
 
-      it("the operation can still report after reconciling started", async () => {
-        const empty: Reply = { result: [] };
-        fake.on("z_getoperationresult", ...Array<Reply>(9).fill(empty), { result: [opSuccess(txid(2))] });
+      it("an opid gone from both methods reconciles by memo at once and returns that txid", async () => {
+        fake.on("z_getoperationresult", { result: [] });
+        fake.on("z_getoperationstatus", { result: [] });
+        fake.on("z_listtransactions", { result: [txRow({ txid: txid(4), minedHeight: null, outputs: [{ memo: MEMO }] })] });
 
-        await expect(send(make({ opTimeoutMs: LONG }))).resolves.toEqual({ txid: txid(2) });
+        await expect(send(make())).resolves.toEqual({ txid: txid(4) });
 
         expect(fake.calls("z_sendmany")).toHaveLength(1);
+        expect(fake.calls("z_getoperationresult")).toHaveLength(1);
+        expect(fake.calls("z_getoperationstatus")).toHaveLength(1);
+        expect(fake.calls("z_listtransactions")).toHaveLength(1);
+        expect(clock.sleeps).toEqual([]);
+      });
+
+      it("a lost opid with no ledger row ends in DepositStatusUnknownError and never resends", async () => {
+        fake.on("z_getoperationresult", { result: [] });
+        fake.on("z_getoperationstatus", { result: [] });
+
+        const error = await send(make()).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(DepositStatusUnknownError);
+        expect(fake.calls("z_sendmany")).toHaveLength(1);
+        expect(fake.calls("z_getoperationresult")).toHaveLength(1);
+        expect(fake.calls("z_listtransactions")).toHaveLength(5);
+      });
+
+      it("a result reply lost in transport, after which the op is gone from both, reconciles by memo", async () => {
+        fake.on("z_getoperationresult", { drop: true }, { result: [] });
+        fake.on("z_getoperationstatus", { result: [] });
+        fake.on("z_listtransactions", { result: [] }, { result: [txRow({ txid: txid(3), outputs: [{ memo: MEMO }] })] });
+
+        await expect(send(make())).resolves.toEqual({ txid: txid(3) });
+
+        expect(fake.calls("z_sendmany")).toHaveLength(1);
+        expect(fake.calls("z_getoperationresult")).toHaveLength(2);
+        expect(fake.calls("z_getoperationstatus")).toHaveLength(1);
         expect(fake.calls("z_listtransactions")).toHaveLength(2);
       });
     });
 
     it("op timeout reconciles by memo and never resends", async () => {
-      fake.on("z_getoperationresult", { result: [opPending()] });
+      fake.on("z_getoperationresult", { result: [] });
+      fake.on("z_getoperationstatus", { result: [opRunning()] });
       fake.on("z_listtransactions", { result: [txRow({ txid: txid(5), minedHeight: null, outputs: [{ memo: MEMO }] })] });
 
       await expect(send(make())).resolves.toEqual({ txid: txid(5) });
@@ -288,6 +380,7 @@ describe("ZalletRpcWallet", () => {
 
     it("op timeout with no matching transaction throws DepositStatusUnknownError naming the memo", async () => {
       fake.on("z_getoperationresult", { result: [] });
+      fake.on("z_getoperationstatus", { result: [opRunning()] });
 
       const error = await send(make()).catch((e: unknown) => e);
 
@@ -325,7 +418,8 @@ describe("ZalletRpcWallet", () => {
       });
 
       it("keeps polling the operation while the ledger has nothing, then finds the row", async () => {
-        fake.on("z_getoperationresult", { error: { code: -32603, message: "internal error" } }, { result: [opPending()] }, { result: [opPending()] });
+        fake.on("z_getoperationresult", { error: { code: -32603, message: "internal error" } }, { result: [] }, { result: [] });
+        fake.on("z_getoperationstatus", { result: [opRunning()] });
         fake.on(
           "z_listtransactions",
           { result: [] },
