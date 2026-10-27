@@ -15,11 +15,10 @@ const LIVE_STATES: ReadonlySet<LocalDeposit["state"]> = new Set(["sending", "sen
 /** No snapshot or settle ack ever moves a deposit out of these */
 const TERMINAL_STATES: ReadonlySet<LocalDeposit["state"]> = new Set(["dead", "rejected"]);
 
-/** One of our deposits a snapshot lists as confirmed or final */
+/** One of our deposits a snapshot lists as confirmed or final, without a height as the snapshot cannot pin one */
 export interface ConfirmedDeposit {
   index: number;
   txid: string;
-  height?: number;
 }
 
 /** What the client knows about one `payTo` + network session. Pure state: no I/O, no timers. */
@@ -102,10 +101,7 @@ export class Session {
       if (listed.status !== "confirmed" && listed.status !== "final") continue;
       const local = this.find(listed.txid);
       if (local === undefined || TERMINAL_STATES.has(local.state) || !this.noteConfirmed(listed.txid)) continue;
-      // With one confirmation the block may be ahead of the snapshot's cached tip
-      const height = listed.confirmations >= 2 ? s.tip - listed.confirmations + 1 : undefined;
-      const deposit: ConfirmedDeposit = { index: local.index, txid: listed.txid };
-      found.push(height === undefined ? deposit : { ...deposit, height });
+      found.push({ index: local.index, txid: listed.txid });
     }
     return found;
   }

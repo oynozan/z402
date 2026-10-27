@@ -449,10 +449,10 @@ describe("Session.newlyConfirmed", () => {
     expect(s.newlyConfirmed(snap)).toEqual([]);
   });
 
-  it("gives the height when the confirmations pin it, tip minus confirmations plus one", () => {
+  it("never gives a height, as the snapshot's tip need not be the one its confirmations were counted at", () => {
     const s = sessionWith([1, "acked", TX]);
     const snap = snapshot({ deposits: [{ ...snapshotDeposit(TX, "confirmed"), confirmations: 3 }] });
-    expect(s.newlyConfirmed({ ...snap, tip: 1200 })).toEqual([{ index: 1, txid: TX, height: 1198 }]);
+    expect(s.newlyConfirmed({ ...snap, tip: 1200 })).toEqual([{ index: 1, txid: TX }]);
   });
 
   it("skips pending, orphaned and dead entries, txids that are not ours and our dead or rejected deposits", () => {

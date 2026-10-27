@@ -1,6 +1,6 @@
 import type { PaymentResponseContext } from "@x402/core/client";
 import type { SettleResponse } from "@x402/core/types";
-import { isDepositDead, REASON, type SessionSnapshot, type Terms, type TxStatusSource } from "@z402/protocol";
+import { REASON, type SessionSnapshot, type Terms, type TxStatusSource } from "@z402/protocol";
 import type { Clock } from "./clock.js";
 import type { ClientEvent } from "./events.js";
 import type { Mutex } from "./mutex.js";
@@ -56,7 +56,6 @@ const CHAIN_UNAVAILABLE_BACKOFF_MS = 5_000;
 const UNEXPECTED_ERROR_BACKOFF_MS = 1_000;
 
 const DEPOSIT_REQUIRED_WHILE_PRESENTED = "z402_deposit_required_while_presented";
-const DEPOSIT_DEAD_BUT_ALIVE = "z402_deposit_dead_but_alive";
 const SNAPSHOT_SESSION_MISMATCH = "snapshot_session_mismatch";
 
 const RECOVERING_ACTIONS: ReadonlySet<Action> = new Set([
@@ -131,7 +130,7 @@ async function refused(
   const { session } = state;
   if (snapshot !== undefined) core.tracked(state, () => session.applySnapshot(snapshot));
 
-  const halt = await unaccountedDeposit(core, attempt, code, snapshot);
+  const halt = unaccountedDeposit(attempt, code, snapshot);
   const action = actionFor(code, { isFinal, canDeposit: core.canDeposit(state) });
   const recovering =
     halt === undefined && (action === "resync" ? snapshot !== undefined : RECOVERING_ACTIONS.has(action));
@@ -181,43 +180,20 @@ async function refused(
   }
 }
 
-/** The halt for a refusal asking to replace a presented deposit that may still count (protocol.md §7.3) */
-async function unaccountedDeposit(
-  core: SchemeCore,
+/** The halt for deposit_required while the presented deposit is not known dead or orphaned (protocol.md §7.3) */
+function unaccountedDeposit(
   attempt: Attempt,
   code: string,
   snapshot: SessionSnapshot | undefined,
-): Promise<{ code: string; message: string } | undefined> {
+): { code: string; message: string } | undefined {
   const txid = attempt.depositTxid;
-  if (txid === undefined) return undefined;
-  if (code === REASON.depositRequired) {
-    const status = snapshot?.deposits.find((d) => d.txid === txid)?.status;
-    if (status === "dead" || status === "orphaned") return undefined;
-    return {
-      code: DEPOSIT_REQUIRED_WHILE_PRESENTED,
-      message: `${code} while the presented deposit ${txid} is unaccounted for, stopping rather than paying again`,
-    };
-  }
-  if (code === REASON.depositDead && (await aliveOnChain(core.chain, txid))) {
-    return {
-      code: DEPOSIT_DEAD_BUT_ALIVE,
-      message: `${code} for deposit ${txid}, which our own chain still has alive, stopping rather than paying again`,
-    };
-  }
-  return undefined;
-}
-
-/** True only when our chain has the tx mined, or unmined in the mempool before its expiry */
-async function aliveOnChain(chain: TxStatusSource, txid: string): Promise<boolean> {
-  try {
-    const status = await chain.status(txid);
-    if (!status.found || status.location === "orphaned") return false;
-    if (status.location === "mined") return true;
-    return !isDepositDead({ minedHeight: null, expiryHeight: status.expiryHeight, tip: await chain.tip() });
-  } catch {
-    // Without an answer from our own chain the facilitator's verdict stands
-    return false;
-  }
+  if (txid === undefined || code !== REASON.depositRequired) return undefined;
+  const status = snapshot?.deposits.find((d) => d.txid === txid)?.status;
+  if (status === "dead" || status === "orphaned") return undefined;
+  return {
+    code: DEPOSIT_REQUIRED_WHILE_PRESENTED,
+    message: `${code} while the presented deposit ${txid} is unaccounted for, stopping rather than paying again`,
+  };
 }
 
 function messageOf(settle: SettleResponse | undefined, code: string): string {

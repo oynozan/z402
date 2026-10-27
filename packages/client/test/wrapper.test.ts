@@ -100,23 +100,31 @@ describe("stock @x402/fetch wrapper against a scripted merchant", () => {
     expect(wallet.sent).toHaveLength(1);
   });
 
-  it("final refusal resolves to a 402 Response, not a throw", async () => {
+  it("a cheat-mode refusal at the limit resolves to a 402 Response, not a throw", async () => {
     const chain = new FakeChain();
     const wallet = new MockWallet(chain);
-    merchant = await startScriptedMerchant((payload) => ({
-      kind: "refused",
-      code: REASON.depositRequired,
-      session: snapshotFor(voucherOf(payload).sessionKey),
-    }));
-    const paidFetch = paidFetchWith(wallet, chain, { maxDeposits: 1 });
+    const events: ClientEvent[] = [];
+    const seen: PaymentPayload[] = [];
+    merchant = await startScriptedMerchant((payload, n) => {
+      seen.push(payload);
+      const { sessionKey, depositTxid } = voucherOf(payload);
+      if (n === 1) {
+        return { kind: "settled", transaction: depositTxid, session: snapshotFor(sessionKey, { cumulative: 500n, limit: 500n }) };
+      }
+      return { kind: "refused", code: REASON.depositRequired, session: snapshotFor(sessionKey, { cumulative: 500n, limit: 500n }) };
+    });
+    const paidFetch = paidFetchWith(wallet, chain, { maxDeposits: 1, onEvent: (e) => events.push(e) });
 
+    expect((await paidFetch(merchant.url)).status).toBe(200);
     const res = await paidFetch(merchant.url);
 
     expect(res.status).toBe(402);
     expect(decodePaymentRequiredHeader(res.headers.get("PAYMENT-REQUIRED")!).error).toBe("z402_deposit_required");
-    // Cheat mode has no deposit left to recover with, so the first refusal already ends the exchange
-    expect(merchant.hops).toBe(2);
+    // The acked deposit is not presented again, and with no deposit left the refusal ends the exchange
+    expect(voucherOf(seen[1]!).depositTxid).toBeUndefined();
+    expect(merchant.hops).toBe(4);
     expect(wallet.sent).toHaveLength(1);
+    expect(events.filter((e) => e.type === "fatal")).toEqual([]);
   });
 
   it("a merchant that keeps asking for a deposit while ignoring the presented one gets exactly one", async () => {

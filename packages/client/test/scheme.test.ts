@@ -643,12 +643,11 @@ describe("onPaymentResponse refusals", () => {
     expect(ofType(events, "deposit_acked")).toEqual([]);
   });
 
-  it("deposit_dead redeposits with the next index once our own chain has lost the tx too", async () => {
-    const { chain, wallet, events, hook, pay } = setup();
+  it("deposit_dead redeposits with the next index", async () => {
+    const { wallet, events, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
     const t1 = voucher(r1).depositTxid as string;
-    chain.drop(t1);
     await expect(hook(refused(R, r1, REASON.depositDead, snap(0n, 0n, [dep(t1, "dead")])))).resolves.toEqual({
       recovered: true,
     });
@@ -659,20 +658,18 @@ describe("onPaymentResponse refusals", () => {
   });
 
   it("deposit_dead without a snapshot marks the presented txid dead", async () => {
-    const { chain, scheme, wallet, hook, pay } = setup();
+    const { scheme, wallet, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
-    chain.drop(voucher(r1).depositTxid as string);
     await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
     expect(scheme.session(PAY_TO)?.deposits.map((d) => d.state)).toEqual(["dead", "sent"]);
     expect(wallet.sent).toHaveLength(2);
   });
 
   it("deposit_dead in cheat mode marks it dead and stops", async () => {
-    const { chain, scheme, wallet, hook, pay } = setup({ maxDeposits: 1 });
+    const { scheme, wallet, hook, pay } = setup({ maxDeposits: 1 });
     const R = makeReq();
     const r1 = await pay(R);
-    chain.drop(voucher(r1).depositTxid as string);
     await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toBeUndefined();
     expect(scheme.session(PAY_TO)?.deposits.map((d) => d.state)).toEqual(["dead"]);
     expect(wallet.sent).toHaveLength(1);
@@ -871,85 +868,50 @@ describe("a deposit request while the presented deposit is unaccounted for", () 
   });
 });
 
-describe("deposit_dead for a deposit our own chain still sees", () => {
-  const HALT = "z402_deposit_dead_but_alive";
-
-  it("halts without a redeposit while the tx is in the mempool before its expiry", async () => {
-    const { wallet, events, hook, pay } = setup();
+describe("deposit_dead follows protocol.md §8 whatever our own chain sees", () => {
+  it("marks the txid dead and redeposits inline while our chain still has the tx in its mempool", async () => {
+    const { chain, scheme, wallet, events, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
     const t1 = voucher(r1).depositTxid as string;
+    expect(await chain.statusSource().status(t1)).toMatchObject({ found: true, location: "mempool" });
 
-    await expect(hook(refused(R, r1, REASON.depositDead, snap(0n, 0n, [dep(t1, "dead")])))).resolves.toBeUndefined();
+    await expect(hook(refused(R, r1, REASON.depositDead, snap(0n, 0n, [dep(t1, "dead")])))).resolves.toEqual({
+      recovered: true,
+    });
 
-    expect(wallet.sent).toHaveLength(1);
-    const fatal = ofType(events, "fatal");
-    expect(fatal.map((e) => e.code)).toEqual([HALT]);
-    expect(fatal[0]!.message).toContain(t1);
-    await expect(pay(makeReq())).rejects.toThrow(HALT);
-    expect(wallet.sent).toHaveLength(1);
+    expect(scheme.session(PAY_TO)?.deposits.map((d) => d.state)).toEqual(["dead", "sent"]);
+    expect(wallet.sent).toHaveLength(2);
+    expect(ofType(events, "fatal")).toEqual([]);
+    const [, second] = ofType(events, "deposit_broadcast");
+    expect(voucher(await pay(R)).depositTxid).toBe(second?.txid);
   });
 
-  it("halts when the tx is already mined", async () => {
-    const { chain, wallet, hook, pay } = setup();
+  it("the same for a tx our chain has mined", async () => {
+    const { chain, wallet, events, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
     chain.mine();
-    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toBeUndefined();
-    await expect(pay(makeReq())).rejects.toThrow(HALT);
-    expect(wallet.sent).toHaveLength(1);
+    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
+    expect(wallet.sent).toHaveLength(2);
+    expect(ofType(events, "fatal")).toEqual([]);
   });
 
-  it("halts on the final attempt too, without a background deposit", async () => {
-    const { wallet, hook, pay } = setup();
+  it("on the final attempt marks it dead and starts a background deposit, with no fatal", async () => {
+    const { scheme, wallet, events, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
     await hook(refused(R, r1, REASON.cumulativeMismatch, snap(1000n, 125_000n)));
     const r2 = await pay(R);
+    const t1 = voucher(r2).depositTxid as string;
+
     await expect(hook(refused(R, r2, REASON.depositDead))).resolves.toBeUndefined();
     await flush();
-    expect(wallet.sent).toHaveLength(1);
-    await expect(pay(makeReq())).rejects.toThrow(HALT);
-  });
 
-  it("redeposits when our chain still lists the tx in the mempool at its expiry", async () => {
-    const chain = new FakeChain();
-    const inner = chain.statusSource();
-    let stale: string | undefined;
-    const source: TxStatusSource = {
-      tip: () => inner.tip(),
-      status: async (txid) =>
-        txid === stale
-          ? { found: true, location: "mempool", minedHeight: null, expiryHeight: chain.height }
-          : inner.status(txid),
-    };
-    const { wallet, events, hook, pay } = setup({ chain, source });
-    const R = makeReq();
-    const r1 = await pay(R);
-    stale = voucher(r1).depositTxid as string;
-    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
+    expect(scheme.session(PAY_TO)?.deposits.find((d) => d.txid === t1)?.state).toBe("dead");
     expect(wallet.sent).toHaveLength(2);
     expect(ofType(events, "fatal")).toEqual([]);
-  });
-
-  it("redeposits when our chain has the tx orphaned", async () => {
-    const { chain, wallet, hook, pay } = setup();
-    const R = makeReq();
-    const r1 = await pay(R);
-    chain.mine();
-    chain.orphan(voucher(r1).depositTxid as string);
-    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
-    expect(wallet.sent).toHaveLength(2);
-  });
-
-  it("keeps the redeposit when our chain cannot answer", async () => {
-    const { chain, wallet, events, hook, pay } = setup();
-    const R = makeReq();
-    const r1 = await pay(R);
-    chain.setUnavailable(true);
-    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
-    expect(wallet.sent).toHaveLength(2);
-    expect(ofType(events, "fatal")).toEqual([]);
+    await expect(pay(makeReq())).resolves.toBeDefined();
   });
 });
 
@@ -1027,16 +989,14 @@ describe("deposit_confirmed from snapshots", () => {
     expect(ofType(events, "deposit_confirmed")).toHaveLength(1);
   });
 
-  it("carries the height when the snapshot's confirmations pin it", async () => {
+  it("carries no height, even with several confirmations, as the snapshot's tip need not be theirs", async () => {
     const { events, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
     const t1 = voucher(r1).depositTxid as string;
     const session = snap(500n, 125_000n, [{ ...dep(t1, "confirmed"), confirmations: 3 }]);
     await hook(paid(R, r1, { transaction: t1, session }));
-    expect(ofType(events, "deposit_confirmed")).toEqual([
-      { type: "deposit_confirmed", txid: t1, index: 1, height: 998, snapshot: session },
-    ]);
+    expect(ofType(events, "deposit_confirmed")).toEqual([{ type: "deposit_confirmed", txid: t1, index: 1, snapshot: session }]);
   });
 
   it("is not repeated after the wait for a block already reported it", async () => {
