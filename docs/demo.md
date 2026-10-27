@@ -62,7 +62,7 @@ The agent prints one line per paid call:
 | 6 | Cheat run | Ctrl-C the honest run, wait for a new block line in terminal 2, then `scripts/demo.sh cheat` | See below. |
 | 7 | Privacy | `scripts/demo.sh show` | See below. |
 
-The honest run takes about 160 s to finish. For a 3-minute video, let it run through beat 5 (about call 90, when D2 confirms), then press Ctrl-C once and wait for the agent to print `interrupted`.
+The honest run takes about 160 s to finish. For a 3-minute video, let it run through beat 5 (about call 90, when D2 confirms), then press Ctrl-C once and wait for the agent to print `interrupted`, which is its last line. The script runs the agent with its own `tsx` rather than through pnpm, so no pnpm error box follows it.
 
 Beat 2 as it looks, with the event lines that come with D1:
 
@@ -165,6 +165,7 @@ At p = 500 zat and one call per second (`docs/spec/protocol.md` section 12). The
 - **The agent exits at preflight** with `the wallet has N zat spendable, the demo needs at least 250,000 zat`. Run `bash infra/z3/fund-agent.sh`, then `scripts/demo.sh status`.
 - **`up` says Docker did not answer within 10 s.** Start Docker Desktop and wait until it reports running, then retry.
 - **`honest` or `cheat` says nothing listens on 4021 or 4022.** Run `scripts/demo.sh up`.
+- **`honest` or `cheat` says `apps/agent/node_modules/.bin/tsx is missing`.** Run `pnpm install` at the repo root.
 - **After `bash infra/z3/down.sh --wipe`.** The chain restarts from height 0, so the old ledger no longer matches. Run `scripts/demo.sh down --wipe-ledger`, then `scripts/demo.sh up`, then `bash infra/z3/fund-agent.sh`. The script never touches Docker, so it does not wipe the volumes itself.
 - **`down` warns that a process ignored SIGINT.** It escalates to SIGTERM by itself. If it still cannot stop the process, it prints a `kill -9` command that names the process group and the pids of the descendants it found, either the leader's or, when the leader is already gone, those of the group members that are left. Run that whole command. pnpm 12 starts the package script in its own process group, so the group alone would leave the server running on its port. `down --wipe-ledger` keeps the ledger when any process failed to stop.
 
@@ -180,7 +181,7 @@ Nothing needs resetting. Each agent run is a new session with a new session key,
 | Path | What |
 |---|---|
 | `.data/demo/facilitator.log`, `api.log`, `clock.log` | Process output. A start moves the previous log to `<name>.log.prev`, so the log of a crashed run survives the restart. |
-| `.data/demo/*.pid` | Pidfiles. Line 1 is the pid, which is also the process group id. Line 2 is the process start time. The script only signals a process that has that start time and the command line it spawned (for example `--filter @z402/facilitator start`), or a leaderless group in which a member still has it. That makes signalling an unrelated process that reused the pid very unlikely. |
+| `.data/demo/*.pid` | Pidfiles. Line 1 is the pid, which is also the process group id. Line 2 is the process start time. The script signals a process group only when its leader has that start time and the command line it spawned (for example `--filter @z402/facilitator start`), or, once the leader has exited, when a member of the group still has that command line. Besides the group, it signals the descendants of that leader or of those members, because pnpm 12 starts the server in a process group of its own. That makes signalling an unrelated process that reused the pid very unlikely. |
 | `.data/demo/token` | The facilitator token, mode 600, generated once. |
 | `.data/facilitator-ledger.regtest.jsonl` | The facilitator ledger. |
 | `.secrets/merchant-regtest.json` | The merchant keys. The script never prints the viewing key. |

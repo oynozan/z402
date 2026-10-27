@@ -34,6 +34,7 @@ API_URL="http://127.0.0.1:$API_PORT"
 FAC_READY="facilitator listening on $FAC_URL"
 API_READY="api listening on $API_URL"
 CLOCK_READY="block clock:"
+AGENT_TSX="$ROOT/apps/agent/node_modules/.bin/tsx"
 READY_TIMEOUT=60
 CLOCK_EVERY=25
 FLOOR_ZAT=250000
@@ -327,12 +328,19 @@ cmd_clock() {
 
 # Refuses to start an agent run against a stack that is not listening
 agent_preflight() {
-  need pnpm
+  need node
+  [ -x "$AGENT_TSX" ] || die "apps/agent/node_modules/.bin/tsx is missing, run pnpm install at the repo root"
   port_open "$FAC_PORT" || die "nothing listens on $FAC_URL, run scripts/demo.sh up"
   port_open "$API_PORT" || die "nothing listens on $API_URL, run scripts/demo.sh up"
   if ! is_alive clock; then
     warn "the block clock is not running, so no deposit will confirm (start it with scripts/demo.sh clock)"
   fi
+}
+
+# Runs the agent without pnpm, whose lifecycle wrapper prints a red ELIFECYCLE box when Ctrl-C ends it with 130
+run_agent() {
+  cd "$ROOT/apps/agent"
+  exec ./node_modules/.bin/tsx src/main.ts "$@"
 }
 
 cmd_honest() {
@@ -356,15 +364,13 @@ cmd_honest() {
   esac
   [ "${#calls}" -le 10 ] || die "--calls: $calls is too large"
   agent_preflight
-  cd "$ROOT"
-  exec pnpm --filter @z402/agent demo --calls "$calls" --interval-ms 1000
+  run_agent --calls "$calls" --interval-ms 1000
 }
 
 cmd_cheat() {
   [ $# -eq 0 ] || die "cheat takes no arguments"
   agent_preflight
-  cd "$ROOT"
-  exec pnpm --filter @z402/agent demo --cheat --interval-ms 0 --calls 400
+  run_agent --cheat --interval-ms 0 --calls 400
 }
 
 # Deposit memo transactions of the agent wallet, newest first, without expired or zero-value ones
@@ -553,7 +559,7 @@ wait_gone() {
 }
 
 stop_proc() {
-  local name="$1" pid desc="" d
+  local name="$1" pid desc="" d members
   if [ ! -f "$DATA/$name.pid" ]; then
     info "$name: no pidfile, nothing to stop"
     return 0
@@ -575,8 +581,12 @@ stop_proc() {
   kill -s INT -- "-$pid" 2>/dev/null || true
   if ! wait_gone "$pid" 20 "$desc"; then
     warn "$name ignored SIGINT for 20s, sending SIGTERM"
+    # Members get only the group TERM, since pnpm-native quits on a second one and orphans the server
+    members=" $(group_members "$pid" | tr '\n' ' ') "
     kill -s TERM -- "-$pid" 2>/dev/null || true
-    for d in $desc; do kill -s TERM "$d" 2>/dev/null || true; done
+    for d in $desc; do
+      case "$members" in *" $d "*) ;; *) kill -s TERM "$d" 2>/dev/null || true ;; esac
+    done
     if ! wait_gone "$pid" 10 "$desc"; then
       warn "$name is still running, force it with: kill -9 -- -$pid $desc"
       return 1
