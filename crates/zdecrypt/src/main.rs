@@ -1,6 +1,6 @@
 //! zdecrypt CLI.
 //!
-//! keygen [--seed-hex HEX]                      fresh account, prints UFVK, UIVK and a shielded-only UA
+//! keygen [--seed-hex HEX]                      fresh account, prints seedHex, UFVK, UIVK and a shielded-only UA
 //! derive-uivk                                  UFVK to UIVK
 //! decrypt (--height H | --tip T) [--pay-to UA] [--expect-memo M --min-zat Z]
 //!         [--tx-hex HEX | --tx-file PATH | hex on stdin]
@@ -9,13 +9,23 @@
 //! build-test ...                               testbuild feature only, see testbuild.rs
 //!
 //! Every subcommand takes --network regtest|testnet|mainnet, else env ZDECRYPT_NETWORK, else
-//! testnet. The key and every address must belong to that network. The key comes from ZDECRYPT_KEY
-//! (preferred, argv is visible in ps) or --key. --height is the mined height. --tip is the chain tip
-//! for a mempool tx, which is judged at tip + 1. With --expect-memo and --min-zat the report carries
-//! a verdict for the z402 deposit rule. Output is one JSON object on stdout. Exit 0 on success, 2 on
+//! testnet. The key and every address must belong to that network. The key comes from env
+//! ZDECRYPT_KEY only, never from argv, which is visible in ps. A value flag is written as
+//! `--name value` or `--name=value`. --height is the mined height. --tip is the chain tip for a
+//! mempool tx, which is judged at tip + 1. With --expect-memo and --min-zat the report carries a
+//! verdict for the z402 deposit rule. Output is one JSON object on stdout. Exit 0 on success, 2 on
 //! any error with an error object on stdout.
+//!
+//! An argument error is fixed text. It names a flag from the known list or the position of the
+//! argument, and never repeats what was typed, because a key or a seed may have landed in the wrong
+//! place.
+//!
+//! keygen prints the seed as seedHex on stdout. With --network mainnet that seed controls real
+//! money, so redirect the output to a file that only you can read, mode 0600, which is what the
+//! shell creates for `> file` under umask 077.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{BufRead, Read, Write};
 
 use serde_json::{json, Value};
@@ -30,26 +40,92 @@ fn fail(msg: impl Into<String>) -> ! {
 }
 
 struct Args {
-    cmd: String,
+    cmd: &'static str,
     flags: HashMap<String, String>,
     switches: Vec<String>,
 }
 
+// Listed in every build, so the unknown-command message reads the same whatever features the binary has
+const COMMANDS: [&str; 6] = ["keygen", "derive-uivk", "decrypt", "owns", "serve", "build-test"];
 const SWITCHES: &[&str] = &["--pretty"];
+/// Flags that take a value, written as `--name value` or `--name=value`
+const VALUE_FLAGS: &[&str] = &[
+    "--network",
+    "--seed-hex",
+    "--height",
+    "--tip",
+    "--pay-to",
+    "--expect-memo",
+    "--min-zat",
+    "--tx-hex",
+    "--tx-file",
+    "--address",
+    #[cfg(feature = "testbuild")]
+    "--merchant-address",
+    #[cfg(feature = "testbuild")]
+    "--value",
+    #[cfg(feature = "testbuild")]
+    "--memo",
+    #[cfg(feature = "testbuild")]
+    "--agent-seed-hex",
+];
 
+fn usage() -> String {
+    format!(
+        "usage: zdecrypt <{}> [flags] (the key is read from ZDECRYPT_KEY only; keygen prints a seedHex to stdout, so redirect it to a 0600 file)",
+        COMMANDS.join("|")
+    )
+}
+
+fn unknown_command() -> ! {
+    fail(format!("unknown command (expected one of: {})", COMMANDS.join(", ")))
+}
+
+fn unexpected(position: usize) -> String {
+    format!("unexpected argument at position {position}")
+}
+
+// A token that is not Unicode is reported by position, because args() would panic with it in the message
+fn unicode(position: usize, token: OsString) -> String {
+    token.into_string().unwrap_or_else(|_| fail(unexpected(position)))
+}
+
+// Every error here is fixed text, a flag name from the lists above or a position, never a token from argv
 fn parse_args() -> Args {
-    let mut it = std::env::args().skip(1);
-    let cmd = it.next().unwrap_or_else(|| fail("usage: zdecrypt <keygen|derive-uivk|decrypt|owns|serve|build-test> [flags]"));
+    let mut argv = std::env::args_os().enumerate().skip(1);
+    let Some((position, token)) = argv.next() else { fail(usage()) };
+    let token = unicode(position, token);
+    let cmd = COMMANDS.into_iter().find(|c| *c == token).unwrap_or_else(|| unknown_command());
+    if cmd == "build-test" && !cfg!(feature = "testbuild") {
+        unknown_command();
+    }
     let mut flags = HashMap::new();
     let mut switches = Vec::new();
-    while let Some(a) = it.next() {
-        if SWITCHES.contains(&a.as_str()) {
-            switches.push(a);
-        } else if a.starts_with("--") {
-            let v = it.next().unwrap_or_else(|| fail(format!("{a} needs a value")));
-            flags.insert(a, v);
+    while let Some((position, token)) = argv.next() {
+        let token = unicode(position, token);
+        let (name, inline) = match token.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (token.as_str(), None),
+        };
+        if name == "--key" {
+            fail("the key is read from ZDECRYPT_KEY only");
+        }
+        if let Some(switch) = SWITCHES.iter().copied().find(|s| *s == name) {
+            if inline.is_some() {
+                fail(unexpected(position));
+            }
+            switches.push(switch.to_string());
+        } else if let Some(flag) = VALUE_FLAGS.iter().copied().find(|f| *f == name) {
+            let value = match inline {
+                Some(value) => value.to_string(),
+                None => match argv.next() {
+                    Some((position, value)) => unicode(position, value),
+                    None => fail(format!("{flag} needs a value")),
+                },
+            };
+            flags.insert(flag.to_string(), value);
         } else {
-            fail(format!("unexpected argument {a}"));
+            fail(unexpected(position));
         }
     }
     Args { cmd, flags, switches }
@@ -64,16 +140,15 @@ fn net_from(args: &Args) -> Net {
             None => return Net::Testnet,
         },
     };
-    // The value is not echoed because a misplaced key would be printed with it
+    // Errors carry fixed text only, never the value that was given
     value.parse().unwrap_or_else(|e| fail(format!("{source} {e}")))
 }
 
-fn key_from(args: &Args, net: Net) -> Keys {
+fn key_from(net: Net) -> Keys {
     let s = std::env::var("ZDECRYPT_KEY")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| args.flags.get("--key").cloned())
-        .unwrap_or_else(|| fail(format!("set ZDECRYPT_KEY (or --key) to a {} UIVK or UFVK", net.name())));
+        .unwrap_or_else(|| fail(format!("set ZDECRYPT_KEY to a {} UIVK or UFVK", net.name())));
     decode_key(&s, net).unwrap_or_else(|e| fail(e))
 }
 
@@ -101,7 +176,11 @@ fn expect_from(memo: Option<String>, min_zat: Option<String>) -> Result<Option<E
 }
 
 fn hex_bytes(s: &str) -> Result<Vec<u8>, String> {
-    hex::decode(s.trim()).map_err(|e| format!("tx is not hex: {e}"))
+    hex::decode(s.trim()).map_err(|e| match e {
+        // The bad character is left out because the input may be a key typed in the wrong place
+        hex::FromHexError::InvalidHexCharacter { index, .. } => format!("tx is not hex: invalid character at position {index}"),
+        _ => format!("tx is not hex: {e}"),
+    })
 }
 
 fn emit(v: &Value, pretty: bool) {
@@ -154,7 +233,7 @@ fn main() {
     let args = parse_args();
     let net = net_from(&args);
     let pretty = args.switches.iter().any(|s| s == "--pretty");
-    match args.cmd.as_str() {
+    match args.cmd {
         "keygen" => {
             let mut seed = [0u8; 32];
             match args.flags.get("--seed-hex") {
@@ -167,16 +246,16 @@ fn main() {
             emit(&keygen(&seed, net).unwrap_or_else(|e| fail(e)), pretty);
         }
         "derive-uivk" => {
-            let keys = key_from(&args, net);
+            let keys = key_from(net);
             emit(&json!({ "uivk": encode_uivk(&keys).unwrap_or_else(|e| fail(e)), "from": keys.kind() }), pretty);
         }
         "decrypt" => {
-            let keys = key_from(&args, net);
+            let keys = key_from(net);
             let at = at_from(args.flags.get("--height"), args.flags.get("--tip")).unwrap_or_else(|e| fail(e));
             let hex_text = if let Some(h) = args.flags.get("--tx-hex") {
                 h.clone()
             } else if let Some(p) = args.flags.get("--tx-file") {
-                std::fs::read_to_string(p).unwrap_or_else(|e| fail(format!("cannot read {p}: {e}")))
+                std::fs::read_to_string(p).unwrap_or_else(|e| fail(format!("cannot read --tx-file: {e}")))
             } else {
                 let mut s = String::new();
                 std::io::stdin().read_to_string(&mut s).unwrap_or_else(|e| fail(format!("cannot read stdin: {e}")));
@@ -189,13 +268,13 @@ fn main() {
             emit(&inspect_expect(&raw, &keys, at, pay_to.as_ref(), expect.as_ref()).unwrap_or_else(|e| fail(e)), pretty);
         }
         "owns" => {
-            let keys = key_from(&args, net);
+            let keys = key_from(net);
             let ua = decode_ua(args.flags.get("--address").unwrap_or_else(|| fail("--address is required")), net).unwrap_or_else(|e| fail(e));
             emit(&pay_to_info(&keys, &ua), pretty);
         }
-        "serve" => serve(&key_from(&args, net)),
+        "serve" => serve(&key_from(net)),
         #[cfg(feature = "testbuild")]
         "build-test" => emit(&zdecrypt::testbuild::run(&args.flags, net).unwrap_or_else(|e| fail(e)), pretty),
-        other => fail(format!("unknown command {other}")),
+        _ => unknown_command(),
     }
 }
