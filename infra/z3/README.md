@@ -34,6 +34,28 @@ once mined.
 | Zallet JSON-RPC | `http://127.0.0.1:50232` | Basic `zebra:zebra` |
 | Zaino gRPC (`cash.z.wallet.sdk.rpc.CompactTxStreamer`) | `http://127.0.0.1:28137` | none, plaintext h2c |
 
+Every port the stack publishes (Zebra RPC 29232 and health 28080, Zaino gRPC 28137 and
+JSON-RPC 28237, Zallet RPC 50232) binds to `127.0.0.1` only, through
+[`compose.loopback.yml`](compose.loopback.yml). Z3's own compose files publish them on every
+interface, which put Zebra's unauthenticated RPC and Zallet's `zebra:zebra` RPC on the LAN.
+One gap remains: on the very first run, Z3's `scripts/regtest-init.sh` starts Zebra once with
+Z3's own two files, so Zebra listens on every interface for the minute the wallet takes to
+initialise, until `up.sh` recreates it with the loopback binding.
+
+### Applying the loopback binding to a running stack
+
+Docker fixes a container's port bindings when it creates the container, so a stack started
+before `compose.loopback.yml` existed keeps listening on every interface until its containers
+are recreated. The next `bash infra/z3/up.sh` does that: Compose sees the changed ports and
+recreates zebra, zallet and zaino. The volumes persist, so the chain, the wallet and Zaino's
+index survive, and `up.sh` skips the wallet initialisation as usual. Zebra, Zallet and Zaino are
+down while that runs, so stop anything that uses them first (`scripts/demo.sh down` stops the
+clock, the API and the facilitator). Afterwards
+`lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(29232|28080|28137|28237|50232) '` shows
+`127.0.0.1:<port>` instead of `*:<port>`. Colima's port forwarder maps a port bound to
+`127.0.0.1` in the VM to `127.0.0.1` on the host, and one bound to `0.0.0.0` to every host
+interface.
+
 The agent is Zallet account 0. `AGENT_UA` is its Orchard-only UA at diversifier index 1:
 `z_getaddressforaccount [<account_uuid>, ["orchard"], 1]` returns the same address every time.
 After `down.sh --wipe` the seed, account and `AGENT_UA` are new.
@@ -50,9 +72,11 @@ After `down.sh --wipe` the seed, account and `AGENT_UA` are new.
   `@grpc/grpc-js` from `.tools/grpc-probe` and the protos from `.tools/lightwallet-protocol`,
   both installed by `up.sh`. gRPC errors print as `{code, codeName, details}` and exit 3.
 - `lib.sh`: shared paths and helpers for the shell scripts.
-- `test/guard.sh`: regression checks for the wallet-init guard and the compose project pin.
-  It runs `up.sh` and `down.sh --wipe` against a fake `docker` with `DOCKER_HOST` pointed at a
-  dead socket, so it cannot touch the live stack.
+- `compose.loopback.yml`: the third compose file, which binds the published ports to `127.0.0.1`.
+- `test/guard.sh`: regression checks for the wallet-init guard, the compose project pin and
+  the loopback binding. It runs `up.sh` and `down.sh --wipe` against a fake `docker` with
+  `DOCKER_HOST` pointed at a dead socket, and reads the merged config with the real
+  `docker compose config` against that same dead socket, so it cannot touch the live stack.
 
 ## What up.sh changes in Z3
 
@@ -73,10 +97,13 @@ volumes named `z3-regtest-*`.
 - Creates account 0 and the transparent miner address with
   `zallet regtest generate-account-and-miner-address` before Zallet's first start, and keeps
   the address in the wallet volume (`z402-miner-address`).
-- Starts `zebra zallet`, then `--profile indexer zaino`. The rpc-router is not built.
-- Every compose call is pinned to project `z3-regtest` and the two Z3 regtest compose
-  files (`-p` and `-f`), with ambient `COMPOSE_*` and `Z3_*` variables dropped, except the
-  image overrides. A shell `COMPOSE_PROJECT_NAME` or `COMPOSE_FILE` therefore cannot point
+- Starts `zebra zallet`, then `--profile indexer zaino`. The rpc-router is not built, and
+  `compose.loopback.yml` leaves its port 8181 alone, so it would listen on every interface if
+  anyone started it.
+- Every compose call is pinned to project `z3-regtest` and three compose files (`-p` and
+  `-f`): the two Z3 regtest files, then `infra/z3/compose.loopback.yml` by absolute path, which
+  re-lists the zebra, zaino and zallet ports bound to `127.0.0.1`. Ambient `COMPOSE_*` and
+  `Z3_*` variables are dropped, except the image overrides. A shell `COMPOSE_PROJECT_NAME` or `COMPOSE_FILE` therefore cannot point
   `down --volumes` at another project on the same Docker host. `down.sh --wipe` also removes
   any leftover `z3-regtest-*` volume by name.
 

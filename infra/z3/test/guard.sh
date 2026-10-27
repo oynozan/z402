@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Regression checks for the wallet-init guard, volume matching and compose project pinning in up.sh and down.sh.
-# Runs both scripts against a fake docker on PATH with DOCKER_HOST pointed at a dead socket,
+# Regression checks for the wallet-init guard, volume matching, compose project pinning and loopback-only ports.
+# Runs up.sh and down.sh against a fake docker on PATH with DOCKER_HOST pointed at a dead socket,
+# and reads the merged compose config through the real docker CLI with that same dead socket,
 # so nothing here can reach a real daemon or the live stack.
 # Usage: bash infra/z3/test/guard.sh
 set -euo pipefail
@@ -9,6 +10,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 Z3="$(cd "$HERE/.." && pwd)"
 [ -d "$Z3/../../.tools/z3/.git" ] || { echo "SKIP: run bash infra/z3/up.sh once first (needs .tools/z3)"; exit 0; }
 
+REAL_DOCKER="$(command -v docker || true)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir "$WORK/bin"
@@ -97,7 +99,7 @@ expect_guard_death "wallet.db without a marker stops up.sh before regtest-init" 
 export SHIM_RUN=ready COMPOSE_PROJECT_NAME=evil COMPOSE_FILE=evil.yml Z3_CONFIG_DIR=/evil
 run_case up.sh
 first="$(grep '^compose' "$SHIM_LOG" | head -n1 || true)"
-want="compose -p z3-regtest -f docker-compose.yml -f docker-compose.regtest.yml --env-file .env.regtest up -d zebra zallet | COMPOSE_PROJECT_NAME=z3-regtest COMPOSE_FILE=unset Z3_CONFIG_DIR=unset"
+want="compose -p z3-regtest -f docker-compose.yml -f docker-compose.regtest.yml -f $Z3/compose.loopback.yml --env-file .env.regtest up -d zebra zallet | COMPOSE_PROJECT_NAME=z3-regtest COMPOSE_FILE=unset Z3_CONFIG_DIR=unset"
 if grep -q 'miner address already created: tmSHIMminer' "$WORK/out" && [ "$first" = "$want" ]; then
   pass "initialised wallet is skipped and compose ignores ambient COMPOSE_* and Z3_*"
 else
@@ -108,13 +110,36 @@ fi
 export SHIM_COMPOSE_RC=0 SHIM_VOLUMES="z3-regtest-zallet domture-data"
 run_case down.sh --wipe
 down_call="$(grep '^compose' "$SHIM_LOG" | head -n1 || true)"
-want="compose -p z3-regtest -f docker-compose.yml -f docker-compose.regtest.yml --env-file .env.regtest --profile * down --volumes --remove-orphans | COMPOSE_PROJECT_NAME=z3-regtest COMPOSE_FILE=unset Z3_CONFIG_DIR=unset"
+want="compose -p z3-regtest -f docker-compose.yml -f docker-compose.regtest.yml -f $Z3/compose.loopback.yml --env-file .env.regtest --profile * down --volumes --remove-orphans | COMPOSE_PROJECT_NAME=z3-regtest COMPOSE_FILE=unset Z3_CONFIG_DIR=unset"
 if [ "$rc" -eq 0 ] && [ "$down_call" = "$want" ] && grep -q '^volume rm z3-regtest-zallet ' "$SHIM_LOG" &&
   ! grep -q '^volume rm domture-data' "$SHIM_LOG"; then
   pass "down.sh --wipe is pinned to z3-regtest and removes only z3-regtest volumes"
 else
   fail "down.sh --wipe pinning (exit $rc)"
   sed 's/^/      log: /' "$SHIM_LOG"
+fi
+
+# Every port zebra, zaino and zallet publish, as the compose wrapper merges the files, must bind to loopback only
+if [ -z "$REAL_DOCKER" ] || ! "$REAL_DOCKER" compose version >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+  printf 'SKIP  merged compose config (needs the docker compose CLI and jq, no daemon)\n'
+else
+  ports="$(
+    HERE="$Z3"
+    source "$Z3/lib.sh"
+    docker() { "$REAL_DOCKER" "$@"; }
+    compose --profile indexer config --format json | jq -r '.services | to_entries[]
+      | select(.key == "zebra" or .key == "zaino" or .key == "zallet") | .key as $s
+      | .value.ports[] | "\($s) \(.host_ip // "*"):\(.published)->\(.target)"' | sort
+  )" || ports="compose config failed"
+  want="$(printf '%s\n' 'zaino 127.0.0.1:28137->8137' 'zaino 127.0.0.1:28237->8237' 'zallet 127.0.0.1:50232->28232' \
+    'zebra 127.0.0.1:28080->8080' 'zebra 127.0.0.1:29232->18232')"
+  if [ "$ports" = "$want" ]; then
+    pass "zebra, zaino and zallet publish their regtest ports on 127.0.0.1 only"
+  else
+    fail "merged compose config publishes beyond loopback"
+    printf '%s\n' "$ports" | sed 's/^/      got:  /'
+    printf '%s\n' "$want" | sed 's/^/      want: /'
+  fi
 fi
 
 [ "$failures" -eq 0 ] && echo "all guard checks passed" || { echo "$failures check(s) failed"; exit 1; }

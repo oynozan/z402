@@ -38,12 +38,13 @@ z3_env() {
   export COMPOSE_PROJECT_NAME="$Z3_PROJECT"
 }
 
+# The third file binds the zebra, zaino and zallet ports to 127.0.0.1
 compose() {
   (
     z3_env
     cd "$Z3_DIR"
     docker compose -p "$Z3_PROJECT" -f docker-compose.yml -f docker-compose.regtest.yml \
-      --env-file .env.regtest "$@"
+      -f "$HERE/compose.loopback.yml" --env-file .env.regtest "$@"
   )
 }
 

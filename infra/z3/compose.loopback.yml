@@ -1,0 +1,16 @@
+# Third file of the infra/z3/lib.sh compose wrapper, which binds the ports Z3 publishes on every interface to 127.0.0.1
+
+services:
+  zebra:
+    ports: !override
+      - "127.0.0.1:${Z3_ZEBRA_HOST_RPC_PORT:-29232}:${Z3_ZEBRA_RPC_PORT:-18232}"
+      - "127.0.0.1:${Z3_ZEBRA_HOST_HEALTH_PORT:-28080}:8080"
+
+  zaino:
+    ports: !override
+      - "127.0.0.1:${Z3_ZAINO_HOST_GRPC_PORT:-8137}:8137"
+      - "127.0.0.1:${Z3_ZAINO_HOST_JSON_RPC_PORT:-8237}:8237"
+
+  zallet:
+    ports: !override
+      - "127.0.0.1:${Z3_ZALLET_HOST_RPC_PORT:-28232}:28232"
