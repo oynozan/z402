@@ -80,6 +80,27 @@ importers:
         specifier: workspace:*
         version: link:../../packages/testkit
 
+  apps/e2e:
+    dependencies:
+      '@x402/fetch':
+        specifier: 2.28.0
+        version: 2.28.0
+      '@z402/api':
+        specifier: workspace:*
+        version: link:../api
+      '@z402/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@z402/facilitator':
+        specifier: workspace:*
+        version: link:../../packages/facilitator
+      '@z402/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@z402/testkit':
+        specifier: workspace:*
+        version: link:../../packages/testkit
+
   packages/client:
     dependencies:
       '@x402/core':
