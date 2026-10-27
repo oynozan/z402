@@ -63,6 +63,7 @@ describe("zdecryptDecrypt report", () => {
     ["is not an object", null],
     ["has no txid", without("txid")],
     ["has a numeric txid", { ...REPORT, txid: 7 }],
+    ["has no version", without("version")],
     ["has no transparentIn", without("transparentIn")],
     ["has a text transparentOut", { ...REPORT, transparentOut: "1" }],
     ["has a negative transparentIn", { ...REPORT, transparentIn: -1 }],
@@ -84,6 +85,11 @@ describe("zdecryptDecrypt report", () => {
 });
 
 describe("zdecryptOwns report", () => {
+  test("hands on both flags exactly as printed", async () => {
+    const printed = JSON.stringify({ hasTransparent: true, ownedByKey: false, orchardOwned: false });
+    await expect(owns(fakes.canned(printed).bin)).resolves.toStrictEqual({ hasTransparent: true, ownedByKey: false });
+  });
+
   test.each([
     ["ownedByKey is not a boolean", { hasTransparent: false, ownedByKey: "yes" }],
     ["hasTransparent is missing", { ownedByKey: true }],
