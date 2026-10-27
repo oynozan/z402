@@ -140,6 +140,43 @@ describe("FakeChain.mine", () => {
   });
 });
 
+describe("FakeChain.unhold", () => {
+  it("releases a held tx so the next mine includes it", async () => {
+    const chain = new FakeChain();
+    const txid = chain.broadcast({ outputs: [out()] });
+    chain.hold(txid);
+    chain.mine(2);
+    expect((await found(chain, txid)).location).toBe("mempool");
+    chain.unhold(txid);
+    chain.mine();
+    const r = await found(chain, txid);
+    expect(r.location).toBe("mined");
+    expect(r.minedHeight).toBe(1003);
+  });
+
+  it("throws for a txid that is not held, or unknown", async () => {
+    const chain = new FakeChain();
+    const pending = chain.broadcast({ outputs: [out()] });
+    expect(() => chain.unhold(pending)).toThrow(/not held/);
+    chain.hold(pending);
+    chain.unhold(pending);
+    expect(() => chain.unhold(pending)).toThrow(/not held/);
+    const mined = chain.broadcast({ outputs: [out()] });
+    chain.mine();
+    expect(() => chain.unhold(mined)).toThrow(/not held/);
+    expect(() => chain.unhold("ab".repeat(32))).toThrow(/unknown/);
+  });
+
+  it("cannot rescue a held tx that already expired", async () => {
+    const chain = new FakeChain();
+    const txid = chain.broadcast({ outputs: [out()], expiryDelta: 1 });
+    chain.hold(txid);
+    chain.mine(2);
+    expect(() => chain.unhold(txid)).toThrow(/unknown/);
+    expect(await chain.viewFor(PAY_TO).inspect(txid)).toEqual({ found: false });
+  });
+});
+
 describe("FakeChain expiry", () => {
   it("sets expiryHeight to height + 1 + delta, honouring the per-tx override", async () => {
     const chain = new FakeChain({ expiryDelta: 40 });
@@ -194,6 +231,27 @@ describe("FakeChain expiry", () => {
     chain.rebroadcast(txid);
     chain.mine();
     expect(await chain.viewFor(PAY_TO).inspect(txid)).toEqual({ found: false });
+  });
+
+  it("evicts an orphaned tx already past its expiry the moment it is rebroadcast", async () => {
+    const chain = new FakeChain();
+    const txid = chain.broadcast({ outputs: [out()], expiryDelta: 1 });
+    chain.mine(2);
+    chain.reorg(2);
+    chain.mine(2);
+    expect((await found(chain, txid)).location).toBe("orphaned");
+    chain.rebroadcast(txid);
+    expect(await chain.viewFor(PAY_TO).inspect(txid)).toEqual({ found: false });
+    expect(await chain.statusSource().status(txid)).toEqual({ found: false });
+  });
+
+  it("keeps a rebroadcast tx whose expiry the tip has not reached", async () => {
+    const chain = new FakeChain();
+    const txid = chain.broadcast({ outputs: [out()], expiryDelta: 1 });
+    chain.mine();
+    chain.orphan(txid);
+    chain.rebroadcast(txid);
+    expect((await found(chain, txid)).location).toBe("mempool");
   });
 
   it("does not expire mined txs", async () => {

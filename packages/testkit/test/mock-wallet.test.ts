@@ -56,6 +56,33 @@ describe("MockWallet", () => {
     expect(txid).toBe(new FakeChain().broadcast({ outputs: [{ to: PAY_TO, valueZat: 5n, memo: MEMO }] }));
   });
 
+  it("failNextWith fails exactly the next send, after a successful one", async () => {
+    const wallet = new MockWallet(new FakeChain());
+    const boom = new Error("wallet is locked");
+    const req = { to: PAY_TO, amountZat: 5n, memo: MEMO };
+
+    await wallet.sendDeposit(req);
+    wallet.failNextWith(boom);
+    await expect(wallet.sendDeposit(req)).rejects.toBe(boom);
+    expect(wallet.sent).toHaveLength(1);
+
+    await wallet.sendDeposit(req);
+    expect(wallet.sent).toHaveLength(2);
+  });
+
+  it("failNextWith can be armed again after it has fired", async () => {
+    const wallet = new MockWallet(new FakeChain());
+    const first = new Error("first");
+    const second = new Error("second");
+    const req = { to: PAY_TO, amountZat: 5n, memo: MEMO };
+
+    wallet.failNextWith(first);
+    await expect(wallet.sendDeposit(req)).rejects.toBe(first);
+    wallet.failNextWith(second);
+    await expect(wallet.sendDeposit(req)).rejects.toBe(second);
+    expect(wallet.sent).toEqual([]);
+  });
+
   it("delays the deposit by latencyMs", async () => {
     vi.useFakeTimers();
     const chain = new FakeChain();

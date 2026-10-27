@@ -1,7 +1,10 @@
 import type { DepositRequest, ZcashWallet } from "@z402/protocol";
 import type { FakeChain } from "./fake-chain.js";
 
-/** Pays by broadcasting straight onto a `FakeChain`. `failNext` is consumed by the first call; `latencyMs` delays every call. */
+/**
+ * Pays by broadcasting straight onto a `FakeChain`. A failure armed by the constructor's `failNext` or by
+ * `failNextWith` is consumed by the next call; `latencyMs` delays every call.
+ */
 export class MockWallet implements ZcashWallet {
   readonly sent: DepositRequest[] = [];
   readonly #chain: FakeChain;
@@ -12,6 +15,11 @@ export class MockWallet implements ZcashWallet {
     this.#chain = chain;
     this.#failNext = o.failNext;
     this.#latencyMs = o.latencyMs ?? 0;
+  }
+
+  /** Arms a one-shot failure for the next `sendDeposit`. Call it again later, e.g. after a successful send, to fail the Nth deposit. */
+  failNextWith(err: Error): void {
+    this.#failNext = err;
   }
 
   async sendDeposit(req: DepositRequest): Promise<{ txid: string }> {

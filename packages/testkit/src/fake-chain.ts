@@ -41,6 +41,9 @@ function assertCount(name: string, value: number): void {
 /**
  * In-memory stand-in for Zebra and lightwalletd. Writes (`broadcast`, `mine`, `reorg`, ...) always work;
  * only the reads behind `viewFor` and `statusSource` fail under `setUnavailable`.
+ *
+ * Txids are deterministic per instance and repeat across instances (the Nth broadcast of every fresh
+ * `FakeChain` has the same txid), so never share a facilitator ledger across two `FakeChain`s.
  */
 export class FakeChain {
   readonly #defaultExpiryDelta: number;
@@ -90,11 +93,7 @@ export class FakeChain {
           tx.minedHeight = this.#height;
         }
       }
-      for (const [txid, tx] of this.#txs) {
-        if (tx.location === "mempool" && tx.expiryHeight !== 0 && this.#height >= tx.expiryHeight) {
-          this.#txs.delete(txid);
-        }
-      }
+      this.#evictExpired();
     }
   }
 
@@ -104,6 +103,14 @@ export class FakeChain {
     tx.held = true;
   }
 
+  /** Releases a held tx so the next `mine` includes it, provided it has not expired (an expired one is already gone). */
+  unhold(txid: string): void {
+    const tx = this.#get(txid);
+    if (!tx.held) throw new Error(`cannot unhold ${txid}: it is not held`);
+    tx.held = false;
+  }
+
+  /** Evicts a mempool tx at once. An unknown txid is a no-op; a mined tx throws. */
   drop(txid: string): void {
     const tx = this.#txs.get(txid);
     if (tx === undefined) return;
@@ -129,10 +136,12 @@ export class FakeChain {
     this.#orphan(tx);
   }
 
+  /** Returns an orphaned tx to the mempool, unless the tip already reached its expiry, which evicts it at once. */
   rebroadcast(txid: string): void {
     const tx = this.#get(txid);
     if (tx.location !== "orphaned") throw new Error(`cannot rebroadcast ${txid}: it is not orphaned`);
     tx.location = "mempool";
+    this.#evictExpired();
   }
 
   setUnavailable(on: boolean): void {
@@ -185,6 +194,14 @@ export class FakeChain {
     const tx = this.#txs.get(txid);
     if (tx === undefined) throw new Error(`unknown txid ${txid}`);
     return tx;
+  }
+
+  #evictExpired(): void {
+    for (const [txid, tx] of this.#txs) {
+      if (tx.location === "mempool" && tx.expiryHeight !== 0 && this.#height >= tx.expiryHeight) {
+        this.#txs.delete(txid);
+      }
+    }
   }
 
   #orphan(tx: StoredTx): void {
