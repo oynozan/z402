@@ -1,4 +1,5 @@
 import { decodePaymentRequiredHeader } from "@x402/core/http";
+import type { SettleResponse } from "@x402/core/types";
 import { decodePaymentResponseHeader } from "@x402/fetch";
 import type { ClientEvent } from "@z402/client";
 import { parseSessionSnapshot, type SessionSnapshot } from "@z402/protocol";
@@ -98,26 +99,41 @@ function sessionOf(extra: unknown): SessionSnapshot | undefined {
   return parseSessionSnapshot((extra as { session?: unknown }).session) ?? undefined;
 }
 
-/** Reads the snapshot and refusal code from the response headers, never throws */
-export function outcomeOf(res: Response): CallOutcome {
+const UNSPECIFIED = "unspecified";
+const UNEXPECTED_SETTLE_ERROR = "unexpected_settle_error";
+
+function settleOf(header: string | null): SettleResponse | undefined {
+  if (header === null) return undefined;
   try {
-    if (res.status === 200) {
-      const header = res.headers.get("PAYMENT-RESPONSE");
-      const snapshot = header === null ? undefined : sessionOf(decodePaymentResponseHeader(header).extra);
-      return snapshot === undefined ? {} : { snapshot };
-    }
-    if (res.status === 402) return refusalOf(res.headers.get("PAYMENT-REQUIRED"));
+    return decodePaymentResponseHeader(header);
   } catch {
-    // A merchant with a broken header still gets a line, just a shorter one
-    return res.status === 402 ? { error: "unspecified" } : {};
+    return undefined;
   }
-  return {};
 }
 
-function refusalOf(header: string | null): CallOutcome {
-  if (header === null) return { error: "unspecified" };
-  const required = decodePaymentRequiredHeader(header);
-  const snapshot = sessionOf(required.accepts[0]?.extra);
-  const error = required.error === undefined || required.error === "" ? "unspecified" : required.error;
-  return snapshot === undefined ? { error } : { snapshot, error };
+function requiredOf(header: string | null): CallOutcome {
+  if (header === null) return { error: UNSPECIFIED };
+  try {
+    const required = decodePaymentRequiredHeader(header);
+    const snapshot = sessionOf(required.accepts[0]?.extra);
+    const error = required.error === undefined || required.error === "" ? UNSPECIFIED : required.error;
+    return snapshot === undefined ? { error } : { snapshot, error };
+  } catch {
+    return { error: UNSPECIFIED };
+  }
+}
+
+/** Reads the snapshot and refusal code from the response headers, never throws */
+export function outcomeOf(res: Response): CallOutcome {
+  if (res.status !== 200 && res.status !== 402) return {};
+  const settle = settleOf(res.headers.get("PAYMENT-RESPONSE"));
+  const snapshot = settle === undefined ? undefined : sessionOf(settle.extra);
+  if (res.status === 200) return snapshot === undefined ? {} : { snapshot };
+  // A settle failure answers 402 with PAYMENT-RESPONSE alone, and the client reads it ahead of PAYMENT-REQUIRED
+  if (settle === undefined) return requiredOf(res.headers.get("PAYMENT-REQUIRED"));
+  const reason = typeof settle.errorReason === "string" && settle.errorReason !== "" ? settle.errorReason : UNEXPECTED_SETTLE_ERROR;
+  return {
+    ...(snapshot === undefined ? {} : { snapshot }),
+    ...(settle.success ? {} : { error: reason }),
+  };
 }

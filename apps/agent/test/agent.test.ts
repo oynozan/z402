@@ -193,6 +193,42 @@ describe("runAgent", () => {
     expect(out[2]).toContain("#003 402  REFUSED z402_deposit_required at limit 125,000");
   });
 
+  it("stops the cheat run on a deposit-required refusal that arrives as a failed PAYMENT-RESPONSE", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = new Request(input, init);
+      if (!req.headers.has("PAYMENT-SIGNATURE")) {
+        return new Response("{}", {
+          status: 402,
+          headers: { "PAYMENT-REQUIRED": encodePaymentRequiredHeader(paymentRequired("Payment required")) },
+        });
+      }
+      n += 1;
+      if (n < 3) return paid(n * 500);
+      const header = encodePaymentResponseHeader({
+        success: false,
+        errorReason: REASON.depositRequired,
+        transaction: "",
+        network: NETWORK_REGTEST,
+        payer: SESSION_KEY,
+        extra: { session: snapshot(125_000, 125_000) },
+      });
+      return new Response("{}", { status: 402, headers: { "PAYMENT-RESPONSE": header } });
+    });
+    const { print, out } = lines();
+
+    const end = await runAgent({
+      flags: flags({ calls: 10, cheat: true }),
+      zcashClientScheme: scheme,
+      print,
+      shouldStop: stopAtDepositRefusal,
+    });
+
+    expect(end).toBe("stopped");
+    expect(out).toHaveLength(3);
+    expect(out[2]).toContain("#003 402  REFUSED z402_deposit_required at limit 125,000  c=125,000");
+  });
+
   it("stopAtDepositRefusal is only true for that one code", () => {
     expect(stopAtDepositRefusal({ error: REASON.depositRequired })).toBe(true);
     expect(stopAtDepositRefusal({ error: REASON.awaitingConfirmation })).toBe(false);

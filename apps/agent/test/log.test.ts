@@ -245,6 +245,69 @@ describe("outcomeOf", () => {
     expect(outcomeOf(res)).toEqual({ snapshot: AT_LIMIT, error: "z402_deposit_required" });
   });
 
+  describe("a 402 from a settle failure", () => {
+    const failed = (extra: Record<string, unknown> | undefined, errorReason?: string): SettleResponse => ({
+      success: false,
+      transaction: "",
+      network: NETWORK_REGTEST,
+      payer: SESSION_KEY,
+      ...(errorReason === undefined ? {} : { errorReason }),
+      ...(extra === undefined ? {} : { extra }),
+    });
+    const settleFailure = (settle: SettleResponse, headers: Record<string, string> = {}): Response =>
+      new Response("{}", {
+        status: 402,
+        headers: { "PAYMENT-RESPONSE": encodePaymentResponseHeader(settle), ...headers },
+      });
+
+    it("reads the code and snapshot from PAYMENT-RESPONSE when there is no PAYMENT-REQUIRED", () => {
+      const res = settleFailure(failed({ session: AT_LIMIT }, "z402_deposit_required"));
+      const outcome = outcomeOf(res);
+      expect(outcome).toEqual({ snapshot: AT_LIMIT, error: "z402_deposit_required" });
+      expect(formatCallLine(126, res.status, outcome.snapshot, outcome.error)).toBe(
+        "#126 402  REFUSED z402_deposit_required at limit 125,000  c=125,000  conf=100,000  pend=0  credit=25,000  D1 3f2a…c1 confirmed",
+      );
+    });
+
+    it("falls back to the client's unexpected_settle_error when errorReason is missing or empty", () => {
+      expect(outcomeOf(settleFailure(failed({ session: AT_LIMIT })))).toEqual({
+        snapshot: AT_LIMIT,
+        error: "unexpected_settle_error",
+      });
+      expect(outcomeOf(settleFailure(failed(undefined, "")))).toEqual({ error: "unexpected_settle_error" });
+    });
+
+    it("keeps the error when the snapshot is missing or does not validate", () => {
+      expect(outcomeOf(settleFailure(failed(undefined, "z402_deposit_dead")))).toEqual({ error: "z402_deposit_dead" });
+      expect(outcomeOf(settleFailure(failed({ session: { ...SNAP, tip: -1 } }, "z402_deposit_dead")))).toEqual({
+        error: "z402_deposit_dead",
+      });
+    });
+
+    it("lets PAYMENT-RESPONSE win when both headers are there, as the client's classifyOutcome does", () => {
+      const both = settleFailure(failed({ session: AT_LIMIT }, "z402_deposit_required"), {
+        "PAYMENT-REQUIRED": encodePaymentRequiredHeader(required("z402_cumulative_mismatch", { session: SNAP })),
+      });
+      expect(outcomeOf(both)).toEqual({ snapshot: AT_LIMIT, error: "z402_deposit_required" });
+    });
+
+    it("uses PAYMENT-REQUIRED when PAYMENT-RESPONSE does not decode", () => {
+      const res = new Response("{}", {
+        status: 402,
+        headers: {
+          "PAYMENT-RESPONSE": "!!not base64 json!!",
+          "PAYMENT-REQUIRED": encodePaymentRequiredHeader(required("z402_deposit_required", { session: AT_LIMIT })),
+        },
+      });
+      expect(outcomeOf(res)).toEqual({ snapshot: AT_LIMIT, error: "z402_deposit_required" });
+    });
+
+    it("reports a garbled PAYMENT-RESPONSE with no PAYMENT-REQUIRED as unspecified", () => {
+      const res = new Response("{}", { status: 402, headers: { "PAYMENT-RESPONSE": "!!not base64 json!!" } });
+      expect(outcomeOf(res)).toEqual({ error: "unspecified" });
+    });
+  });
+
   it("drops a snapshot that does not validate", () => {
     const bad = { ...SNAP, limitZat: "-1" };
     const res = new Response("{}", {
