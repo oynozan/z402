@@ -1,6 +1,6 @@
 // Prints one ready line on stdout and logs only to stderr, so scripts can wait for the line
 import { createLightwalletdClient } from "@z402/lightwalletd";
-import { startFacilitator } from "./app.js";
+import { startFacilitator, type FacilitatorHandle } from "./app.js";
 import { LightwalletdChainView } from "./chain/lightwalletdChainView.js";
 import { loadConfig } from "./config.js";
 import { runStartupChecks } from "./startup.js";
@@ -28,7 +28,7 @@ async function main(): Promise<void> {
     setTimeout(() => process.exit(1), FATAL_EXIT_MS).unref();
   };
 
-  let handle;
+  let handle: FacilitatorHandle | undefined;
   try {
     await runStartupChecks({
       zdecryptBin: config.zdecryptBin,

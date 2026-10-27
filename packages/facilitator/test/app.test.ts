@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { format } from "node:util";
 import { x402Facilitator } from "@x402/core/facilitator";
 import type { PaymentPayload, PaymentRequirements, SchemeNetworkFacilitator } from "@x402/core/types";
 import {
@@ -140,6 +141,57 @@ const ledgerTypes = (path: string): string[] =>
     .split("\n")
     .filter((l) => l !== "")
     .map((l) => (JSON.parse(l) as { t: string }).t);
+
+/** A view whose inspect waits for open() once shut() is called, and `reached` settles when a read is waiting */
+function gated(view: ChainView) {
+  let shut = false;
+  let open = () => {};
+  let arrive = () => {};
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const reached = new Promise<void>((resolve) => {
+    arrive = resolve;
+  });
+  const gatedView: ChainView = {
+    tip: () => view.tip(),
+    inspect: async (txid) => {
+      if (shut) {
+        arrive();
+        await opened;
+      }
+      return view.inspect(txid);
+    },
+  };
+  return {
+    view: gatedView,
+    shut: () => {
+      shut = true;
+    },
+    open,
+    reached,
+  };
+}
+
+/** A facilitator whose credited deposit has been mined since, with its next pollNow() held inside the chain read */
+async function heldPass(name: string) {
+  const ledgerPath = join(scratch, `${name}.jsonl`);
+  const chain = new FakeChain({ expiryDelta: 40 });
+  const gate = gated(chain.viewFor(PAY_TO));
+  const onFatal = vi.fn<(err: unknown) => void>();
+  const log = vi.fn<(msg: string, err?: unknown) => void>();
+  const { handle, url } = await boot({ chain: gate.view, ledgerPath, onFatal, log }, chain);
+  const r = await requirementsOf(url);
+  const d1 = deposit(chain);
+  await verify(url, pay(r, 500n, d1), r);
+  await settle(url, pay(r, 500n, d1), r);
+  chain.mine(1);
+
+  gate.shut();
+  const pass = handle.pollNow();
+  await gate.reached;
+  return { handle, gate, pass, ledgerPath, onFatal, log };
+}
 
 /** Serves an app from createFacilitatorApp alone, for the tests that do not need a whole facilitator */
 async function serve(app: ReturnType<typeof createFacilitatorApp>) {
@@ -534,6 +586,29 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
     expect(onFatal.mock.calls[0]?.[0]).toMatchObject({ code: "EISDIR" });
   });
 
+  test("two failed watcher commits and a failed settle call onFatal once between them", async () => {
+    const ledgerPath = join(scratch, "fatal-once.jsonl");
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const log = vi.fn<(msg: string, err?: unknown) => void>();
+    const { handle, url, chain } = await boot({ ledgerPath, onFatal, log });
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    expect((await verify(url, pay(r, 500n, d1), r)).json.isValid).toBe(true);
+    expect((await settle(url, pay(r, 500n, d1), r)).json.success).toBe(true);
+
+    rmSync(ledgerPath);
+    mkdirSync(ledgerPath);
+    chain.mine(1);
+    await handle.pollNow();
+    await handle.pollNow();
+    const failed = await settle(url, pay(r, 1000n, d1), r);
+
+    expect(log.mock.calls.filter(([msg]) => msg === "chain poll failed")).toHaveLength(2);
+    expect(failed.json).toMatchObject({ success: false, errorReason: "unexpected_settle_error" });
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(onFatal.mock.calls[0]?.[0]).toMatchObject({ code: "EISDIR" });
+  });
+
   describe("createFacilitatorApp", () => {
     const throwing: SchemeNetworkFacilitator = {
       scheme: SCHEME,
@@ -547,20 +622,20 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
         throw new Error("boom");
       },
     };
+    const r: PaymentRequirements = {
+      scheme: SCHEME,
+      network: NETWORK,
+      asset: ASSET,
+      amount: "500",
+      payTo: PAY_TO,
+      maxTimeoutSeconds: 60,
+      extra: {},
+    };
 
     test("a scheme that throws is answered with unexpected_* and the network of the requirements", async () => {
       const facilitator = new x402Facilitator().register(NETWORK, throwing);
       const log = vi.fn<(msg: string, err?: unknown) => void>();
       const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN, log }));
-      const r: PaymentRequirements = {
-        scheme: SCHEME,
-        network: NETWORK,
-        asset: ASSET,
-        amount: "500",
-        payTo: PAY_TO,
-        maxTimeoutSeconds: 60,
-        extra: {},
-      };
 
       const v = await verify(url, paymentFor(r, {}), r);
       expect(v.status).toBe(200);
@@ -588,6 +663,65 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
       const url = await serve(createFacilitatorApp({ facilitator }));
       const res = await call(url, "/supported", { token: null });
       expect(res.json).toMatchObject({ kinds: [{ x402Version: 2, scheme: SCHEME, network: NETWORK }] });
+    });
+
+    describe("with no log option", () => {
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      /** A scheme whose answer cannot be sent, since JSON has no BigInt */
+      const unsendable: SchemeNetworkFacilitator = {
+        ...throwing,
+        verify: async () => ({ isValid: true, extra: { n: 1n } }),
+      };
+      const quietStderr = () => vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const printed = (spy: ReturnType<typeof quietStderr>): string =>
+        spy.mock.calls.map((a) => format(...a)).join("\n");
+      const payload = paymentFor(r, voucherFor(r, 500n));
+      const leaks = [TOKEN, K, String(payload.payload.sig)];
+
+      test.each([
+        ["/verify", "unexpected_verify_error"],
+        ["/settle", "unexpected_settle_error"],
+      ])("an unexpected %s error goes to console.error without the token or the payload", async (path, reason) => {
+        const stderr = quietStderr();
+        const facilitator = new x402Facilitator().register(NETWORK, throwing);
+        const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN }));
+
+        const res = await call(url, path, { body: envelope(payload, r) });
+        expect(res.json.invalidReason ?? res.json.errorReason).toBe(reason);
+
+        expect(stderr).toHaveBeenCalledTimes(1);
+        expect(stderr).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ message: "boom" }));
+        for (const leak of leaks) expect(printed(stderr)).not.toContain(leak);
+      });
+
+      test("a failure no route caught goes to console.error, and the client sees only internal_error", async () => {
+        const stderr = quietStderr();
+        const facilitator = new x402Facilitator().register(NETWORK, unsendable);
+        const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN }));
+
+        const res = await verify(url, payload, r);
+        expect(res).toMatchObject({ status: 500, json: { error: "internal_error" } });
+
+        expect(stderr).toHaveBeenCalledTimes(1);
+        expect(stderr).toHaveBeenCalledWith(expect.any(String), expect.any(TypeError));
+        for (const leak of leaks) expect(printed(stderr)).not.toContain(leak);
+      });
+
+      test("request lines stay off", async () => {
+        const stderr = quietStderr();
+        const facilitator = new x402Facilitator().register(NETWORK, throwing);
+        const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN }));
+
+        await call(url, "/supported");
+        await call(url, "/supported", { token: "nope" });
+        await call(url, "/nowhere");
+        await call(url, "/verify", { body: {} });
+
+        expect(stderr).not.toHaveBeenCalled();
+      });
     });
   });
 });
@@ -838,5 +972,26 @@ describe("startFacilitator", () => {
     chain.mine(1);
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(readFileSync(ledgerPath, "utf8")).toBe(written);
+  });
+
+  test("a pass in flight when close() runs writes nothing when it resumes", async () => {
+    const held = await heldPass("close-in-flight");
+    expect(ledgerTypes(held.ledgerPath)).toEqual(["deposit", "voucher"]);
+    const logged = held.log.mock.calls.length;
+
+    const closing = held.handle.close();
+    held.gate.open();
+    await Promise.all([held.pass, closing]);
+
+    expect(ledgerTypes(held.ledgerPath)).toEqual(["deposit", "voucher"]);
+    expect(held.onFatal).not.toHaveBeenCalled();
+    expect(held.log.mock.calls.slice(logged)).toEqual([]);
+  });
+
+  test("the same pass writes the status line when the facilitator stays open", async () => {
+    const held = await heldPass("open-in-flight");
+    held.gate.open();
+    await held.pass;
+    expect(ledgerTypes(held.ledgerPath)).toEqual(["deposit", "voucher", "status"]);
   });
 });

@@ -31,6 +31,8 @@ import { PrepaidVoucherFacilitatorScheme } from "./scheme.js";
 
 type Log = (msg: string, err?: unknown) => void;
 
+const stderr: Log = (msg, err) => (err === undefined ? console.error(msg) : console.error(msg, err));
+
 export interface FacilitatorOptions {
   network: ZcashNetwork;
   chain: ChainView;
@@ -49,9 +51,9 @@ export interface FacilitatorOptions {
   pollIntervalMs?: number;
   /** How long verify waits for a deposit the chain does not show yet, default 30000 */
   depositWaitMs?: number;
-  /** Called when a ledger write fails in settle or the watcher, the host should exit so a restart replays the file */
+  /** Called once, on the first failed ledger write in settle or the watcher, the host should exit to replay the file */
   onFatal?: (err: unknown) => void;
-  /** Receives one line per request (method, path, status, reason code) and the components' diagnostics */
+  /** Receives one line per request (method, path, status, reason code) and the diagnostics, which default to stderr */
   log?: Log;
 }
 
@@ -59,6 +61,7 @@ export interface FacilitatorHandle {
   url: string;
   /** One best effort pass over every live deposit, which does nothing once closed */
   pollNow(): Promise<void>;
+  /** Stops the watcher and the server, and a pass still in flight no longer writes to the ledger */
   close(): Promise<void>;
 }
 
@@ -194,6 +197,7 @@ function jsonBody(): RequestHandler {
 export function createFacilitatorApp(o: { facilitator: x402Facilitator; authToken?: string; log?: Log }): Express {
   const { facilitator, authToken, log } = o;
   if (authToken === "") throw new Error(EMPTY_TOKEN);
+  const diagnose = log ?? stderr;
 
   /** The network a failed settle names when the request gave no usable one, which is the one registered here */
   const ownNetwork = (): string => {
@@ -215,7 +219,7 @@ export function createFacilitatorApp(o: { facilitator: x402Facilitator; authToke
       return await facilitator.verify(read.payload, read.requirements);
     } catch (e) {
       if (isUnregistered(e)) return verifyRefused(UNSUPPORTED);
-      log?.("verify failed unexpectedly", e);
+      diagnose("verify failed unexpectedly", e);
       return verifyRefused(UNEXPECTED_VERIFY);
     }
   }
@@ -226,13 +230,14 @@ export function createFacilitatorApp(o: { facilitator: x402Facilitator; authToke
       return await facilitator.settle(read.payload, read.requirements);
     } catch (e) {
       if (isUnregistered(e)) return settleRefused(UNSUPPORTED, network);
-      log?.("settle failed unexpectedly", e);
+      diagnose("settle failed unexpectedly", e);
       return settleRefused(UNEXPECTED_SETTLE, network);
     }
   }
 
   const app = express();
   app.disable("x-powered-by");
+  // Request lines are opt-in, so the log goes in as given and not as the stderr default
   app.use(accessLog(log));
   if (authToken !== undefined) app.use(bearer(authToken));
   app.use(jsonBody());
@@ -263,7 +268,7 @@ export function createFacilitatorApp(o: { facilitator: x402Facilitator; authToke
       next(err);
       return;
     }
-    log?.("request failed", err);
+    diagnose("request failed", err);
     res.status(500).json({ error: "internal_error" });
   });
 
@@ -306,7 +311,7 @@ function openLedger(path: string | undefined): { ledger: Ledger; state: Facilita
   }
 }
 
-function listen(app: Express, host: string, port: number, log: Log | undefined): Promise<Server> {
+function listen(app: Express, host: string, port: number, log: Log): Promise<Server> {
   return new Promise((resolve, reject) => {
     const server = createServer(app);
     const refuse = (e: NodeJS.ErrnoException): void => {
@@ -315,7 +320,7 @@ function listen(app: Express, host: string, port: number, log: Log | undefined):
     server.once("error", refuse);
     server.listen(port, host, () => {
       server.off("error", refuse);
-      server.on("error", (e) => log?.("http server error", e));
+      server.on("error", (e) => log("http server error", e));
       resolve(server);
     });
   });
@@ -326,19 +331,30 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
   checkOptions(o);
   const host = o.host ?? DEFAULT_HOST;
   const { ledger, state } = openLedger(o.ledgerPath);
-  const onFatal = o.onFatal ?? (() => undefined);
+  const { onFatal } = o;
+
+  // The first failed write is the only one reported, since the host exits on it
+  let fired = false;
+  const fatal = (err: unknown): void => {
+    if (fired) return;
+    fired = true;
+    onFatal?.(err);
+  };
+  // A watcher pass already in flight when close() runs must not write once it resumes
+  let closed = false;
 
   const write = (events: LedgerEvent[]): void => commit(ledger, state, events);
   const resolver = new DepositResolver({ chain: o.chain });
   const watcher = new ChainWatcher({
     chain: o.chain,
     state,
-    // The scheme reports its own failed writes to onFatal, so the watcher's writes are the ones reported here
+    // The scheme reports its own failed writes to fatal, so the watcher's writes are the ones reported here
     commit: (events) => {
+      if (closed) return;
       try {
         write(events);
       } catch (err) {
-        onFatal(err);
+        fatal(err);
         throw err;
       }
     },
@@ -357,7 +373,7 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
     resolver,
     watcher,
     commit: write,
-    onFatal,
+    onFatal: fatal,
     log: o.log,
   });
   const facilitator = new x402Facilitator().register(o.network, scheme);
@@ -367,7 +383,7 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
     createFacilitatorApp({ facilitator, authToken: o.authToken, log: o.log }),
     host,
     o.port ?? 0,
-    o.log,
+    o.log ?? stderr,
   );
   watcher.start();
 
@@ -375,12 +391,14 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
   let closing: Promise<void> | undefined;
   return {
     url: `http://${host.includes(":") ? `[${host}]` : host}:${port}`,
-    pollNow: () => (closing === undefined ? watcher.pollNow() : Promise.resolve()),
-    close: () =>
-      (closing ??= new Promise<void>((resolve, reject) => {
+    pollNow: () => (closed ? Promise.resolve() : watcher.pollNow()),
+    close: () => {
+      closed = true;
+      return (closing ??= new Promise<void>((resolve, reject) => {
         watcher.stop();
         server.close((err) => (err === undefined ? resolve() : reject(err)));
         server.closeIdleConnections();
-      })),
+      }));
+    },
   };
 }
