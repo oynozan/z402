@@ -1,0 +1,11 @@
+node_modules/
+dist/
+target/
+.tools/
+.secrets/
+.data/
+.env
+wallets/
+*.log
+coverage/
+.superpowers/
