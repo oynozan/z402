@@ -1,6 +1,6 @@
 # Live run on the Z3 regtest stack (Task 12)
 
-> What the server side did against the real Z3 stack on 2026-10-27, measured on this machine. The stack itself is described in `docs/research/client/z3-live.md` and `infra/z3/README.md`. Sections 2 to 4 were run by the server-side agent for Task 12. Section 5 records the first real deposit, which z402-08's agent sent, from the values the controller verified, and the transaction was re-read in this task. Task 13 adds the demo runs.
+> What the server side did against the real Z3 stack on 2026-10-27, measured on this machine. The stack itself is described in `docs/research/client/z3-live.md` and `infra/z3/README.md`. Sections 2 to 4 were run by the server-side agent for Task 12. Section 5 records the first real deposit, which z402-08's agent sent, from the values the controller verified, and the transaction was re-read in this task. Section 8 records the Task 13 demo runs, which z402-08 drove.
 
 ## 0. Summary
 
@@ -233,20 +233,29 @@ Fees seen for deposits of this shape:
 
 - 10,000 zat when the wallet makes one recipient output and one change output (2 Ironwood actions), as for this deposit.
 - 25,000 zat for the Zallet sends that split the change into 4 notes (5 actions), which the client agent also saw (`z3-live.md` section 2, item 4).
+- 15,000 zat with 3 actions, for `4b6a92e1...c55d` below.
+
+All three fit ZIP-317's conventional fee: 5,000 zat per logical action, with a minimum of 2 actions.
 
 Later deposits from the client's live tests, all harmless. On `0fcb6eae...54df` the client measured, through `@z402/lightwalletd`, 523 ms from broadcast to the first sighting in the mempool (about 0.5 s) and 1359 ms from `mineNow(1)` until Zaino showed it mined (about 1.4 s). Those two figures belong to that deposit, not to `98e84dab`, where Zaino lagged by a few seconds.
 
 | Txid | Value | Mined | Expiry |
 |---|---|---|---|
+| `4b6a92e1...c55d` | 100000 zat | 116 | 156 |
 | `0fcb6eae...54df` | 100000 zat | 117 | 157 |
 | `e984638e...8eb9` | 100000 zat | 118 | |
 | `ffc61849...50e5` | 0 zat | 116 | |
+
+`4b6a92e1...c55d` was the client's first live-test deposit. It has memo `99cd...daf1:1`, 3 Ironwood actions and a fee of 15,000 zat. It was re-read with `scripts/show-deposit.sh` in Task 13 and found to be `toPayTo: true`.
 
 `ffc61849...50e5` is a 0-zat output that carries a z402-shaped memo (`abab...ab:1`), from the client's tests. It is harmless, because 0 zat can never meet `windowZat`.
 
 An unknown txid is gRPC 13 INTERNAL from Zaino, with `RPC error: LegacyRpcError { code: -5, message: "No such mempool or main chain transaction" }`. Zebra's `getrawtransaction` answers the same unknown txid with JSON-RPC error -5 and `No such mempool or main chain transaction`.
 
-Not in the recorded values: the HTTP status of the agent's call 1, the facilitator's own `zeroConf` flag for this deposit, and the time from `mineNow()` until the facilitator's snapshot shows `confirmedZat` of at least 100000. The recorded values meet the zero-conf rule above, so the deposit was eligible for credit before it was mined. The snapshot lags the chain by the few seconds Zaino lags Zebra plus the watcher's 5 s poll. Task 13's rehearsals record all three.
+Not in the recorded values: the HTTP status of the agent's call 1, the facilitator's own `zeroConf` flag for this deposit, and the time from `mineNow()` until the facilitator's snapshot shows `confirmedZat` of at least 100000. The recorded values meet the zero-conf rule above, so the deposit was eligible for credit before it was mined. The snapshot lags the chain by the few seconds Zaino lags Zebra plus the watcher's 5 s poll. Section 8 records all three for the demo runs' deposits:
+- call 1 answered 200 on the unconfirmed D1;
+- the facilitator's ledger flags every demo deposit `zeroConf: true`;
+- the lag from mined to `confirmedZat` was at most about 7 s. That figure is bounded from the block clock, not measured.
 
 ## 6. What this means for the next tasks
 
@@ -274,3 +283,69 @@ curl -s -D - -o /dev/null http://127.0.0.1:4097/chunk | tr -d '\r' \
 # step 5: the deposit as the chain stores it and as the viewing key reads it
 scripts/show-deposit.sh 98e84dabd476c1a59543ca3c51b9040e0080252abdd1c6b25c7eec1255df0eaf
 ```
+
+## 8. Demo runs (Task 13, with z402-08)
+
+> z402-08 was the only chain operator: its `scripts/demo.sh` started this side's facilitator and API on 4022/4021 with the live ledger `.data/facilitator-ledger.regtest.jsonl`, ran the block clock and drove the agent. The server side ran no competing live run. The numbers come from z402-08's run logs, the block clock log `.data/demo/clock.log`, the facilitator's access log `.data/demo/facilitator.log`, and the live ledger, all read after the runs. Price was 500 zat and the terms were `DEMO_TERMS`.
+
+### 8.1 Fake-chain end to end (step 1)
+
+- z402-08's `apps/e2e` at `00e293d` runs four in-process scenarios: honest, cheat, awaiting and dead deposit. Each uses `FakeChain({ expiryDelta: 40 })`, this side's `startFacilitator` with an in-memory ledger, `startApi`, the client scheme and port 0.
+- `pnpm vitest run apps/e2e` passed 4/4 on three runs out of three.
+- The plan's restart scenario is covered on this side by `apps/api/test/integration.test.ts` ("restart"). That test restarts on a shared tmp ledger, and replaying the old voucher gets `z402_cumulative_mismatch` at cumulative 5000.
+
+### 8.2 Honest run (step 2): 150 calls at 1 call/s, one block every 25 s
+
+Session `c98d…cf`. The block clock mined heights 119 to 132 at 25 s intervals, starting 2026-10-27T20:45:49Z.
+
+| When | What the agent saw (limit = conf + pend + credit) |
+|---|---|
+| before call #001 | D1 `070704b0…` was proved and broadcast inline in 6,888 ms, and the merchant acknowledged it. The facilitator first saw it at tip 119; expiry is 160, a margin of 41 blocks against the 20 needed, so it was zero-conf. |
+| #001 | **200 on the unconfirmed D1**: limit 100,000, conf 0, pend 100,000, credit 0 |
+| #015 | D1 was mined at height 120 (20:46:14Z), so credit appears: limit 125,000, conf 100,000, credit 25,000 |
+| after #050 | D2 started in the background. It was broadcast in 5,359 ms, between #056 and #057, and acknowledged between #057 and #058. |
+| #058 | D2 `e2958852…` (first seen at tip 121, expiry 162) is pending: limit 225,000, conf 100,000, pend 100,000, credit 25,000 |
+| #065 | D2 was mined at height 122 (20:47:04Z): limit 250,000, conf 200,000, credit 50,000 |
+| #150 | the end: cumulative 75,000. All 150 calls answered 200. |
+
+- **No call waited on the chain**, call 1 included. Call 1 is the only one that waited for anything, and what it waited for was the D1 proof and broadcast, not a block.
+- The lag from mined to `confirmedZat` was not measured, because the demo agent logs no per-call timestamps. It can be bounded from the clock instead:
+  - block 120 landed at 20:46:14.1Z;
+  - the run started at about 20:45:5x, and call #001 followed the 6.9 s D1 broadcast;
+  - call #015 was the first with conf 100,000 (#014 still showed 0), so it came at most about 7 s after the block.
+- Both deposits later reached `final` (10 confirmations) in the ledger.
+
+### 8.3 Cheat run (step 3): local speed, cheat flag on
+
+Session `147a…3e`, started at 20:49:34Z with the tip at 128. The planned run was 400 calls with no delay, cheating after one deposit.
+
+| When | What happened |
+|---|---|
+| before #001 | D1 `a5d615ce…` was broadcast inline in 7,412 ms and acknowledged. First seen at tip 128, expiry 169. |
+| #001 to #200 | 200, all on the zero-conf D1: limit 100,000, conf 0, pend 100,000 |
+| after #200 | refused `z402_awaiting_confirmation`. D1 is pending, so the facilitator did not answer `deposit_required`. The agent waited for the deposit to confirm. |
+| block 129 (20:49:59Z) | D1 mined at height 129 |
+| #201 to #250 | 200 on credit: limit 125,000, conf 100,000, credit 25,000 |
+| #251 | **402 `z402_deposit_required` at limit 125,000**, cumulative 125,000. The cheating agent has no second deposit, so it stops. |
+
+- The whole run took 34 s and ended at 20:50:08Z.
+- The merchant's exposure ended at exactly the credit cap rule: 25 % of the confirmed 100,000.
+
+### 8.4 Demo step 7 (step 4): the deposit as the chain stores it and as the viewing key reads it
+
+`scripts/demo.sh show` ran on the cheat run's D1 `a5d615ced5babc6f34974df7ff6a442af4d32da19ede32a591958ba14837fb26`, mined at 129 with 2 confirmations at the time.
+
+- **The raw transaction** is 9,166 bytes and starts `06000080…`, a v6 transaction. It carries no plaintext output amount and no recipient address. The only value in the clear is the net value balance, here 10,000 zat, which is the fee.
+- **Decrypted with the merchant's UIVK** (the key was never printed):
+  - branch `Nu6_3` (`0x37a5165b`), `branchMatchesHeight` true, expiry 169;
+  - Ironwood with 2 actions and a value balance of 10,000, so the fee was 10,000 zat;
+  - one external output of **100,000 zat** to the payTo, with memo `147a9140…dc3e:1`, which is the session key and deposit index 1;
+  - decryption took 1.7 ms.
+- `scripts/show-deposit.sh <txid>` gives the same report on its own.
+
+### 8.5 Server-side health during the runs
+
+- **Facilitator access log:** 420 `POST /verify` and 420 `POST /settle` answered ok (150 + 250 + 20). There was exactly one `z402_awaiting_confirmation`, exactly one `z402_deposit_required`, and one `GET /supported`. It shows no errors, no `chain poll failed` and no fatal.
+- **Live ledger:** 447 lines in all: 4 deposit, 23 status and 420 voucher. Vouchers record only the cumulative amount, never a signature.
+- **The third session** `bfa3…` was z402-08's Ctrl-C test: SIGINT after #020, cumulative 10,000. Its D1 `5b58fc43…` (first seen at tip 131, expiry 171) was still pending when the stack went down. The next facilitator start resolves it, as mined or as dead after height 171.
+- **Shutdown:** Ctrl-C ends the agent on "interrupted", and `demo.sh down` stopped the clock, the API and the facilitator cleanly.
