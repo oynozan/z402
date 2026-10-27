@@ -1,3 +1,4 @@
+export { LightwalletdTxStatus, type LightwalletdLike, type RawTx } from "./chain/lightwalletd.js";
 export { systemClock, type Clock } from "./clock.js";
 export { DepositUncertainError } from "./errors.js";
 export type { ClientEvent } from "./events.js";
