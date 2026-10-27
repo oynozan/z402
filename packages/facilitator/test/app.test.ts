@@ -1,0 +1,827 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { x402Facilitator } from "@x402/core/facilitator";
+import type { PaymentPayload, PaymentRequirements, SchemeNetworkFacilitator } from "@x402/core/types";
+import {
+  ASSET,
+  DEMO_TERMS,
+  NETWORK_MAINNET,
+  NETWORK_REGTEST,
+  REASON,
+  SCHEME,
+  type ChainView,
+  type ZcashNetwork,
+} from "@z402/protocol";
+import { FakeChain } from "@z402/testkit";
+import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
+import { createFacilitatorApp, startFacilitator, type FacilitatorHandle, type FacilitatorOptions } from "../src/app.js";
+import { paymentFor, SESSION_KEY as K, voucherFor } from "./support/vouchers.js";
+
+const NETWORK = NETWORK_REGTEST;
+const PAY_TO = `uregtest1${"q".repeat(60)}`;
+/** What a client that pays for mainnet would sign, which this regtest facilitator has no scheme for */
+const MAINNET_PAY_TO = `u1${"q".repeat(60)}`;
+const TOKEN = "t-7c2e91-secret";
+const W = 100000n;
+
+const scratch = mkdtempSync(join(tmpdir(), "z402-app-"));
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+const running: Array<{ close(): Promise<void> }> = [];
+afterEach(async () => {
+  await Promise.all(running.splice(0).map((h) => h.close()));
+});
+
+const quiet = () => undefined;
+
+/** A facilitator over a FakeChain, on a free port, closed after the test */
+async function boot(over: Partial<FacilitatorOptions> = {}, chain = new FakeChain({ expiryDelta: 40 })) {
+  const handle = await startFacilitator({
+    network: NETWORK,
+    chain: chain.viewFor(PAY_TO),
+    payTo: PAY_TO,
+    priceZat: 500n,
+    terms: DEMO_TERMS,
+    authToken: TOKEN,
+    port: 0,
+    log: quiet,
+    ...over,
+  });
+  running.push(handle);
+  return { handle, chain, url: handle.url };
+}
+
+interface Reply {
+  status: number;
+  headers: Headers;
+  /** Whatever the body parsed to, left loose so a test can reach into it */
+  json: any;
+}
+
+interface Init {
+  method?: string;
+  /** null sends no Authorization header at all */
+  token?: string | null;
+  body?: unknown;
+  /** A body sent as it is, in place of `body` */
+  raw?: string;
+  headers?: Record<string, string>;
+}
+
+async function call(url: string, path: string, init: Init = {}): Promise<Reply> {
+  const headers: Record<string, string> = { ...init.headers };
+  if (init.token !== null) headers.authorization = `Bearer ${init.token ?? TOKEN}`;
+  let body: string | undefined = init.raw;
+  if (init.body !== undefined) body = JSON.stringify(init.body);
+  if (body !== undefined && headers["content-type"] === undefined) headers["content-type"] = "application/json";
+  const method = init.method ?? (body === undefined ? "GET" : "POST");
+  const res = await fetch(`${url}${path}`, { method, headers, body });
+  return { status: res.status, headers: res.headers, json: await res.json().catch(() => undefined) };
+}
+
+/** Requirements with fields the types would not allow, for the bodies a client should never send */
+const loosely = (r: PaymentRequirements, over: Record<string, unknown>): PaymentRequirements =>
+  ({ ...r, ...over }) as unknown as PaymentRequirements;
+
+const envelope = (payload: PaymentPayload, requirements: PaymentRequirements) => ({
+  x402Version: 2,
+  paymentPayload: payload,
+  paymentRequirements: requirements,
+});
+const verify = (url: string, payload: PaymentPayload, r: PaymentRequirements) =>
+  call(url, "/verify", { body: envelope(payload, r) });
+const settle = (url: string, payload: PaymentPayload, r: PaymentRequirements) =>
+  call(url, "/settle", { body: envelope(payload, r) });
+
+/** The requirements the API would send, built from /supported the way the server scheme copies the terms */
+async function requirementsOf(url: string, over: Partial<PaymentRequirements> = {}): Promise<PaymentRequirements> {
+  const supported = await call(url, "/supported");
+  const { windowZat, creditRatioBps, creditCapZat, zeroConfMinExpiryBlocks, termsVersion } =
+    supported.json.kinds[0].extra;
+  return {
+    scheme: SCHEME,
+    network: NETWORK,
+    asset: ASSET,
+    amount: "500",
+    payTo: PAY_TO,
+    maxTimeoutSeconds: 60,
+    extra: { windowZat, creditRatioBps, creditCapZat, zeroConfMinExpiryBlocks, termsVersion },
+    ...over,
+  };
+}
+
+/** Session K's voucher for cumulative `c`, optionally presenting a deposit */
+const pay = (r: PaymentRequirements, c: bigint, txid?: string) =>
+  paymentFor(r, voucherFor(r, c, { depositTxid: txid }));
+
+/** A deposit of one window to the merchant for session K */
+const deposit = (chain: FakeChain): string =>
+  chain.broadcast({ outputs: [{ to: PAY_TO, valueZat: W, memo: `${K}:1` }] });
+
+/** A ledger line that credits a deposit, for ledgers written by hand */
+const creditEvent = () => ({
+  t: "deposit",
+  txid: "11".repeat(32),
+  sessionKey: K,
+  valueZat: "100000",
+  zeroConf: true,
+  expiryHeight: 2000,
+  firstSeenTip: 1000,
+  status: "pending",
+  minedHeight: null,
+  confirmations: 0,
+});
+
+const ledgerTypes = (path: string): string[] =>
+  readFileSync(path, "utf8")
+    .split("\n")
+    .filter((l) => l !== "")
+    .map((l) => (JSON.parse(l) as { t: string }).t);
+
+/** Serves an app from createFacilitatorApp alone, for the tests that do not need a whole facilitator */
+async function serve(app: ReturnType<typeof createFacilitatorApp>) {
+  const server: Server = createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  running.push({
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  });
+  return `http://127.0.0.1:${port}`;
+}
+
+describe("GET /supported", () => {
+  test("lists the scheme with the terms, the terms version and payTo", async () => {
+    const { url } = await boot();
+    const res = await call(url, "/supported");
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({
+      kinds: [
+        {
+          x402Version: 2,
+          scheme: "prepaid-voucher",
+          network: "zcash:regtest",
+          extra: {
+            windowZat: "100000",
+            creditRatioBps: 2500,
+            creditCapZat: "200000",
+            zeroConfMinExpiryBlocks: 20,
+            termsVersion: expect.stringMatching(/^[0-9a-f]{16}$/),
+            payTo: PAY_TO,
+          },
+        },
+      ],
+      extensions: [],
+      signers: { "zcash:*": [] },
+    });
+  });
+
+  test("the terms version is the one taken from payTo, price and terms", async () => {
+    // sha256 of ["uregtest1q...q","500",{the demo terms}] taken with shasum, as in scheme.test.ts
+    const { url } = await boot();
+    const res = await call(url, "/supported");
+    expect(res.json.kinds[0].extra.termsVersion).toBe("23e5935a1b39a198");
+  });
+
+  test("advertises the configured terms", async () => {
+    const terms = { windowZat: 250000n, creditRatioBps: 1000, creditCapZat: 5n, zeroConfMinExpiryBlocks: 3 };
+    const { url } = await boot({ terms });
+    const res = await call(url, "/supported");
+    expect(res.json.kinds[0].extra).toMatchObject({
+      windowZat: "250000",
+      creditRatioBps: 1000,
+      creditCapZat: "5",
+      zeroConfMinExpiryBlocks: 3,
+    });
+  });
+});
+
+describe("the bearer token", () => {
+  const routes: Array<[string, string]> = [
+    ["GET", "/supported"],
+    ["POST", "/verify"],
+    ["POST", "/settle"],
+  ];
+
+  test.each(routes)("%s %s is refused without the right token", async (method, path) => {
+    const { url } = await boot({ authToken: "right-token" });
+    const wrong: Array<string | null> = [null, "", "wrong", "right-toke", "right-token2", "RIGHT-TOKEN"];
+    for (const token of wrong) {
+      const res = await call(url, path, { method, token, body: method === "POST" ? {} : undefined });
+      expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
+    }
+    const basic = await call(url, path, { method, token: null, headers: { authorization: "Basic cmlnaHQtdG9rZW4=" } });
+    expect(basic.status).toBe(401);
+    const query = await call(url, `${path}?token=right-token`, { method, token: null });
+    expect(query.status).toBe(401);
+  });
+
+  test("the right token is accepted", async () => {
+    const { url } = await boot({ authToken: "right-token" });
+    expect((await call(url, "/supported", { token: "right-token" })).status).toBe(200);
+  });
+
+  test("a missing token is refused even when the body cannot be read", async () => {
+    const { url } = await boot();
+    const res = await call(url, "/verify", { token: null, raw: "{ this is not json" });
+    expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
+  });
+
+  test("without a configured token nothing is checked", async () => {
+    const { url } = await boot({ authToken: undefined });
+    expect((await call(url, "/supported", { token: null })).status).toBe(200);
+  });
+
+  test("an empty token is refused at start instead of switching the check off", async () => {
+    await expect(boot({ authToken: "" })).rejects.toThrow(/^authToken:/);
+  });
+});
+
+describe("invalid bodies answer invalid_payload with HTTP 200", () => {
+  test("POST /verify {}", async () => {
+    const { url } = await boot();
+    const res = await call(url, "/verify", { body: {} });
+    expect(res.status).toBe(200);
+    // Pre-parse answers carry neither payer nor session (protocol.md 7.1)
+    expect(res.json).toEqual({ isValid: false, invalidReason: "invalid_payload", invalidMessage: expect.any(String) });
+  });
+
+  test("POST /settle {}", async () => {
+    const { url } = await boot();
+    const res = await call(url, "/settle", { body: {} });
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({
+      success: false,
+      errorReason: "invalid_payload",
+      errorMessage: expect.any(String),
+      transaction: "",
+      network: "zcash:regtest",
+    });
+  });
+
+  test("settle names the network of the requirements when they carry one", async () => {
+    const { url } = await boot();
+    const res = await call(url, "/settle", {
+      body: { paymentPayload: {}, paymentRequirements: { network: "zcash:mainnet" } },
+    });
+    expect(res.json).toMatchObject({ errorReason: "invalid_payload", transaction: "", network: "zcash:mainnet" });
+  });
+
+  describe.each(["/verify", "/settle"])("%s", (path) => {
+    const reason = (json: Record<string, unknown>) => json.invalidReason ?? json.errorReason;
+
+    async function valid() {
+      const { url } = await boot();
+      const r = await requirementsOf(url);
+      return { url, r, payload: pay(r, 500n) };
+    }
+
+    test.each([
+      ["a JSON array", () => "[]"],
+      ["JSON null", () => "null"],
+      ["a JSON string", () => '"text"'],
+      ["malformed JSON", () => '{"paymentPayload": '],
+      ["an empty body", () => ""],
+    ])("%s", async (_, raw) => {
+      const { url } = await boot();
+      const res = await call(url, path, { raw: raw() });
+      expect(res.status).toBe(200);
+      expect(reason(res.json)).toBe("invalid_payload");
+    });
+
+    test("a body over 64 KB", async () => {
+      const { url, r, payload } = await valid();
+      const padded = { ...envelope(payload, r), padding: "x".repeat(70_000) };
+      const res = await call(url, path, { body: padded });
+      expect(res.status).toBe(200);
+      expect(reason(res.json)).toBe("invalid_payload");
+    });
+
+    test("a valid body that is not sent as JSON", async () => {
+      const { url, r, payload } = await valid();
+      const res = await call(url, path, {
+        raw: JSON.stringify(envelope(payload, r)),
+        headers: { "content-type": "text/plain" },
+      });
+      expect(res.status).toBe(200);
+      expect(reason(res.json)).toBe("invalid_payload");
+    });
+
+    test.each([
+      ["no paymentRequirements", (p: PaymentPayload) => ({ paymentPayload: p })],
+      ["no paymentPayload", (_: PaymentPayload, r: PaymentRequirements) => ({ paymentRequirements: r })],
+      [
+        "a payload without an x402Version",
+        (p: PaymentPayload, r: PaymentRequirements) => {
+          const { x402Version: _version, ...rest } = p;
+          return envelope(rest as PaymentPayload, r);
+        },
+      ],
+      [
+        "a payload without accepted",
+        (p: PaymentPayload, r: PaymentRequirements) => {
+          const { accepted: _accepted, ...rest } = p;
+          return envelope(rest as PaymentPayload, r);
+        },
+      ],
+      [
+        "requirements without an amount",
+        (p: PaymentPayload, r: PaymentRequirements) => {
+          const { amount: _amount, ...rest } = r;
+          return envelope(p, rest as PaymentRequirements);
+        },
+      ],
+      [
+        "a network that is no CAIP-2 id",
+        (p: PaymentPayload, r: PaymentRequirements) => envelope(p, loosely(r, { network: "zcash" })),
+      ],
+      [
+        "a non-positive timeout",
+        (p: PaymentPayload, r: PaymentRequirements) => envelope(p, { ...r, maxTimeoutSeconds: 0 }),
+      ],
+    ])("%s", async (_, shape) => {
+      const { url, r, payload } = await valid();
+      const res = await call(url, path, { body: shape(payload, r) });
+      expect(res.status).toBe(200);
+      expect(reason(res.json)).toBe("invalid_payload");
+      if (path === "/settle") expect(res.json).toMatchObject({ success: false, transaction: "" });
+    });
+  });
+
+  test("the message names the field and never echoes the value", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url);
+    const secret = "do-not-echo-this-value";
+    const res = await call(url, "/verify", { body: envelope(pay(r, 500n), loosely(r, { network: secret })) });
+    expect(res.json.invalidMessage).toMatch(/^paymentRequirements\.network/);
+    expect(res.json.invalidMessage).not.toContain(secret);
+  });
+});
+
+describe("a payload of another x402 version answers invalid_x402_version with HTTP 200", () => {
+  // The SDK's facilitator throws before it reaches the scheme when no scheme is registered for a version
+  test("verify", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url);
+    const res = await verify(url, { ...pay(r, 500n), x402Version: 1 }, r);
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({
+      isValid: false,
+      invalidReason: "invalid_x402_version",
+      invalidMessage: expect.any(String),
+    });
+  });
+
+  test("settle carries an empty transaction and the network of the requirements", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url);
+    const res = await settle(url, { ...pay(r, 500n), x402Version: 1 }, r);
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({
+      success: false,
+      errorReason: "invalid_x402_version",
+      errorMessage: expect.any(String),
+      transaction: "",
+      network: "zcash:regtest",
+    });
+  });
+
+  describe.each(["/verify", "/settle"])("%s", (path) => {
+    test.each([
+      [
+        "a payload in the version 1 shape",
+        (p: PaymentPayload) => ({ x402Version: 1, scheme: SCHEME, network: NETWORK, payload: p.payload }),
+      ],
+      ["version 3", (p: PaymentPayload) => ({ ...p, x402Version: 3 })],
+      ["version 0", (p: PaymentPayload) => ({ ...p, x402Version: 0 })],
+      ["a version that is a string", (p: PaymentPayload) => ({ ...p, x402Version: "2" })],
+      ["a version that is null", (p: PaymentPayload) => ({ ...p, x402Version: null })],
+    ])("%s", async (_, change) => {
+      const { url } = await boot();
+      const r = await requirementsOf(url);
+      const res = await call(url, path, { body: envelope(change(pay(r, 500n)) as PaymentPayload, r) });
+      expect(res.status).toBe(200);
+      expect(res.json.invalidReason ?? res.json.errorReason).toBe("invalid_x402_version");
+      expect(res.json.payer).toBeUndefined();
+      expect(res.json.extra).toBeUndefined();
+    });
+  });
+
+  test("a message that does not echo what was sent", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url);
+    const res = await verify(url, { ...pay(r, 500n), x402Version: "echo-this-version" as unknown as number }, r);
+    expect(res.json.invalidMessage).not.toContain("echo-this-version");
+  });
+});
+
+describe("a scheme or network nobody registered answers unsupported_scheme", () => {
+  test("verify", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url, { network: NETWORK_MAINNET, payTo: MAINNET_PAY_TO });
+    const res = await verify(url, pay(r, 500n), r);
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({
+      isValid: false,
+      invalidReason: "unsupported_scheme",
+      invalidMessage: expect.any(String),
+    });
+  });
+
+  test("settle carries an empty transaction and the network of the requirements", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url, { network: NETWORK_MAINNET, payTo: MAINNET_PAY_TO });
+    const res = await settle(url, pay(r, 500n), r);
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({
+      success: false,
+      errorReason: "unsupported_scheme",
+      errorMessage: expect.any(String),
+      transaction: "",
+      network: "zcash:mainnet",
+    });
+  });
+
+  test("another scheme on the right network", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url, { scheme: "exact" });
+    expect((await verify(url, pay(r, 500n), r)).json).toMatchObject({ invalidReason: "unsupported_scheme" });
+    expect((await settle(url, pay(r, 500n), r)).json).toMatchObject({ errorReason: "unsupported_scheme" });
+  });
+
+  test("the message does not echo what the client sent", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url, { scheme: "echo-this-scheme-name" });
+    const res = await verify(url, pay(r, 500n), r);
+    expect(res.json.invalidMessage).not.toContain("echo-this-scheme-name");
+  });
+});
+
+describe("failures inside the facilitator answer unexpected_* with HTTP 200", () => {
+  test("verify: a chain that throws a plain TypeError on a needed lookup", async () => {
+    const view = new FakeChain().viewFor(PAY_TO);
+    const broken: ChainView = {
+      tip: () => view.tip(),
+      inspect: async () => {
+        throw new TypeError("boom");
+      },
+    };
+    const log = vi.fn<(msg: string, err?: unknown) => void>();
+    const { url } = await boot({ chain: broken, log });
+    const r = await requirementsOf(url);
+
+    const res = await verify(url, pay(r, 500n, "ab".repeat(32)), r);
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({
+      isValid: false,
+      invalidReason: "unexpected_verify_error",
+      invalidMessage: expect.any(String),
+    });
+    // The failure is logged through the log option, which reaches the scheme
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("verify failed"), expect.any(TypeError));
+  });
+
+  test("settle: a ledger write that fails, which also calls onFatal once and poisons the facilitator", async () => {
+    const ledgerPath = join(scratch, "settle-fails.jsonl");
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { url, chain } = await boot({ ledgerPath, onFatal });
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    expect((await verify(url, pay(r, 500n, d1), r)).json.isValid).toBe(true);
+
+    // A directory where the file belongs makes the next append fail with EISDIR
+    mkdirSync(ledgerPath);
+    const res = await settle(url, pay(r, 500n, d1), r);
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({
+      success: false,
+      errorReason: "unexpected_settle_error",
+      errorMessage: expect.any(String),
+      transaction: "",
+      network: "zcash:regtest",
+    });
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(onFatal.mock.calls[0]?.[0]).toMatchObject({ code: "EISDIR" });
+
+    // Nothing is trusted until a restart replays the file
+    expect((await verify(url, pay(r, 500n, d1), r)).json).toMatchObject({
+      isValid: false,
+      invalidReason: "unexpected_verify_error",
+    });
+  });
+
+  test("the watcher's failed commit reaches onFatal as well", async () => {
+    const ledgerPath = join(scratch, "watcher-fails.jsonl");
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { handle, url, chain } = await boot({ ledgerPath, onFatal });
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    expect((await verify(url, pay(r, 500n, d1), r)).json.isValid).toBe(true);
+    expect((await settle(url, pay(r, 500n, d1), r)).json.success).toBe(true);
+    expect(onFatal).not.toHaveBeenCalled();
+
+    rmSync(ledgerPath);
+    mkdirSync(ledgerPath);
+    chain.mine(1);
+    await handle.pollNow();
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(onFatal.mock.calls[0]?.[0]).toMatchObject({ code: "EISDIR" });
+  });
+
+  describe("createFacilitatorApp", () => {
+    const throwing: SchemeNetworkFacilitator = {
+      scheme: SCHEME,
+      caipFamily: "zcash:*",
+      getExtra: () => undefined,
+      getSigners: () => [],
+      verify: async () => {
+        throw new Error("boom");
+      },
+      settle: async () => {
+        throw new Error("boom");
+      },
+    };
+
+    test("a scheme that throws is answered with unexpected_* and the network of the requirements", async () => {
+      const facilitator = new x402Facilitator().register(NETWORK, throwing);
+      const log = vi.fn<(msg: string, err?: unknown) => void>();
+      const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN, log }));
+      const r: PaymentRequirements = {
+        scheme: SCHEME,
+        network: NETWORK,
+        asset: ASSET,
+        amount: "500",
+        payTo: PAY_TO,
+        maxTimeoutSeconds: 60,
+        extra: {},
+      };
+
+      const v = await verify(url, paymentFor(r, {}), r);
+      expect(v.status).toBe(200);
+      expect(v.json).toEqual({
+        isValid: false,
+        invalidReason: "unexpected_verify_error",
+        invalidMessage: expect.any(String),
+      });
+      expect(v.json.invalidMessage).not.toContain("boom");
+
+      const s = await settle(url, paymentFor(r, {}), r);
+      expect(s.status).toBe(200);
+      expect(s.json).toEqual({
+        success: false,
+        errorReason: "unexpected_settle_error",
+        errorMessage: expect.any(String),
+        transaction: "",
+        network: "zcash:regtest",
+      });
+      expect(log).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ message: "boom" }));
+    });
+
+    test("serves /supported from the facilitator it is given", async () => {
+      const facilitator = new x402Facilitator().register(NETWORK, throwing);
+      const url = await serve(createFacilitatorApp({ facilitator }));
+      const res = await call(url, "/supported", { token: null });
+      expect(res.json).toMatchObject({ kinds: [{ x402Version: 2, scheme: SCHEME, network: NETWORK }] });
+    });
+  });
+});
+
+describe("what the HTTP layer exposes", () => {
+  test("an unknown route is a JSON 404, behind the token", async () => {
+    const { url } = await boot();
+    expect(await call(url, "/nope")).toMatchObject({ status: 404, json: { error: "not_found" } });
+    expect((await call(url, "/nope", { token: null })).status).toBe(401);
+  });
+
+  test("the server does not announce what it is", async () => {
+    const { url } = await boot();
+    const res = await call(url, "/supported");
+    expect(res.headers.get("x-powered-by")).toBeNull();
+  });
+
+  test("the default host is the loopback address", async () => {
+    const { url } = await boot();
+    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+
+  test("requests are logged as method, path, status and reason code and nothing else", async () => {
+    const lines: string[] = [];
+    const { url, chain } = await boot({ log: (line) => lines.push(line) });
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    const signature = "PAYMENT-SIGNATURE-VALUE";
+
+    await call(url, "/supported?apikey=hunter2", { headers: { "payment-signature": signature } });
+    await call(url, "/supported", { token: "nope" });
+    await call(url, "/verify", { body: {} });
+    await verify(url, pay(r, 500n, d1), r);
+    await settle(url, pay(r, 500n, d1), r);
+    await settle(url, pay(r, 500n), r);
+
+    expect(lines).toEqual([
+      "GET /supported 200",
+      "GET /supported 200",
+      "GET /supported 401",
+      "POST /verify 200 invalid_payload",
+      "POST /verify 200",
+      "POST /settle 200",
+      "POST /settle 200 z402_cumulative_mismatch",
+    ]);
+    for (const line of lines) {
+      for (const leak of [TOKEN, signature, "hunter2", K, d1]) expect(line).not.toContain(leak);
+    }
+  });
+
+  test("a long path is cut short in the log", async () => {
+    const lines: string[] = [];
+    const { url } = await boot({ log: (line) => lines.push(line) });
+    await call(url, `/${"a".repeat(5000)}`);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^GET \/aaaa/);
+    expect(lines[0]?.length).toBeLessThan(200);
+  });
+});
+
+describe("startFacilitator", () => {
+  test.each([
+    ["network", { network: "zcash:nope" as ZcashNetwork }],
+    ["payTo", { payTo: `utest1${"q".repeat(60)}` }],
+    ["payTo", { payTo: `tutest1${"q".repeat(60)}` }],
+    ["priceZat", { priceZat: 0n }],
+    ["priceZat", { priceZat: 500 as unknown as bigint }],
+    ["terms", { terms: { ...DEMO_TERMS, creditRatioBps: 20000 } }],
+    ["terms", { terms: { ...DEMO_TERMS, windowZat: 0n } }],
+    ["authToken", { authToken: "" }],
+    ["port", { port: 70000 }],
+    ["pollIntervalMs", { pollIntervalMs: 0 }],
+    ["depositWaitMs", { depositWaitMs: -1 }],
+  ] as Array<[string, Partial<FacilitatorOptions>]>)(
+    "a bad %s rejects naming the field before anything is written",
+    async (field, over) => {
+      const dir = join(scratch, `never-${field}`);
+      await expect(boot({ ledgerPath: join(dir, "ledger.jsonl"), ...over })).rejects.toThrow(new RegExp(`^${field}:`));
+      expect(existsSync(dir)).toBe(false);
+    },
+  );
+
+  test.each([
+    ["a line that is no ledger event", '{"t":"nonsense"}\n{"t":"voucher","sessionKey":"a","cumulativeZat":"1"}\n'],
+    ["a line that is no JSON", 'not json\n{"t":"voucher","sessionKey":"a","cumulativeZat":"1"}\n'],
+    ["events that break the state", `${JSON.stringify(creditEvent())}\n${JSON.stringify(creditEvent())}\n`],
+  ])("a ledger with %s rejects naming ledgerPath", async (_, content) => {
+    const ledgerPath = join(scratch, `corrupt-${Math.random().toString(36).slice(2)}.jsonl`);
+    writeFileSync(ledgerPath, content);
+    await expect(boot({ ledgerPath })).rejects.toThrow(/^ledgerPath:/);
+  });
+
+  test("a ledgerPath that is a directory rejects naming ledgerPath", async () => {
+    const dir = join(scratch, "a-directory");
+    mkdirSync(dir);
+    await expect(boot({ ledgerPath: dir })).rejects.toThrow(/^ledgerPath:/);
+  });
+
+  test("a port in use rejects naming the port", async () => {
+    const { handle } = await boot();
+    const port = Number(new URL(handle.url).port);
+    await expect(boot({ port })).rejects.toThrow(/^port:/);
+  });
+
+  test("a deposit, a voucher and a restart: the ledger is written and replayed", async () => {
+    const ledgerPath = join(scratch, "replay.jsonl");
+    const first = await boot({ ledgerPath });
+    const r = await requirementsOf(first.url);
+    const d1 = deposit(first.chain);
+
+    expect((await verify(first.url, pay(r, 500n, d1), r)).json).toMatchObject({ isValid: true, payer: K });
+    expect((await settle(first.url, pay(r, 500n, d1), r)).json).toMatchObject({
+      success: true,
+      transaction: d1,
+      network: NETWORK,
+      payer: K,
+      amount: "500",
+    });
+    await first.handle.close();
+    expect(ledgerTypes(ledgerPath)).toEqual(["deposit", "voucher"]);
+
+    const second = await boot({ ledgerPath }, first.chain);
+    const stale = await verify(second.url, pay(r, 500n), r);
+    expect(stale.json).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.cumulativeMismatch,
+      extra: { session: { cumulativeZat: "500" } },
+    });
+    // The deposit is acknowledged again without being credited twice
+    const next = await settle(second.url, pay(r, 1000n, d1), r);
+    expect(next.json).toMatchObject({ success: true, transaction: d1, amount: "500" });
+    expect(ledgerTypes(ledgerPath)).toEqual(["deposit", "voucher", "voucher"]);
+  });
+
+  test("without a ledgerPath the ledger lives in memory and a restart starts empty", async () => {
+    const first = await boot();
+    const r = await requirementsOf(first.url);
+    const d1 = deposit(first.chain);
+    await verify(first.url, pay(r, 500n, d1), r);
+    expect((await settle(first.url, pay(r, 500n, d1), r)).json.success).toBe(true);
+    await first.handle.close();
+
+    const second = await boot({}, first.chain);
+    const again = await verify(second.url, pay(r, 500n, d1), r);
+    expect(again.json).toMatchObject({ isValid: true, extra: { session: { cumulativeZat: "0" } } });
+  });
+
+  test("polls once before it listens", async () => {
+    const ledgerPath = join(scratch, "poll-once.jsonl");
+    const first = await boot({ ledgerPath });
+    const r = await requirementsOf(first.url);
+    const d1 = deposit(first.chain);
+    await verify(first.url, pay(r, 500n, d1), r);
+    await settle(first.url, pay(r, 500n, d1), r);
+    await first.handle.close();
+
+    // The deposit is mined while the facilitator is down, so only the poll at start can notice
+    first.chain.mine(1);
+    const second = await boot({ ledgerPath }, first.chain);
+    const res = await verify(second.url, pay(r, 1000n, d1), r);
+    expect(res.json.isValid).toBe(true);
+    expect(res.json.extra.session).toMatchObject({ confirmedZat: "100000", pendingZat: "0" });
+  });
+
+  test("a poll at start that cannot reach the chain does not stop it from listening", async () => {
+    const chain = new FakeChain();
+    chain.setUnavailable(true);
+    const { url } = await boot({}, chain);
+    expect((await call(url, "/supported")).status).toBe(200);
+  });
+
+  test("handle.pollNow() brings deposits up to date", async () => {
+    const { handle, url, chain } = await boot();
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    await verify(url, pay(r, 500n, d1), r);
+    await settle(url, pay(r, 500n, d1), r);
+
+    chain.mine(1);
+    await handle.pollNow();
+    const res = await verify(url, pay(r, 1000n, d1), r);
+    expect(res.json.extra.session).toMatchObject({ confirmedZat: "100000" });
+  });
+
+  test("the watcher runs on pollIntervalMs by itself", async () => {
+    const { url, chain } = await boot({ pollIntervalMs: 20 });
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    await verify(url, pay(r, 500n, d1), r);
+    await settle(url, pay(r, 500n, d1), r);
+
+    chain.mine(1);
+    await vi.waitFor(
+      async () => {
+        const res = await verify(url, pay(r, 1000n, d1), r);
+        expect(res.json.extra.session).toMatchObject({ confirmedZat: "100000" });
+      },
+      { timeout: 3000, interval: 25 },
+    );
+  });
+
+  test("depositWaitMs bounds how long verify waits for a deposit the chain does not know", async () => {
+    const { url } = await boot({ depositWaitMs: 50 });
+    const r = await requirementsOf(url);
+    const started = Date.now();
+    const res = await verify(url, pay(r, 500n, "cd".repeat(32)), r);
+    expect(res.json).toMatchObject({ isValid: false, invalidReason: REASON.depositNotFound });
+    expect(Date.now() - started).toBeLessThan(4000);
+  });
+
+  test("the configured price is enforced", async () => {
+    const { url } = await boot({ priceZat: 700n });
+    const r = await requirementsOf(url);
+    const res = await verify(url, pay(r, 700n), r);
+    expect(res.json).toMatchObject({ invalidReason: REASON.invalidPaymentRequirements });
+    const ok = await verify(url, pay({ ...r, amount: "700" }, 700n), { ...r, amount: "700" });
+    expect(ok.json.invalidReason).not.toBe(REASON.invalidPaymentRequirements);
+  });
+
+  test("close() stops the server and the watcher, and may be called twice", async () => {
+    const ledgerPath = join(scratch, "close.jsonl");
+    const { handle, url, chain } = await boot({ ledgerPath, pollIntervalMs: 20 });
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    await verify(url, pay(r, 500n, d1), r);
+    await settle(url, pay(r, 500n, d1), r);
+
+    await handle.close();
+    await handle.close();
+    await expect(fetch(`${url}/supported`)).rejects.toThrow();
+
+    const written = readFileSync(ledgerPath, "utf8");
+    chain.mine(1);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(readFileSync(ledgerPath, "utf8")).toBe(written);
+  });
+});

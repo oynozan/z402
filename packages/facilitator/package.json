@@ -7,6 +7,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "start": "tsx src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build:native": "cargo build --release --locked --manifest-path ../../crates/zdecrypt/Cargo.toml"
@@ -14,9 +15,11 @@
   "dependencies": {
     "@x402/core": "2.28.0",
     "@z402/lightwalletd": "workspace:*",
-    "@z402/protocol": "workspace:*"
+    "@z402/protocol": "workspace:*",
+    "express": "5.3.0"
   },
   "devDependencies": {
+    "@types/express": "5.0.6",
     "@z402/testkit": "workspace:*"
   }
 }
