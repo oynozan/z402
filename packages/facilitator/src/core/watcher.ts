@@ -61,12 +61,12 @@ export class ChainWatcher {
     return this.#lastTip;
   }
 
-  /** Re-reads every live deposit now, and logs instead of throwing when the chain cannot answer */
+  /** Best-effort pass over every live deposit, logging a chain or commit failure instead of rejecting */
   pollNow(): Promise<void> {
     return this.#pass(undefined);
   }
 
-  /** Re-reads one session's live deposits, or returns false at once if it was refreshed less than refreshMinMs ago */
+  /** Best-effort pass over one session, true once attempted (failures are logged) and false when throttled */
   async refreshSession(sessionKey: string): Promise<boolean> {
     const now = this.#now();
     const last = this.#refreshedAt.get(sessionKey);
