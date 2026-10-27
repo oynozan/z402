@@ -396,6 +396,40 @@ describe("createPaymentPayload", () => {
     expect(ofType(events, "ambiguous")).toEqual([{ type: "ambiguous", attemptedZat: "500" }]);
   });
 
+  it("each payload gets its full safety window from when it is returned, not from when its lock was taken", async () => {
+    const gated = new GatedWallet(new MockWallet(new FakeChain()));
+    const { clock, events, pay } = setup({ wallet: gated });
+    gated.shut();
+    const first = track(pay(makeReq()));
+    const second = track(pay(makeReq()));
+    await flush();
+
+    // The inline deposit holds the lock for 150 s, longer than the 120 s window
+    await clock.advance(150_000);
+    expect(first.done).toBe(false);
+    gated.open();
+    await flush();
+    expect(first.done).toBe(true);
+    expect(second.done).toBe(false);
+
+    await clock.advance(119_999);
+    expect(ofType(events, "ambiguous")).toEqual([]);
+    expect(second.done).toBe(false);
+    await clock.advance(1);
+    expect(ofType(events, "ambiguous")).toEqual([{ type: "ambiguous", attemptedZat: "500" }]);
+    expect(second.done).toBe(true);
+
+    // The second payload waited 270 s for the lock and still gets all of its 120 s
+    await clock.advance(119_999);
+    expect(ofType(events, "ambiguous")).toHaveLength(1);
+    await clock.advance(1);
+    expect(ofType(events, "ambiguous")).toEqual([
+      { type: "ambiguous", attemptedZat: "500" },
+      { type: "ambiguous", attemptedZat: "1000" },
+    ]);
+    expect(gated.calls).toBe(1);
+  });
+
   it("a late hook after a safety release is ignored and leaves the next holder's lock alone", async () => {
     const { clock, hook, pay } = setup();
     const R1 = makeReq();
@@ -798,14 +832,23 @@ describe("acks come only from a successful settle (protocol.md §7.3)", () => {
   });
 });
 
+/** `n` final deposits of earlier windows, none of them ours to present */
+function finals(n: number): SnapshotDeposit[] {
+  return Array.from({ length: n }, (_, i) => dep((0xf0 + i).toString(16).repeat(32), "final"));
+}
+
 describe("a deposit request while the presented deposit is unaccounted for", () => {
   const HALT = "z402_deposit_required_while_presented";
 
   it.each<[string, (t1: string) => SessionSnapshot | undefined]>([
     ["with no snapshot", () => undefined],
     ["with a snapshot that does not list it", () => snap(0n, 0n)],
+    ["with a snapshot that does not list it and lists only 3 final deposits", () => snap(0n, 0n, finals(3))],
     ["with a snapshot that lists it as pending", (t1) => snap(0n, 0n, [dep(t1, "pending")])],
-    ["with a snapshot that lists it as confirmed", (t1) => snap(125_000n, 125_000n, [dep(t1, "confirmed")])],
+    [
+      "with a snapshot that lists it as pending beside 4 final deposits",
+      (t1) => snap(0n, 0n, [...finals(4), dep(t1, "pending")]),
+    ],
   ])("halts %s instead of paying again", async (_name, session) => {
     const { wallet, clock, events, hook, pay } = setup();
     const R = makeReq();
@@ -865,6 +908,105 @@ describe("a deposit request while the presented deposit is unaccounted for", () 
     expect(ofType(events, "fatal")).toEqual([]);
     const [, second] = ofType(events, "deposit_broadcast");
     expect(voucher(await pay(R)).depositTxid).toBe(second?.txid);
+  });
+
+  it("halts when the only snapshot is another session's, even one full of final deposits", async () => {
+    const { wallet, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+    const foreign = { ...snap(125_000n, 125_000n, finals(4)), sessionKey: "ab".repeat(32) };
+
+    await expect(hook(refused(R, r1, REASON.depositRequired, foreign))).resolves.toBeUndefined();
+
+    expect(wallet.sent).toHaveLength(1);
+    expect(ofType(events, "fatal").map((e) => e.code)).toEqual(["snapshot_session_mismatch", HALT]);
+    await expect(pay(makeReq())).rejects.toThrow(HALT);
+  });
+});
+
+describe("a deposit request whose presented deposit is used up or aged out follows protocol.md §8", () => {
+  const cases: Array<[string, (t1: string) => SessionSnapshot]> = [
+    ["lists it as confirmed", (t1) => snap(125_000n, 125_000n, [dep(t1, "confirmed")])],
+    ["lists it as final", (t1) => snap(125_000n, 125_000n, [...finals(3), dep(t1, "final")])],
+    ["does not list it but lists 4 final deposits", () => snap(125_000n, 125_000n, finals(4))],
+  ];
+
+  function stateOf(scheme: PrepaidVoucherScheme, txid: string): string | undefined {
+    return scheme.session(PAY_TO)?.deposits.find((d) => d.txid === txid)?.state;
+  }
+
+  it.each(cases)(
+    "when the snapshot %s, deposits inline and recovers, and the refusal does not ack the presented txid",
+    async (_name, session) => {
+      const { scheme, wallet, events, hook, pay } = setup();
+      const R = makeReq();
+      const r1 = await pay(R);
+      const t1 = voucher(r1).depositTxid as string;
+
+      await expect(hook(refused(R, r1, REASON.depositRequired, session(t1)))).resolves.toEqual({ recovered: true });
+
+      expect(wallet.sent.map((s) => s.memo)).toEqual([depositMemo(SESSION_KEY, 1), depositMemo(SESSION_KEY, 2)]);
+      expect(ofType(events, "fatal")).toEqual([]);
+      expect(ofType(events, "refused")).toMatchObject([{ code: REASON.depositRequired, recovering: true }]);
+      expect(ofType(events, "deposit_acked")).toEqual([]);
+      expect(stateOf(scheme, t1)).toBe("sent");
+
+      const [, second] = ofType(events, "deposit_broadcast");
+      const t2 = second?.txid as string;
+      const retry = await pay(R);
+      expect(voucher(retry).depositTxid).toBe(t2);
+      // A snapshot without T1, as when T1 has aged out of the list, so only a re-presentation can ack it
+      await hook(paid(R, retry, { transaction: t2, session: snap(125_500n, 225_000n, [dep(t2, "pending")]) }));
+      expect(stateOf(scheme, t2)).toBe("acked");
+      expect(stateOf(scheme, t1)).toBe("sent");
+
+      const R3 = makeReq();
+      const r3 = await pay(R3);
+      expect(voucher(r3).depositTxid).toBe(t1);
+      await hook(paid(R3, r3, { transaction: t1, session: snap(126_000n, 225_000n, [dep(t2, "pending")]) }));
+      expect(ofType(events, "deposit_acked")).toEqual([
+        { type: "deposit_acked", txid: t2 },
+        { type: "deposit_acked", txid: t1 },
+      ]);
+      expect(voucher(await pay(makeReq())).depositTxid).toBeUndefined();
+      expect(wallet.sent).toHaveLength(2);
+    },
+  );
+
+  it.each(cases)("when the snapshot %s on the final attempt, starts a background deposit and returns", async (_name, session) => {
+    const { scheme, wallet, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+    await hook(refused(R, r1, REASON.cumulativeMismatch, snap(1000n, 125_000n)));
+    const r2 = await pay(R);
+    expect(voucher(r2).depositTxid).toBe(t1);
+
+    await expect(hook(refused(R, r2, REASON.depositRequired, session(t1)))).resolves.toBeUndefined();
+    await flush();
+
+    expect(wallet.sent).toHaveLength(2);
+    expect(ofType(events, "fatal")).toEqual([]);
+    expect(stateOf(scheme, t1)).toBe("sent");
+    const [, second] = ofType(events, "deposit_broadcast");
+    expect(voucher(await pay(makeReq())).depositTxid).toBe(second?.txid);
+  });
+
+  it.each(cases)("when the snapshot %s in cheat mode, stops without a deposit or a halt", async (_name, session) => {
+    const { scheme, wallet, events, hook, pay } = setup({ maxDeposits: 1 });
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+
+    await expect(hook(refused(R, r1, REASON.depositRequired, session(t1)))).resolves.toBeUndefined();
+    await flush();
+
+    expect(wallet.sent).toHaveLength(1);
+    expect(ofType(events, "fatal")).toEqual([]);
+    expect(ofType(events, "refused")).toMatchObject([{ code: REASON.depositRequired, recovering: false }]);
+    expect(stateOf(scheme, t1)).toBe("sent");
+    await expect(pay(makeReq())).resolves.toBeDefined();
   });
 });
 

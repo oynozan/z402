@@ -11,7 +11,9 @@ import { PAY_TO } from "../fixtures.js";
 
 export type MerchantReply =
   | { kind: "settled"; session: SessionSnapshot; transaction?: string }
-  | { kind: "refused"; code: string; session: SessionSnapshot };
+  | { kind: "refused"; code: string; session: SessionSnapshot }
+  /** A 502 with neither x402 header, as when the facilitator times out after it settled */
+  | { kind: "lost" };
 
 export interface ScriptedMerchant {
   /** The one paid resource, e.g. `http://127.0.0.1:41234/chunk` */
@@ -56,8 +58,8 @@ function send(res: ServerResponse, status: number, headers: Record<string, strin
 /**
  * A one-route x402 merchant driven by a script. An unpaid request gets a 402 carrying the protocol.md §2 entry.
  * Each paid request calls `respond(payload, n)`, where `n` counts paid requests from 1, and gets either a
- * 200 with `PAYMENT-RESPONSE` or a 402 whose `PAYMENT-REQUIRED` carries the refusal code and `extra.session`.
- * The body is always `{}`.
+ * 200 with `PAYMENT-RESPONSE`, a 402 whose `PAYMENT-REQUIRED` carries the refusal code and `extra.session`, or a
+ * bare 502. The body is always `{}`.
  */
 export async function startScriptedMerchant(
   respond: (payload: PaymentPayload, n: number) => MerchantReply,
@@ -77,6 +79,10 @@ export async function startScriptedMerchant(
     const payload = decodePaymentSignatureHeader(header);
     paid += 1;
     const reply = respond(payload, paid);
+    if (reply.kind === "lost") {
+      send(res, 502, {});
+      return;
+    }
     if (reply.kind === "refused") {
       send(res, 402, {
         "payment-required": encodePaymentRequiredHeader(envelope(url, reply.code, reply.session)),

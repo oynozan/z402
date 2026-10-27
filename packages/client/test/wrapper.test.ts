@@ -1,7 +1,7 @@
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { PaymentPayload } from "@x402/core/types";
 import { decodePaymentResponseHeader, wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { NETWORK_REGTEST, parseSessionSnapshot, REASON, type SessionSnapshot } from "@z402/protocol";
+import { NETWORK_REGTEST, parseSessionSnapshot, REASON, type SessionSnapshot, type SnapshotDeposit } from "@z402/protocol";
 import { FakeChain, MockWallet } from "@z402/testkit";
 import { afterEach, describe, expect, it } from "vitest";
 import { PrepaidVoucherScheme, type ClientEvent, type PrepaidVoucherSchemeOptions } from "../src/index.js";
@@ -10,7 +10,10 @@ import { startScriptedMerchant, type ScriptedMerchant } from "./helpers/scripted
 const HEX64 = /^[0-9a-f]{64}$/;
 
 /** A snapshot that passes `parseSessionSnapshot`, for the session key the merchant just saw */
-function snapshotFor(sessionKey: string, o: { cumulative?: bigint; limit?: bigint } = {}): SessionSnapshot {
+function snapshotFor(
+  sessionKey: string,
+  o: { cumulative?: bigint; limit?: bigint; deposits?: SnapshotDeposit[] } = {},
+): SessionSnapshot {
   const cumulative = o.cumulative ?? 0n;
   const limit = o.limit ?? 125_000n;
   const s: SessionSnapshot = {
@@ -22,10 +25,15 @@ function snapshotFor(sessionKey: string, o: { cumulative?: bigint; limit?: bigin
     pendingZat: "0",
     creditZat: "0",
     tip: 1000,
-    deposits: [],
+    deposits: o.deposits ?? [],
   };
   if (parseSessionSnapshot(s) === null) throw new Error("test snapshot does not parse");
   return s;
+}
+
+function listed(txid: string, status: SnapshotDeposit["status"]): SnapshotDeposit {
+  const confirmations = status === "pending" ? 0 : 1;
+  return { txid, valueZat: "100000", status, confirmations, expiryHeight: 1121, zeroConf: true };
 }
 
 function voucherOf(payload: PaymentPayload): { sessionKey: string; cumulativeZat: string; depositTxid?: string } {
@@ -147,6 +155,62 @@ describe("stock @x402/fetch wrapper against a scripted merchant", () => {
     expect(wallet.sent).toHaveLength(1);
     expect(events.filter((e) => e.type === "fatal").map((e) => (e as { code: string }).code)).toEqual([
       "z402_deposit_required_while_presented",
+    ]);
+  });
+
+  it("a credited deposit whose ack was lost is used up, deposited anew, and acked by a later settle", async () => {
+    const chain = new FakeChain();
+    const wallet = new MockWallet(chain);
+    const events: ClientEvent[] = [];
+    const seen: PaymentPayload[] = [];
+    let t1 = "";
+    let t2 = "";
+    merchant = await startScriptedMerchant((payload, n) => {
+      seen.push(payload);
+      const { sessionKey, cumulativeZat, depositTxid } = voucherOf(payload);
+      const cumulative = BigInt(cumulativeZat);
+      switch (n) {
+        case 1:
+          t1 = depositTxid ?? "";
+          return { kind: "lost" };
+        case 2:
+          return {
+            kind: "refused",
+            code: REASON.depositRequired,
+            session: snapshotFor(sessionKey, { cumulative: 125_000n, limit: 125_000n, deposits: [listed(t1, "confirmed")] }),
+          };
+        case 3:
+          t2 = depositTxid ?? "";
+          // A snapshot without T1, as when T1 has aged out of the list, so only a re-presentation can ack it
+          return {
+            kind: "settled",
+            transaction: t2,
+            session: snapshotFor(sessionKey, { cumulative, limit: 225_000n, deposits: [listed(t2, "pending")] }),
+          };
+        default:
+          return {
+            kind: "settled",
+            transaction: depositTxid ?? "",
+            session: snapshotFor(sessionKey, { cumulative, limit: 225_000n, deposits: [listed(t2, "pending")] }),
+          };
+      }
+    });
+    const paidFetch = paidFetchWith(wallet, chain, { onEvent: (e) => events.push(e) });
+
+    expect((await paidFetch(merchant.url)).status).toBe(502);
+    expect((await paidFetch(merchant.url)).status).toBe(200);
+    expect((await paidFetch(merchant.url)).status).toBe(200);
+    expect((await paidFetch(merchant.url)).status).toBe(200);
+
+    expect(t1).toMatch(HEX64);
+    expect(t2).toMatch(HEX64);
+    expect(t2).not.toBe(t1);
+    expect(seen.map((p) => voucherOf(p).depositTxid)).toEqual([t1, t1, t2, t1, undefined]);
+    expect(wallet.sent).toHaveLength(2);
+    expect(events.filter((e) => e.type === "fatal")).toEqual([]);
+    expect(events.filter((e) => e.type === "deposit_acked")).toEqual([
+      { type: "deposit_acked", txid: t2 },
+      { type: "deposit_acked", txid: t1 },
     ]);
   });
 

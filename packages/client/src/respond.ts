@@ -55,6 +55,9 @@ const NOT_FOUND_RECOVER_MS = 2_000;
 const CHAIN_UNAVAILABLE_BACKOFF_MS = 5_000;
 const UNEXPECTED_ERROR_BACKOFF_MS = 1_000;
 
+/** A snapshot lists every non-final deposit but only the last 4 final ones (protocol.md §7.2) */
+const SNAPSHOT_FINAL_DEPOSITS = 4;
+
 const DEPOSIT_REQUIRED_WHILE_PRESENTED = "z402_deposit_required_while_presented";
 const SNAPSHOT_SESSION_MISMATCH = "snapshot_session_mismatch";
 
@@ -180,7 +183,7 @@ async function refused(
   }
 }
 
-/** The halt for deposit_required while the presented deposit is not known dead or orphaned (protocol.md §7.3) */
+/** The halt for deposit_required when the presented txid is listed pending, or unlisted where it cannot have aged out */
 function unaccountedDeposit(
   attempt: Attempt,
   code: string,
@@ -189,7 +192,15 @@ function unaccountedDeposit(
   const txid = attempt.depositTxid;
   if (txid === undefined || code !== REASON.depositRequired) return undefined;
   const status = snapshot?.deposits.find((d) => d.txid === txid)?.status;
-  if (status === "dead" || status === "orphaned") return undefined;
+  if (status === "pending") {
+    return {
+      code: DEPOSIT_REQUIRED_WHILE_PRESENTED,
+      message: `${code} while the snapshot lists the presented deposit ${txid} as pending, stopping rather than paying again`,
+    };
+  }
+  if (status !== undefined) return undefined;
+  const finals = snapshot?.deposits.filter((d) => d.status === "final").length ?? 0;
+  if (finals >= SNAPSHOT_FINAL_DEPOSITS) return undefined;
   return {
     code: DEPOSIT_REQUIRED_WHILE_PRESENTED,
     message: `${code} while the presented deposit ${txid} is unaccounted for, stopping rather than paying again`,
