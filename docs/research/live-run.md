@@ -246,7 +246,7 @@ Later deposits from the client's live tests, all harmless. On `0fcb6eae...54df` 
 | `e984638e...8eb9` | 100000 zat | 118 | |
 | `ffc61849...50e5` | 0 zat | 116 | |
 
-`4b6a92e1...c55d` was the client's first live-test deposit. It has memo `99cd...daf1:1`, 3 Ironwood actions and a fee of 15,000 zat. It was re-read with `scripts/show-deposit.sh` in Task 13 and found to be `toPayTo: true`.
+`4b6a92e1...c55d` is the earliest-mined of the client's live-test deposits (height 116). It has memo `99cd...daf1:1`, 3 Ironwood actions and a fee of 15,000 zat. It was re-read with `scripts/show-deposit.sh` in Task 13 and found to be `toPayTo: true`.
 
 `ffc61849...50e5` is a 0-zat output that carries a z402-shaped memo (`abab...ab:1`), from the client's tests. It is harmless, because 0 zat can never meet `windowZat`.
 
@@ -291,7 +291,7 @@ scripts/show-deposit.sh 98e84dabd476c1a59543ca3c51b9040e0080252abdd1c6b25c7eec12
 ### 8.1 Fake-chain end to end (step 1)
 
 - z402-08's `apps/e2e` at `00e293d` runs four in-process scenarios: honest, cheat, awaiting and dead deposit. Each uses `FakeChain({ expiryDelta: 40 })`, this side's `startFacilitator` with an in-memory ledger, `startApi`, the client scheme and port 0.
-- `pnpm vitest run apps/e2e` passed 4/4 on three runs out of three.
+- `pnpm vitest run apps/e2e` passed 4/4 on three runs out of three, run by the server-side agent at `00e293d`.
 - The plan's restart scenario is covered on this side by `apps/api/test/integration.test.ts` ("restart"). That test restarts on a shared tmp ledger, and replaying the old voucher gets `z402_cumulative_mismatch` at cumulative 5000.
 
 ### 8.2 Honest run (step 2): 150 calls at 1 call/s, one block every 25 s
@@ -317,7 +317,7 @@ Session `c98d…cf`. The block clock mined heights 119 to 132 at 25 s intervals,
 
 ### 8.3 Cheat run (step 3): local speed, cheat flag on
 
-Session `147a…3e`, started at 20:49:34Z with the tip at 128. The planned run was 400 calls with no delay, cheating after one deposit.
+Session `147a…3e`, started at 20:49:34Z with the tip at 128, by z402-08's account (no run log records the start). The planned run was 400 calls with no delay, cheating after one deposit.
 
 | When | What happened |
 |---|---|
@@ -328,7 +328,7 @@ Session `147a…3e`, started at 20:49:34Z with the tip at 128. The planned run w
 | #201 to #250 | 200 on credit: limit 125,000, conf 100,000, credit 25,000 |
 | #251 | **402 `z402_deposit_required` at limit 125,000**, cumulative 125,000. The cheating agent has no second deposit, so it stops. |
 
-- The whole run took 34 s and ended at 20:50:08Z.
+- The run ended at 20:50:08Z, the last write to the run log. z402-08 timed the whole run at 34 s.
 - The merchant's exposure ended at exactly the credit cap rule: 25 % of the confirmed 100,000.
 
 ### 8.4 Demo step 7 (step 4): the deposit as the chain stores it and as the viewing key reads it
