@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression checks for the wallet-init guard and compose project pinning in up.sh and down.sh.
+# Regression checks for the wallet-init guard, volume matching and compose project pinning in up.sh and down.sh.
 # Runs both scripts against a fake docker on PATH with DOCKER_HOST pointed at a dead socket,
 # so nothing here can reach a real daemon or the live stack.
 # Usage: bash infra/z3/test/guard.sh
@@ -65,6 +65,23 @@ expect_guard_death() {
     sed 's/^/      log: /' "$SHIM_LOG"
   fi
 }
+
+{
+  printf 'z3-regtest-zallet\n'
+  for i in $(seq 1 4000); do printf 'filler-volume-%05d-0123456789abcdef0123456789abcdef\n' "$i"; done
+} >"$WORK/volumes"
+# A long list after the target, where a pipe into grep -q can die of SIGPIPE under pipefail
+if (
+  HERE="$Z3"
+  source "$Z3/lib.sh"
+  docker() { cat "$WORK/volumes"; }
+  set -o pipefail
+  volume_present z3-regtest-zallet && ! volume_present z3-regtest-zall && ! volume_present filler-volume
+); then
+  pass "volume_present finds a volume at the head of a long list and matches whole names only"
+else
+  fail "volume_present on a long volume list"
+fi
 
 export SHIM_VOLUMES="z3-regtest-zallet"
 

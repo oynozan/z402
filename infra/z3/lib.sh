@@ -53,7 +53,10 @@ zrpc() { node "$HERE/rpc.mjs" "$@"; }
 volume_present() {
   local names
   names="$(docker volume ls -q)" || die "docker volume ls failed, cannot tell whether $1 exists"
-  printf '%s\n' "$names" | grep -Fxq -- "$1"
+  case $'\n'"$names"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Sets FILE_FOUND (1 or 0) and FILE_TEXT for /data/<name> in the wallet volume, and dies when it cannot look
