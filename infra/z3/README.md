@@ -50,6 +50,9 @@ After `down.sh --wipe` the seed, account and `AGENT_UA` are new.
   `@grpc/grpc-js` from `.tools/grpc-probe` and the protos from `.tools/lightwallet-protocol`,
   both installed by `up.sh`. gRPC errors print as `{code, codeName, details}` and exit 3.
 - `lib.sh`: shared paths and helpers for the shell scripts.
+- `test/guard.sh`: regression checks for the wallet-init guard and the compose project pin.
+  It runs `up.sh` and `down.sh --wipe` against a fake `docker` with `DOCKER_HOST` pointed at a
+  dead socket, so it cannot touch the live stack.
 
 ## What up.sh changes in Z3
 
@@ -64,10 +67,17 @@ volumes named `z3-regtest-*`.
   `Cannot allocate memory`.
 - Runs `scripts/regtest-init.sh` once, guarded by a marker in the wallet volume. Z3's own
   guard looks for `/data/*.age`, which Zallet beta.1 never writes, so a second run of
-  `regtest-init.sh` would delete an initialised `wallet.db`.
+  `regtest-init.sh` would delete an initialised `wallet.db`. The guard fails closed: if Docker
+  cannot list the volume or read the marker, or if `wallet.db` exists with no marker,
+  `up.sh` stops before `regtest-init.sh` runs.
 - Creates account 0 and the transparent miner address with
   `zallet regtest generate-account-and-miner-address` before Zallet's first start, and keeps
   the address in the wallet volume (`z402-miner-address`).
 - Starts `zebra zallet`, then `--profile indexer zaino`. The rpc-router is not built.
+- Every compose call is pinned to project `z3-regtest` and the two Z3 regtest compose
+  files (`-p` and `-f`), with ambient `COMPOSE_*` and `Z3_*` variables dropped, except the
+  image overrides. A shell `COMPOSE_PROJECT_NAME` or `COMPOSE_FILE` therefore cannot point
+  `down --volumes` at another project on the same Docker host. `down.sh --wipe` also removes
+  any leftover `z3-regtest-*` volume by name.
 
 Override images with `Z3_ZEBRA_IMAGE`, `Z3_ZALLET_IMAGE` or `Z3_ZAINO_IMAGE`.

@@ -43,8 +43,9 @@ probe_tx() {
 step "Checking the stack"
 zrpc zebra getblockcount >/dev/null 2>&1 || die "Zebra does not answer, run bash infra/z3/up.sh"
 zrpc zallet getwalletinfo >/dev/null 2>&1 || die "Zallet does not answer, run bash infra/z3/up.sh"
-MINER="$(read_marker "$MINER_FILE")"
-[ -n "$MINER" ] || die "no miner address in $ZALLET_VOLUME, run bash infra/z3/up.sh"
+volume_file "$MINER_FILE" cat
+MINER="$FILE_TEXT"
+[ "$FILE_FOUND" = 1 ] && [ -n "$MINER" ] || die "no miner address in $ZALLET_VOLUME, run bash infra/z3/up.sh"
 ACCOUNT="$(zrpc zallet z_listaccounts | jq -r '.[0].account_uuid')"
 AGENT_UA="$(zrpc zallet z_getaddressforaccount "$ACCOUNT" '["orchard"]' "$AGENT_DIVERSIFIER" | jq -r .address)"
 info "account $ACCOUNT"

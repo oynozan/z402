@@ -57,16 +57,28 @@ fi
 
 step "Wallet initialisation (scripts/regtest-init.sh)"
 # Z3 detects an initialised wallet by /data/*.age, which Zallet beta.1 never writes, so a rerun would delete wallet.db
-if [ -n "$(read_marker "$INIT_FILE")" ] || [ -n "$(read_marker "$MINER_FILE")" ]; then
+volume_file "$INIT_FILE"
+init_done="$FILE_FOUND"
+volume_file "$MINER_FILE" cat
+miner_found="$FILE_FOUND"
+MINER="$FILE_TEXT"
+if [ "$init_done" = 1 ] || [ "$miner_found" = 1 ]; then
   info "wallet volume already initialised, skipping"
 else
-  "$Z3_DIR/scripts/regtest-init.sh" 2>&1 | sed 's/^/    /'
+  volume_file wallet.db
+  if [ "$FILE_FOUND" = 1 ]; then
+    die "$ZALLET_VOLUME has a wallet.db but no z402 marker, refusing to run regtest-init.sh (it would delete it). Start over with bash infra/z3/down.sh --wipe."
+  fi
+  (z3_env && "$Z3_DIR/scripts/regtest-init.sh") 2>&1 | sed 's/^/    /'
   write_marker "$INIT_FILE" "$(date -u +%FT%TZ)"
 fi
 
 step "Account 0 and transparent miner address"
-MINER="$(read_marker "$MINER_FILE")"
-if [ -n "$MINER" ]; then
+if [ "$miner_found" = 1 ]; then
+  case "$MINER" in
+    tm*) ;;
+    *) die "$ZALLET_VOLUME has $MINER_FILE but it holds '$MINER', not a regtest t-address" ;;
+  esac
   info "miner address already created: $MINER"
 else
   compose stop zallet >/dev/null 2>&1 || true
