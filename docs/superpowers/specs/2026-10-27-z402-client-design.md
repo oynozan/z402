@@ -110,7 +110,7 @@ On entry: clear the safety timer. Always release the mutex in `finally`.
 | Code | Not final | Final |
 |---|---|---|
 | `z402_awaiting_confirmation` | `waitForConfirmation(pendingTxid)`. Mined → `{recovered:true}`. Dead → redeposit inline (if allowed) → `{recovered:true}`. Timeout → return. | Return. |
-| `z402_deposit_required` | If the attempt presented a txid that the snapshot does not list as dead or orphaned → halt (`fatal`), never pay again (protocol.md v1.1 §7.3 bullet 3). Otherwise inline deposit if allowed → `{recovered:true}`; in cheat mode → emit `refused` and return. | Same halt rule; otherwise background deposit if allowed; return. |
+| `z402_deposit_required` | If the attempt presented txid T: halt (`fatal`, never pay again) when the refusal snapshot lists T `pending`, or omits T while listing fewer than 4 `final` deposits (protocol.md v1.1 §7.3 bullet 3; R26/R26a). T listed `confirmed`/`final`/`dead`/`orphaned`, or omitted with ≥4 `final` listed (aged out, §7.2), is accounted: no halt and no ack from the refusal. Then inline deposit if allowed → `{recovered:true}`; in cheat mode → emit `refused` and return. | Same halt rule; otherwise background deposit if allowed; return. |
 | `z402_cumulative_mismatch` | Snapshot already resynced `cumulative` → `{recovered:true}` (without a snapshot: return). | Return. |
 | `z402_deposit_dead` | Mark it dead → inline deposit if allowed → `{recovered:true}`. | Mark it dead; background deposit. |
 | `z402_deposit_not_found` | Own `status(txid)`. Found → sleep 2 s → recover. Not found for ≥ 120 s and ≥ 2 new blocks → treat as dead. | Return. |
