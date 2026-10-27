@@ -34,7 +34,7 @@ Do all of this before you start recording.
        spendable    6,249,460,000 zat, enough (the demo needs 250,000)
    ```
 4. **The decryptor is built.** `ls -l crates/zdecrypt/target/release/zdecrypt`. If it is missing, run `pnpm --filter @z402/facilitator build:native`.
-5. **Optional rehearsal of beat 7.** `scripts/demo.sh show <txid>` works on any earlier mined deposit, so you can check the decrypt before the take.
+5. **Optional rehearsal of beat 7.** `scripts/demo.sh show` with no argument decrypts the newest deposit the agent wallet has sent, so after any earlier run you can check the decrypt before the take.
 
 Two terminals make the footage easier. Terminal 1 is the agent, with a large font. Terminal 2 runs `tail -f .data/demo/clock.log` so each new block is visible.
 
@@ -55,26 +55,39 @@ The agent prints one line per paid call:
 | # | Beat | You run | Point at |
 |---|---|---|---|
 | 1 | The code | open `apps/agent/src/agent.ts` | The stock `@x402/fetch` imports and one line, `client.register(flags.network, zcashClientScheme)`. Nothing else in the loop knows about Zcash. |
-| 2 | Call 1 on an unconfirmed deposit | `scripts/demo.sh clock`, then `scripts/demo.sh honest` | `wallet: … zat spendable`, then 5 to 10 s of silence while D1 is proved and sent inline (`  * deposit D1 started, paid inline`). Call 1 is served on the unconfirmed deposit: `#001 200  c=500  limit=100,000  conf=0  pend=100,000  credit=0  D1 3f2a…c1 pending`. |
+| 2 | Call 1 on an unconfirmed deposit | `scripts/demo.sh clock`, then `scripts/demo.sh honest` | `wallet: … zat spendable`, then 5 to 10 s of silence while D1 is proved and sent inline. Call 1 is served on the unconfirmed deposit: `#001 200  c=500  limit=100,000  conf=0  pend=100,000  credit=0  D1 3f2a…c1 pending`. The event lines around it are shown below. |
 | 3 | The stream | (running) | One line per second. `c=` climbs by 500 a call against `limit=100,000`. One voucher per call, no transaction per call. |
 | 4 | A block lands | (running) | The clock fires within 25 s, the facilitator notices within 5 s more. `conf` goes 0 to 100,000, `pend` to 0, `credit=25,000` appears, `limit` goes 100,000 to 125,000, and D1 flips to `confirmed`. |
 | 5 | Deposit 2, no stall | (running) | Around call 51, headroom drops under 100,000 and D2 goes out in the background (`  * deposit D2 started, in the background`). Line timing does not change. Then `limit=225,000` with `D2 9b7e…04 pending`, and after the next block `limit=250,000` with both confirmed. |
-| 6 | Cheat run | Ctrl-C the honest run, then `scripts/demo.sh cheat` | See below. |
-| 7 | Privacy | `scripts/demo.sh show <D1 txid>` | See below. |
+| 6 | Cheat run | Ctrl-C the honest run, wait for a new block line in terminal 2, then `scripts/demo.sh cheat` | See below. |
+| 7 | Privacy | `scripts/demo.sh show` | See below. |
 
 The honest run takes about 160 s to finish. For a 3-minute video, let it run through beat 5 (about call 90, when D2 confirms), then press Ctrl-C once and wait for the agent to print `interrupted`.
+
+Beat 2 as it looks, with the three event lines that come with D1:
+
+```
+  * session abab…ab on zcash:regtest
+  * deposit D1 started, paid inline
+  * deposit D1 broadcast 3f2a…c1 in 7,412 ms
+  * deposit 3f2a…c1 acknowledged by the merchant
+#001 200  c=500  limit=100,000  conf=0  pend=100,000  credit=0  D1 3f2a…c1 pending
+```
+
+The broadcast time is the proving time, so it is the 5 to 10 s the audience just waited through.
 
 Beat 4 as it looks in the log:
 
 ```
-  * deposit 3f2a…c1 confirmed at height 121
+  * deposit D1 3f2a…c1 confirmed (credit now 25,000)
 #030 200  c=15,000  limit=125,000  conf=100,000  pend=0  credit=25,000  D1 3f2a…c1 confirmed
 ```
 
-Beat 5 as it looks:
+Beat 5 as it looks. D2 goes out at call 51 but shows as pending only once it is proved and acknowledged, which takes about 5 to 10 s, so expect the first `D2 … pending` line around call 60:
 
 ```
-#055 200  c=27,500  limit=225,000  conf=100,000  pend=100,000  credit=25,000  D1 3f2a…c1 confirmed, D2 9b7e…04 pending
+  * deposit D2 started, in the background
+#060 200  c=30,000  limit=225,000  conf=100,000  pend=100,000  credit=25,000  D1 3f2a…c1 confirmed, D2 9b7e…04 pending
 #080 200  c=40,000  limit=250,000  conf=200,000  pend=0  credit=50,000  D1 3f2a…c1 confirmed, D2 9b7e…04 confirmed
 ```
 
@@ -82,8 +95,10 @@ Beat 5 as it looks:
 
 The cheating agent makes one deposit and then refuses to make another. It runs with no pause between calls. It is a new session, so it makes its own D1.
 
+Start it right after a new block line appears in `clock.log` (terminal 2). D1 is broadcast about 5 to 10 s later and the next block is 25 s after the last one, so D1 stays at `conf=0` for the whole fast phase of 200 calls. Start it just before a block and D1 confirms too early to show the zero-conf exposure.
+
 1. About 200 calls fly by in seconds on D1 while it is still unconfirmed, ending at `c=100,000  limit=100,000`. Point at `conf=0  pend=100,000`: that is the merchant's zero-conf exposure, capped at one window.
-2. The agent stops and prints `  * waiting for deposit 3f2a…c1 to confirm`. It waits for a block.
+2. The agent stops and prints `  * waiting for deposit 3f2a…c1 to confirm`. It waits for a block, then prints `  * deposit D1 3f2a…c1 confirmed at height N`.
 3. The block lands and the credit line opens (`limit=125,000`, `credit=25,000`). About 50 more calls run on credit, up to `c=125,000`.
 4. The merchant refuses, and the run ends:
 
@@ -96,17 +111,22 @@ Point at `REFUSED … at limit 125,000`. The most a cheater ever gets is one unc
 
 ### Beat 7: what the chain shows
 
-`scripts/demo.sh show <txid>` needs the full 64-character txid, and the agent log only shows `3f2a…c1`. Get the full one before you start the take, from either place:
+`scripts/demo.sh show` with no argument takes the newest deposit the agent wallet has sent. It finds it by the deposit memo (`<sessionKey>:<index>`) in Zallet's transaction list. Run right after the cheat run, that is the cheat run's D1. This is the easy path and needs no prep.
+
+To show a specific deposit, pass its full 64-character txid. The agent log only shows the short form, and the txid does not exist before the take, so grab it in terminal 2 while the deposit is on screen (during beat 5, once D1 is in the log):
 
 ```bash
-# the facilitator ledger holds each deposit's txid in full (empty output means use the next command)
+# 3f2a and c1 are placeholders, use the first 4 and last 2 characters of D1 in your own log
 grep -oh '3f2a[0-9a-f]\{58\}c1' .data/facilitator-ledger.regtest.jsonl | head -1
 
-# or list the transactions of the block D1 was mined in (see "confirmed at height N")
+# fallback, only while D1 is still pending: its full txid is in the Zebra mempool
+node infra/z3/rpc.mjs zebra getrawmempool
+
+# fallback, once it is mined: list the block's txids (N is a height from clock.log), skip the first, which is the coinbase
 node infra/z3/rpc.mjs zebra getblock '"N"' 1 | jq -r '.tx[]'
 ```
 
-The command then does two things:
+Then `scripts/demo.sh show <txid>`. The command does two things:
 
 1. It fetches the raw transaction from Zebra and prints its size and the first bytes. This is all a block explorer has: ciphertext, with no plaintext amount and no address.
 2. It decrypts the same bytes with the merchant's viewing key (the key is never printed) and prints the JSON. Point at `"pool": "ironwood"`, `"valueZat": 100000`, `"toPayTo": true` with the merchant `"recipient"`, and `"memoText"` of the form `<sessionKey>:1`, which ties the deposit to the agent's session.
@@ -136,6 +156,7 @@ At p = 500 zat and one call per second (`docs/spec/protocol.md` section 12). The
   A process that is up but slow keeps running. Run `up` again to keep waiting, or `scripts/demo.sh down` to stop it.
 - **`REFUSED z402_awaiting_confirmation` lingers.** The deposit is waiting for a block. Is the clock running? `scripts/demo.sh status` shows it, and `scripts/demo.sh clock` starts it.
 - **The agent exits at preflight** with `the wallet has N zat spendable, the demo needs at least 250,000 zat`. Run `bash infra/z3/fund-agent.sh`, then `scripts/demo.sh status`.
+- **`up` says Docker did not answer within 10 s.** Start Docker Desktop and wait until it reports running, then retry.
 - **`honest` or `cheat` says nothing listens on 4021 or 4022.** Run `scripts/demo.sh up`.
 - **After `bash infra/z3/down.sh --wipe`.** The chain restarts from height 0, so the old ledger no longer matches. Run `scripts/demo.sh down --wipe-ledger`, then `scripts/demo.sh up`, then `bash infra/z3/fund-agent.sh`. The script never touches Docker, so it does not wipe the volumes itself.
 - **`down` warns that a process ignored SIGINT.** It escalates to SIGTERM by itself. If it still cannot stop the process, it prints the `kill -9` command for the process group.
@@ -151,8 +172,8 @@ Nothing needs resetting. Each agent run is a new session with a new session key,
 
 | Path | What |
 |---|---|
-| `.data/demo/facilitator.log`, `api.log`, `clock.log` | Process output. Each log is truncated when its process starts. |
-| `.data/demo/*.pid` | Pidfiles. Each pid is also the process group id. |
+| `.data/demo/facilitator.log`, `api.log`, `clock.log` | Process output. A start moves the previous log to `<name>.log.prev`, so the log of a crashed run survives the restart. |
+| `.data/demo/*.pid` | Pidfiles. Line 1 is the pid, which is also the process group id. Line 2 is the process start time, so the script never mistakes a recycled pid for its own process. |
 | `.data/demo/token` | The facilitator token, mode 600, generated once. |
 | `.data/facilitator-ledger.regtest.jsonl` | The facilitator ledger. |
 | `.secrets/merchant-regtest.json` | The merchant keys. The script never prints the viewing key. |

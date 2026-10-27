@@ -5,14 +5,16 @@
 #   scripts/demo.sh clock                 block clock, one block every 25 s
 #   scripts/demo.sh honest [--calls N]    honest agent in the foreground
 #   scripts/demo.sh cheat                 cheating agent in the foreground
-#   scripts/demo.sh show <txid>           raw deposit transaction, then decrypted with the viewing key
+#   scripts/demo.sh show [txid]           raw deposit transaction, then decrypted with the viewing key
 #   scripts/demo.sh status                process liveness, Zebra height, agent wallet balance
 #   scripts/demo.sh down [--wipe-ledger]  stop what this script started
 #
 # The clock, facilitator and API run detached in their own session. Each has a pidfile and a log
 # in .data/demo/ (gitignored), and the pid doubles as its process group id, so down can SIGINT the
-# whole pnpm chain. The script never touches Docker except through infra/z3/up.sh, and it never
-# prints the merchant viewing key (UIVK) or the facilitator token. Runbook: docs/demo.md.
+# whole pnpm chain. The pidfile also records the process start time and the command marker, so a
+# recycled pid is never taken for ours. The script never touches Docker except through
+# infra/z3/up.sh, and it never prints the merchant viewing key (UIVK) or the facilitator token.
+# Runbook: docs/demo.md.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +49,8 @@ usage: scripts/demo.sh <command>
   clock                 start the block clock in the background (one block every 25 s)
   honest [--calls N]    run the honest agent in the foreground (default 150 calls, one per second)
   cheat                 run the cheating agent in the foreground (one deposit, then none)
-  show <txid>           show a deposit's raw transaction, then decrypt it with the viewing key
+  show [txid]           show a deposit's raw transaction, then decrypt it with the viewing key
+                        (no txid means the newest deposit the agent wallet sent)
   status                process liveness, Zebra height, the agent wallet's spendable balance
   down [--wipe-ledger]  stop the clock, the API and the facilitator that this script started
   --help                print this text
@@ -106,18 +109,67 @@ clear_z402_env() {
   done
 }
 
-pid_of() { cat "$DATA/$1.pid" 2>/dev/null || true; }
+pid_of() { head -n 1 "$DATA/$1.pid" 2>/dev/null | tr -d '[:space:]' || true; }
+
+started_of() { sed -n 2p "$DATA/$1.pid" 2>/dev/null || true; }
 
 pgid_of() { ps -o pgid= -p "$1" 2>/dev/null | tr -d ' ' || true; }
 
-# True when the pidfile names a live process that leads its own process group, as spawn makes it
-is_alive() {
+lstart_of() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//' || true; }
+
+command_of() { ps -ww -o command= -p "$1" 2>/dev/null || true; }
+
+marker_of() {
+  case "$1" in
+    facilitator) printf '%s' "@z402/facilitator" ;;
+    api) printf '%s' "@z402/api" ;;
+    clock) printf '%s' "clock.mjs" ;;
+  esac
+}
+
+# A pidfile is two lines, the pid and the process start time that spawn recorded, and anything else is stale
+pid_ok() {
   local pid
   pid="$(pid_of "$1")"
   case "$pid" in '' | *[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  [ "$(pgid_of "$pid")" = "$pid" ]
+  [ "$pid" -gt 1 ] || return 1
+  [ -n "$(started_of "$1")" ]
 }
+
+# True only for the very process spawn started, so a recycled pid is never taken for ours
+is_alive() {
+  local name="$1" pid
+  pid_ok "$name" || return 1
+  pid="$(pid_of "$name")"
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ "$(pgid_of "$pid")" = "$pid" ] || return 1
+  [ "$(lstart_of "$pid")" = "$(started_of "$name")" ] || return 1
+  case "$(command_of "$pid")" in *"$(marker_of "$name")"*) return 0 ;; esac
+  return 1
+}
+
+# The leader is gone but its process group still has members, which can only be the ones spawn started
+is_orphaned() {
+  local pid
+  pid_ok "$1" || return 1
+  pid="$(pid_of "$1")"
+  if kill -0 "$pid" 2>/dev/null; then return 1; fi
+  kill -0 -- "-$pid" 2>/dev/null
+}
+
+# Returns 0 when it runs already, dies when only orphaned members are left, returns 1 when it is safe to spawn
+already_running() {
+  if is_alive "$1"; then
+    info "$1 already running (pid $(pid_of "$1"))"
+    return 0
+  fi
+  if is_orphaned "$1"; then
+    die "the $1 leader exited but members of its process group still run, stop them with scripts/demo.sh down first"
+  fi
+  return 1
+}
+
+docker_answers() { { perl -e 'alarm 10; exec @ARGV or exit 127' -- docker info >/dev/null; } 2>/dev/null; }
 
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
@@ -127,17 +179,19 @@ guard_port() {
   fi
 }
 
-# spawn <name> <command...> runs it detached at the repo root, output to .data/demo/<name>.log
+# spawn <name> <command...> runs it detached at the repo root, output to .data/demo/<name>.log (the old log moves to .log.prev)
 spawn() {
   local name="$1" pid i=0
   shift
   mkdir -p "$DATA"
-  : >"$DATA/$name.log"
   rm -f "$DATA/$name.pid"
+  if [ -s "$DATA/$name.log" ]; then mv -f "$DATA/$name.log" "$DATA/$name.log.prev"; fi
+  : >"$DATA/$name.log"
   (
     cd "$ROOT"
     perl -e "$DETACH" -- "$@" </dev/null >>"$DATA/$name.log" 2>&1 &
-    echo "$!" >"$DATA/$name.pid"
+    pid=$!
+    printf '%s\n%s\n' "$pid" "$(lstart_of "$pid")" >"$DATA/$name.pid"
   )
   pid="$(pid_of "$name")"
   while [ "$i" -lt 30 ]; do
@@ -157,6 +211,7 @@ wait_ready() {
     if ! is_alive "$name"; then
       printf 'ERROR: %s exited before it printed "%s". Last lines of .data/demo/%s.log\n' "$label" "$pattern" "$name" >&2
       tail_log "$log"
+      if ! is_orphaned "$name"; then rm -f "$DATA/$name.pid"; fi
       exit 1
     fi
     if [ $((SECONDS - start)) -ge "$timeout" ]; then
@@ -193,10 +248,7 @@ merchant_pay_to() {
 
 start_facilitator() {
   local token
-  if is_alive facilitator; then
-    info "facilitator already running (pid $(pid_of facilitator))"
-    return 0
-  fi
+  if already_running facilitator; then return 0; fi
   guard_port "$FAC_PORT" facilitator
   token="$(cat "$TOKEN_FILE")"
   info "starting pnpm --filter @z402/facilitator start, log .data/demo/facilitator.log"
@@ -210,10 +262,7 @@ start_facilitator() {
 
 start_api() {
   local token pay_to
-  if is_alive api; then
-    info "api already running (pid $(pid_of api))"
-    return 0
-  fi
+  if already_running api; then return 0; fi
   guard_port "$API_PORT" api
   token="$(cat "$TOKEN_FILE")"
   pay_to="$(merchant_pay_to)"
@@ -230,7 +279,7 @@ cmd_up() {
   need jq openssl node pnpm perl docker
   [ -f "$KEYS" ] || die ".secrets/merchant-regtest.json is missing (a zdecrypt keygen JSON for the regtest merchant)"
   [ -x "$ZDECRYPT" ] || die "crates/zdecrypt/target/release/zdecrypt is not built (pnpm --filter @z402/facilitator build:native)"
-  docker info >/dev/null 2>&1 || die "Docker is not running, start it and retry"
+  docker_answers || die "Docker is not running or did not answer 'docker info' within 10s, start it and retry"
 
   step "Z3 regtest stack (infra/z3/up.sh)"
   bash "$ROOT/infra/z3/up.sh"
@@ -255,10 +304,7 @@ cmd_up() {
 cmd_clock() {
   [ $# -eq 0 ] || die "clock takes no arguments"
   need node perl
-  if is_alive clock; then
-    info "block clock already running (pid $(pid_of clock))"
-    return 0
-  fi
+  if already_running clock; then return 0; fi
   zrpc zebra getblockcount >/dev/null 2>&1 || die "Zebra does not answer, run scripts/demo.sh up"
   step "Block clock, one block every ${CLOCK_EVERY}s"
   spawn clock node "$ROOT/infra/z3/clock.mjs" run --every "$CLOCK_EVERY"
@@ -308,9 +354,25 @@ cmd_cheat() {
   exec pnpm --filter @z402/agent demo --cheat --interval-ms 0 --calls 400
 }
 
+# The newest transaction in the agent wallet that carries a z402 deposit memo, <sessionKey>:<index>
+newest_deposit_txid() {
+  local account rows
+  account="$(zrpc zallet z_listaccounts | jq -r '.[0].account_uuid // empty')" || return 1
+  [ -n "$account" ] || return 1
+  rows="$(zrpc zallet z_listtransactions "\"$account\"")" || return 1
+  jq -r '[.[] | select(any(.outputs[]?; (.memo // "") | test("^[0-9a-f]{64}:[0-9]+$")))] | sort_by(.mined_height // 1e12) | last | .txid // empty' <<<"$rows"
+}
+
 cmd_show() {
   local txid="${1:-}" tmp raw_json height tip hex_len out uivk pay_to at_flag at_value
-  [ $# -eq 1 ] || die "usage: scripts/demo.sh show <txid>"
+  [ $# -le 1 ] || die "usage: scripts/demo.sh show [txid]"
+  if [ $# -eq 0 ]; then
+    need jq node
+    step "Newest deposit in the agent wallet"
+    txid="$(newest_deposit_txid 2>/dev/null)" || die "could not read the agent wallet's transactions from Zallet (is the stack up?)"
+    [ -n "$txid" ] || die "the agent wallet has sent no z402 deposit yet, pass a txid"
+    info "$txid"
+  fi
   case "$txid" in
     *[!0-9a-f]*) die "the txid must be 64 lowercase hex characters" ;;
   esac
@@ -383,6 +445,8 @@ print_proc() {
         ;;
     esac
     printf '    %-12s running  pid %-7s %s\n' "$name" "$(pid_of "$name")" "$note"
+  elif is_orphaned "$name"; then
+    printf '    %-12s leader exited, members of its process group still run (scripts/demo.sh down stops them)\n' "$name"
   else
     printf '    %-12s not running\n' "$name"
   fi
@@ -438,12 +502,13 @@ stop_proc() {
     info "$name: no pidfile, nothing to stop"
     return 0
   fi
-  if ! is_alive "$name"; then
+  if ! is_alive "$name" && ! is_orphaned "$name"; then
     info "$name: not running, removing its stale pidfile"
     rm -f "$DATA/$name.pid"
     return 0
   fi
   pid="$(pid_of "$name")"
+  if ! is_alive "$name"; then info "$name: its leader exited, signalling the members of its process group"; fi
   info "$name: SIGINT to pid $pid and its process group"
   kill -s INT -- "-$pid" 2>/dev/null || true
   if ! wait_gone "$pid" 20; then
