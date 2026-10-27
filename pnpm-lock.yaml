@@ -73,6 +73,10 @@ importers:
       '@z402/protocol':
         specifier: workspace:*
         version: link:../protocol
+    devDependencies:
+      '@z402/testkit':
+        specifier: workspace:*
+        version: link:../testkit
 
   packages/lightwalletd:
     dependencies:

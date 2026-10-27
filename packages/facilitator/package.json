@@ -14,5 +14,8 @@
   "dependencies": {
     "@z402/lightwalletd": "workspace:*",
     "@z402/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@z402/testkit": "workspace:*"
   }
 }

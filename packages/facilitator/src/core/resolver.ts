@@ -1,0 +1,132 @@
+import { ChainUnavailableError, type ChainView, type FoundInspection } from "@z402/protocol";
+
+export type Lookup =
+  | { kind: "found"; inspection: FoundInspection; tip: number }
+  | { kind: "not_found" }
+  | { kind: "unavailable"; error: unknown };
+
+/** Looks deposits up on the chain within a time budget, sharing and limiting the work */
+export class DepositResolver {
+  readonly #chain: ChainView;
+  readonly #maxConcurrent: number;
+  readonly #pollMs: number;
+  readonly #negativeTtlMs: number;
+  readonly #resultTtlMs: number;
+  readonly #now: () => number;
+  readonly #sleep: (ms: number) => Promise<void>;
+  readonly #flights = new Map<string, Promise<Lookup>>();
+  readonly #results = new Map<string, { lookup: Lookup; at: number }>();
+  readonly #queue: Array<() => void> = [];
+  #running = 0;
+
+  constructor(o: {
+    chain: ChainView;
+    maxConcurrent?: number;
+    pollMs?: number;
+    negativeTtlMs?: number;
+    resultTtlMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+  }) {
+    this.#chain = o.chain;
+    this.#maxConcurrent = o.maxConcurrent ?? 4;
+    this.#pollMs = o.pollMs ?? 1000;
+    this.#negativeTtlMs = o.negativeTtlMs ?? 10_000;
+    this.#resultTtlMs = o.resultTtlMs ?? 600_000;
+    this.#now = o.now ?? (() => Date.now());
+    this.#sleep = o.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  /** A caller who finds the txid already being looked up joins that flight, whatever its own budget */
+  lookup(txid: string, budgetMs: number): Promise<Lookup> {
+    const running = this.#flights.get(txid);
+    if (running !== undefined) return running;
+
+    const flight = this.#fly(txid, this.#recentlyMissed(txid) ? 0 : budgetMs).finally(() => {
+      this.#flights.delete(txid);
+    });
+    this.#flights.set(txid, flight);
+    return flight;
+  }
+
+  /** Runs a lookup nobody waits for, so `peek` can answer once it resolves */
+  startBackground(txid: string, budgetMs: number): void {
+    // A failure has no caller to go to, and the next lookup runs afresh
+    this.lookup(txid, budgetMs).catch(() => undefined);
+  }
+
+  /** The latest result for the txid, until it expires or is forgotten */
+  peek(txid: string): Lookup | undefined {
+    const held = this.#results.get(txid);
+    if (held === undefined) return undefined;
+    if (this.#now() - held.at >= this.#resultTtlMs) {
+      this.#results.delete(txid);
+      return undefined;
+    }
+    return held.lookup;
+  }
+
+  forget(txid: string): void {
+    this.#results.delete(txid);
+  }
+
+  async #fly(txid: string, budgetMs: number): Promise<Lookup> {
+    const startedAt = this.#now();
+    await this.#acquire();
+    try {
+      const lookup = await this.#poll(txid, budgetMs, startedAt);
+      this.#remember(txid, lookup);
+      return lookup;
+    } finally {
+      this.#release();
+    }
+  }
+
+  async #poll(txid: string, budgetMs: number, startedAt: number): Promise<Lookup> {
+    let outage: ChainUnavailableError | undefined;
+    for (;;) {
+      try {
+        const inspection = await this.#chain.inspect(txid);
+        if (inspection.found) return { kind: "found", inspection, tip: await this.#chain.tip() };
+      } catch (e) {
+        if (!(e instanceof ChainUnavailableError)) throw e;
+        outage = e;
+      }
+      // Written as a negation so a NaN budget ends the loop instead of running it forever
+      if (!(this.#now() - startedAt + this.#pollMs <= budgetMs)) break;
+      await this.#sleep(this.#pollMs);
+    }
+    return outage === undefined ? { kind: "not_found" } : { kind: "unavailable", error: outage };
+  }
+
+  #recentlyMissed(txid: string): boolean {
+    const last = this.#results.get(txid);
+    return last?.lookup.kind === "not_found" && this.#now() - last.at < this.#negativeTtlMs;
+  }
+
+  #remember(txid: string, lookup: Lookup): void {
+    const at = this.#now();
+    // Results sit in the order they were stored, so the expired ones are at the front
+    for (const [key, held] of this.#results) {
+      if (at - held.at < this.#resultTtlMs) break;
+      this.#results.delete(key);
+    }
+    this.#results.delete(txid);
+    this.#results.set(txid, { lookup, at });
+  }
+
+  async #acquire(): Promise<void> {
+    if (this.#running < this.#maxConcurrent) {
+      this.#running++;
+      return;
+    }
+    await new Promise<void>((resolve) => this.#queue.push(resolve));
+  }
+
+  #release(): void {
+    const next = this.#queue.shift();
+    // The slot passes straight to the next in line, so the running count stays put
+    if (next === undefined) this.#running--;
+    else next();
+  }
+}
