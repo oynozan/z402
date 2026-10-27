@@ -24,7 +24,9 @@ use orchard::NoteVersion;
 use sapling::keys::PreparedIncomingViewingKey as SaplingPivk;
 use sapling::note_encryption::SaplingDomain;
 use serde_json::{json, Value};
+use zcash_address::unified::ParseError;
 use zcash_keys::address::{Address, UnifiedAddress};
+use zcash_keys::encoding::UnifiedDecodingError;
 use zcash_keys::keys::{
     ReceiverRequirement, UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey,
     UnifiedSpendingKey,
@@ -109,12 +111,37 @@ pub fn decode_key(s: &str) -> Result<Keys, String> {
         }
         Err(e) => e,
     };
-    let uivk = UnifiedIncomingViewingKey::decode(&NETWORK, s).map_err(|e| {
-        format!("not a testnet unified full viewing key ({ufvk_err}) and not a testnet unified incoming viewing key ({e})")
-    })?;
+    let uivk = UnifiedIncomingViewingKey::decode(&NETWORK, s).map_err(|e| key_error(&ufvk_err, &e))?;
     let orchard = uivk.orchard().iter().map(|k| (Scope::External, k.clone())).collect();
     let sapling = uivk.sapling().iter().map(|k| (Scope::External, k.prepare())).collect();
     Ok(Keys { kind: "uivk", uivk, orchard, sapling })
+}
+
+/// What a failed key decode says, kept to typed fields because upstream error text can hold key bytes
+enum Why {
+    UnknownPrefix(String),
+    Reason(String),
+}
+
+fn why(e: &UnifiedDecodingError) -> Why {
+    match e {
+        UnifiedDecodingError::Parse(ParseError::UnknownPrefix(hrp)) => Why::UnknownPrefix(hrp.clone()),
+        UnifiedDecodingError::NetworkMismatch { actual, .. } => Why::Reason(format!("for the {actual:?} network")),
+        UnifiedDecodingError::InvalidItem(tc) => Why::Reason(format!("invalid data for typecode {}", tc.typecode_value())),
+        _ => Why::Reason("malformed encoding".into()),
+    }
+}
+
+/// A decode that fails on the prefix alone is the wrong kind of key, so only the other decode's reason is worth reporting
+fn key_error(ufvk: &UnifiedDecodingError, uivk: &UnifiedDecodingError) -> String {
+    const FULL: &str = "not a testnet unified full viewing key";
+    const INCOMING: &str = "not a testnet unified incoming viewing key";
+    match (why(ufvk), why(uivk)) {
+        (Why::UnknownPrefix(hrp), Why::UnknownPrefix(_)) => format!("{FULL} and {INCOMING} (prefix {hrp})"),
+        (Why::Reason(r), Why::UnknownPrefix(_)) => format!("{FULL} ({r})"),
+        (Why::UnknownPrefix(_), Why::Reason(r)) => format!("{INCOMING} ({r})"),
+        (Why::Reason(a), Why::Reason(b)) => format!("{FULL} ({a}) and {INCOMING} ({b})"),
+    }
 }
 
 pub fn encode_uivk(keys: &Keys) -> Result<String, String> {
@@ -260,7 +287,8 @@ pub fn pay_to_info(keys: &Keys, ua: &UnifiedAddress) -> Value {
 pub fn decode_ua(s: &str) -> Result<UnifiedAddress, String> {
     match Address::decode(&NETWORK, s.trim()) {
         Some(Address::Unified(ua)) => Ok(*ua),
-        _ => Err(format!("not a testnet unified address: {}", s.trim())),
+        // The input is not echoed because a misplaced key would be printed with it
+        _ => Err("not a testnet unified address".into()),
     }
 }
 
