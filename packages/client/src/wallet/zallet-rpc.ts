@@ -200,8 +200,8 @@ export class ZalletRpcWallet implements ZcashWallet {
     const deadline = this.#clock.now() + this.#opTimeoutMs;
     let reconciling = opid === undefined;
     let lastError = firstCause;
-    /** The operation's own failure, which stands once the ledger answers without a row */
-    let failure: ZalletRpcError | undefined;
+    /** What a ledger answer without our row concludes once the operation cannot report any more */
+    let noRow: Error | undefined;
     const lookup = async (): Promise<{ txid: string } | "none" | "error"> => {
       try {
         const found = await this.findSentByMemo(memo);
@@ -228,13 +228,15 @@ export class ZalletRpcWallet implements ZcashWallet {
             // A failure while broadcasting can leave a stored transaction that still mines
             opid = undefined;
             reconciling = true;
-            failure = new ZalletRpcError(`Zallet operation failed: ${op.message}`, { code: op.code });
-            lastError = failure;
+            noRow = new ZalletRpcError(`Zallet operation failed: ${op.message}`, { code: op.code });
+            lastError = noRow;
             break;
           case "cancelled":
             throw new ZalletRpcError("Zallet operation was cancelled and nothing was sent");
           case "lost":
+            // Nothing is left to report, so only the ledger can say whether it was sent
             lastError = new ZalletRpcError(`Zallet no longer knows operation ${opid}`);
+            noRow = new DepositStatusUnknownError(memo, { cause: lastError });
             opid = undefined;
             reconciling = true;
             break;
@@ -243,13 +245,15 @@ export class ZalletRpcWallet implements ZcashWallet {
             lastError = op.cause;
             break;
           case "running":
+            // A poll error earlier is behind us once the op is seen again, and the deadline lookup still covers it
+            reconciling = false;
             break;
         }
       }
       if (reconciling) {
         const found = await lookup();
         if (typeof found === "object") return found;
-        if (found === "none" && failure !== undefined) throw failure;
+        if (found === "none" && noRow !== undefined) throw noRow;
       }
       const left = deadline - this.#clock.now();
       if (left <= 0) break;
