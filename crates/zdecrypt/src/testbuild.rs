@@ -1,4 +1,4 @@
-//! Builds real v6 NU7 test transactions offline for the positive decryption tests.
+//! Builds real v6 test transactions, under NU6.3 or NU7, offline for the positive decryption tests.
 //!
 //! The funding tx spends a made-up transparent P2PKH coin into an Ironwood note for the agent and a
 //! Sapling note for the merchant. The deposit tx is the z402 deposit shape. It spends that Ironwood
@@ -26,7 +26,7 @@ use zcash_transparent::address::TransparentAddress;
 use zcash_transparent::builder::TransparentSigningSet;
 use zcash_transparent::bundle::{OutPoint, TxOut};
 
-use crate::{decode_ua, keygen, NETWORK};
+use crate::{decode_ua, keygen, Net};
 
 fn config(ironwood_anchor: orchard::Anchor, with_sapling: bool) -> BuildConfig {
     BuildConfig::Standard {
@@ -52,16 +52,22 @@ fn serialize(tx: &Transaction) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub fn run(flags: &HashMap<String, String>) -> Result<Value, String> {
-    let merchant = decode_ua(flags.get("--merchant-address").ok_or("--merchant-address is required")?)?;
+pub fn run(flags: &HashMap<String, String>, net: Net) -> Result<Value, String> {
+    let merchant = decode_ua(flags.get("--merchant-address").ok_or("--merchant-address is required")?, net)?;
     let merchant_orchard = *merchant.orchard().ok_or("merchant address has no Orchard receiver")?;
     let value: u64 = flags.get("--value").map_or(Ok(100_000), |v| v.parse()).map_err(|_| "--value must be zatoshi")?;
     let memo = flags.get("--memo").cloned().unwrap_or_else(|| format!("{}:0", "ab".repeat(32)));
-    let target = BlockHeight::from_u32(
-        flags.get("--height").map_or(Ok(4_547_300), |v| v.parse()).map_err(|_| "--height must be a block height")?,
-    );
-    if BranchId::for_height(&NETWORK, target) != BranchId::Nu7 {
-        return Err(format!("height {target} is not under NU7"));
+    let target = match (flags.get("--height"), net) {
+        (Some(v), _) => v.parse().map_err(|_| "--height must be a block height")?,
+        // Only testnet keeps a default height, the others have to say which epoch they mean
+        (None, Net::Testnet) => 4_547_300,
+        (None, _) => return Err(format!("--height is required on {}", net.name())),
+    };
+    let target = BlockHeight::from_u32(target);
+    let branch = BranchId::for_height(&net, target);
+    // Ironwood outputs exist from NU6.3 on, and regtest never activates NU7
+    if !matches!(branch, BranchId::Nu6_3 | BranchId::Nu7) {
+        return Err(format!("height {target} is not under NU6.3 or NU7 on {}", net.name()));
     }
 
     let mut seed = [0u8; 32];
@@ -69,7 +75,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<Value, String> {
         Some(h) => seed = hex::decode(h).ok().and_then(|b| b.try_into().ok()).ok_or("--agent-seed-hex must be 32 bytes of hex")?,
         None => getrandom::fill(&mut seed).map_err(|e| e.to_string())?,
     }
-    let usk = UnifiedSpendingKey::from_seed(&NETWORK, &seed, zip32::AccountId::ZERO).map_err(|e| format!("{e:?}"))?;
+    let usk = UnifiedSpendingKey::from_seed(&net, &seed, zip32::AccountId::ZERO).map_err(|e| format!("{e:?}"))?;
     let agent_fvk = FullViewingKey::from(usk.orchard());
     let agent_ovk = agent_fvk.to_ovk(Scope::External);
     let agent_addr = agent_fvk.address_at(0u32, Scope::External);
@@ -84,7 +90,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<Value, String> {
     let funded = value + 50_000;
     let sapling_check = 20_000;
     let make_funding = |input: u64| -> Result<_, String> {
-        let mut b = Builder::new(NETWORK, target, config(orchard::Anchor::empty_tree(), merchant.sapling().is_some()));
+        let mut b = Builder::new(net, target, config(orchard::Anchor::empty_tree(), merchant.sapling().is_some()));
         let coin = TxOut::new(zat(input)?, TransparentAddress::from_pubkey(&pk).script().into());
         b.add_transparent_p2pkh_input(pk, OutPoint::new([7u8; 32], 0), coin).map_err(|e| format!("{e:?}"))?;
         b.add_ironwood_output::<zip317::FeeError>(Some(agent_ovk.clone()), agent_addr, zat(funded)?, MemoBytes::empty())
@@ -105,7 +111,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<Value, String> {
         .map_err(|e| format!("build funding tx: {e:?}"))?;
     let funding_ms = t.elapsed().as_millis() as u64;
     let funding_bytes = serialize(built1.transaction())?;
-    let funding = Transaction::read(&funding_bytes[..], BranchId::Nu7).map_err(|e| e.to_string())?;
+    let funding = Transaction::read(&funding_bytes[..], branch).map_err(|e| e.to_string())?;
 
     /* Deposit tx */
     let ivk = agent_fvk.to_ivk(Scope::External);
@@ -121,7 +127,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<Value, String> {
     let path = MerklePath::from_parts(0, std::array::from_fn(|i| MerkleHashOrchard::empty_root(Level::from(i as u8))));
     let anchor = path.root(cmx);
     let make_deposit = |change: u64| -> Result<_, String> {
-        let mut b = Builder::new(NETWORK, target, config(anchor, false));
+        let mut b = Builder::new(net, target, config(anchor, false));
         b.add_ironwood_spend::<zip317::FeeError>(agent_fvk.clone(), note, path.clone()).map_err(|e| format!("{e:?}"))?;
         b.add_ironwood_output::<zip317::FeeError>(Some(agent_ovk.clone()), merchant_orchard, zat(value)?, text_memo(&memo)?)
             .map_err(|e| format!("{e:?}"))?;
@@ -139,7 +145,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<Value, String> {
     let deposit_ms = t.elapsed().as_millis() as u64;
     let deposit_bytes = serialize(built2.transaction())?;
 
-    let agent = keygen(&seed)?;
+    let agent = keygen(&seed, net)?;
     Ok(json!({
         "targetHeight": u32::from(target),
         "agent": { "seedHex": agent["seedHex"], "ufvk": agent["ufvk"], "uivk": agent["uivk"], "address": agent["address"] },

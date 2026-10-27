@@ -29,7 +29,7 @@ testbuild = [
 [dependencies]
 # Stable NU7 line from crates.io, no zcash_unstable cfg needed
 zcash_primitives = { version = "=0.31.0", default-features = false, features = ["std"] }
-zcash_protocol = { version = "=0.11.0", default-features = false, features = ["std"] }
+zcash_protocol = { version = "=0.11.0", default-features = false, features = ["std", "local-consensus"] }
 zcash_keys = { version = "=0.17.0", default-features = false, features = ["std", "orchard", "sapling"] }
 zcash_address = { version = "=0.14.0", default-features = false, features = ["std"] }
 orchard = { version = "=0.16.0", default-features = false, features = ["std"] }

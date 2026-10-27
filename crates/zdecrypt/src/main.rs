@@ -1,6 +1,6 @@
 //! zdecrypt CLI.
 //!
-//! keygen [--seed-hex HEX]                      fresh testnet account, prints UFVK, UIVK and a shielded-only UA
+//! keygen [--seed-hex HEX]                      fresh account, prints UFVK, UIVK and a shielded-only UA
 //! derive-uivk                                  UFVK to UIVK
 //! decrypt (--height H | --tip T) [--pay-to UA] [--expect-memo M --min-zat Z]
 //!         [--tx-hex HEX | --tx-file PATH | hex on stdin]
@@ -8,17 +8,19 @@
 //! serve                                        NDJSON requests on stdin, one JSON reply per line on stdout
 //! build-test ...                               testbuild feature only, see testbuild.rs
 //!
-//! The key comes from ZDECRYPT_KEY (preferred, argv is visible in ps) or --key. --height is the
-//! mined height. --tip is the chain tip for a mempool tx, which is judged at tip + 1. With
-//! --expect-memo and --min-zat the report carries a verdict for the z402 deposit rule. Output is
-//! one JSON object on stdout. Exit 0 on success, 2 on any error with an error object on stdout.
+//! Every subcommand takes --network regtest|testnet|mainnet, else env ZDECRYPT_NETWORK, else
+//! testnet. The key and every address must belong to that network. The key comes from ZDECRYPT_KEY
+//! (preferred, argv is visible in ps) or --key. --height is the mined height. --tip is the chain tip
+//! for a mempool tx, which is judged at tip + 1. With --expect-memo and --min-zat the report carries
+//! a verdict for the z402 deposit rule. Output is one JSON object on stdout. Exit 0 on success, 2 on
+//! any error with an error object on stdout.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 
 use serde_json::{json, Value};
 use zcash_protocol::consensus::BlockHeight;
-use zdecrypt::{decode_key, decode_ua, encode_uivk, inspect_expect, keygen, pay_to_info, At, Expect, Keys};
+use zdecrypt::{decode_key, decode_ua, encode_uivk, inspect_expect, keygen, pay_to_info, At, Expect, Keys, Net};
 
 fn fail(msg: impl Into<String>) -> ! {
     let msg = msg.into();
@@ -53,13 +55,26 @@ fn parse_args() -> Args {
     Args { cmd, flags, switches }
 }
 
-fn key_from(args: &Args) -> Keys {
+/// --network, else ZDECRYPT_NETWORK (set but empty counts as unset, as for ZDECRYPT_KEY), else testnet
+fn net_from(args: &Args) -> Net {
+    let (source, value) = match args.flags.get("--network") {
+        Some(v) => ("--network", v.clone()),
+        None => match std::env::var("ZDECRYPT_NETWORK").ok().filter(|s| !s.trim().is_empty()) {
+            Some(v) => ("ZDECRYPT_NETWORK", v),
+            None => return Net::Testnet,
+        },
+    };
+    // The value is not echoed because a misplaced key would be printed with it
+    value.parse().unwrap_or_else(|e| fail(format!("{source} {e}")))
+}
+
+fn key_from(args: &Args, net: Net) -> Keys {
     let s = std::env::var("ZDECRYPT_KEY")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| args.flags.get("--key").cloned())
-        .unwrap_or_else(|| fail("set ZDECRYPT_KEY (or --key) to a testnet UIVK or UFVK"));
-    decode_key(&s).unwrap_or_else(|e| fail(e))
+        .unwrap_or_else(|| fail(format!("set ZDECRYPT_KEY (or --key) to a {} UIVK or UFVK", net.name())));
+    decode_key(&s, net).unwrap_or_else(|e| fail(e))
 }
 
 fn height_arg(v: &str, name: &str) -> BlockHeight {
@@ -114,7 +129,7 @@ fn serve(keys: &Keys) {
                     let at = at_from(num("height").as_ref(), num("tip").as_ref())?;
                     let raw = hex_bytes(req.get("txHex").and_then(Value::as_str).ok_or("txHex is missing")?)?;
                     let pay_to = match req.get("payTo").and_then(Value::as_str) {
-                        Some(s) => Some(decode_ua(s)?),
+                        Some(s) => Some(decode_ua(s, keys.network())?),
                         None => None,
                     };
                     let expect = expect_from(
@@ -137,6 +152,7 @@ fn serve(keys: &Keys) {
 
 fn main() {
     let args = parse_args();
+    let net = net_from(&args);
     let pretty = args.switches.iter().any(|s| s == "--pretty");
     match args.cmd.as_str() {
         "keygen" => {
@@ -148,14 +164,14 @@ fn main() {
                 }
                 None => getrandom::fill(&mut seed).unwrap_or_else(|e| fail(format!("no OS randomness: {e}"))),
             }
-            emit(&keygen(&seed).unwrap_or_else(|e| fail(e)), pretty);
+            emit(&keygen(&seed, net).unwrap_or_else(|e| fail(e)), pretty);
         }
         "derive-uivk" => {
-            let keys = key_from(&args);
+            let keys = key_from(&args, net);
             emit(&json!({ "uivk": encode_uivk(&keys).unwrap_or_else(|e| fail(e)), "from": keys.kind() }), pretty);
         }
         "decrypt" => {
-            let keys = key_from(&args);
+            let keys = key_from(&args, net);
             let at = at_from(args.flags.get("--height"), args.flags.get("--tip")).unwrap_or_else(|e| fail(e));
             let hex_text = if let Some(h) = args.flags.get("--tx-hex") {
                 h.clone()
@@ -167,19 +183,19 @@ fn main() {
                 s
             };
             let raw = hex_bytes(&hex_text).unwrap_or_else(|e| fail(e));
-            let pay_to = args.flags.get("--pay-to").map(|s| decode_ua(s).unwrap_or_else(|e| fail(e)));
+            let pay_to = args.flags.get("--pay-to").map(|s| decode_ua(s, net).unwrap_or_else(|e| fail(e)));
             let expect = expect_from(args.flags.get("--expect-memo").cloned(), args.flags.get("--min-zat").cloned())
                 .unwrap_or_else(|e| fail(e));
             emit(&inspect_expect(&raw, &keys, at, pay_to.as_ref(), expect.as_ref()).unwrap_or_else(|e| fail(e)), pretty);
         }
         "owns" => {
-            let keys = key_from(&args);
-            let ua = decode_ua(args.flags.get("--address").unwrap_or_else(|| fail("--address is required"))).unwrap_or_else(|e| fail(e));
+            let keys = key_from(&args, net);
+            let ua = decode_ua(args.flags.get("--address").unwrap_or_else(|| fail("--address is required")), net).unwrap_or_else(|e| fail(e));
             emit(&pay_to_info(&keys, &ua), pretty);
         }
-        "serve" => serve(&key_from(&args)),
+        "serve" => serve(&key_from(&args, net)),
         #[cfg(feature = "testbuild")]
-        "build-test" => emit(&zdecrypt::testbuild::run(&args.flags).unwrap_or_else(|e| fail(e)), pretty),
+        "build-test" => emit(&zdecrypt::testbuild::run(&args.flags, net).unwrap_or_else(|e| fail(e)), pretty),
         other => fail(format!("unknown command {other}")),
     }
 }

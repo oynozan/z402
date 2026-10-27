@@ -4,7 +4,7 @@ use serde_json::Value;
 use zcash_address::unified::{Encoding, Fvk, Ivk, Revision, Ufvk, Uitem, Uivk};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_protocol::consensus::{Network, NetworkType};
-use zdecrypt::{decode_key, decode_ua, NETWORK};
+use zdecrypt::{decode_key, decode_ua, Net};
 
 const FX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/keys-and-synthetic.json");
 
@@ -15,12 +15,12 @@ fn merchant(field: &str) -> String {
 
 /// The same UFVK as a ZIP 316 revision 2 string, which starts with `uvftest` where revision 0 has `uview`
 fn ufvk_r2(ufvk: &str) -> String {
-    UnifiedFullViewingKey::decode(&NETWORK, ufvk).unwrap().encode_revision(&NETWORK, Revision::R2).unwrap()
+    UnifiedFullViewingKey::decode(&Net::Testnet, ufvk).unwrap().encode_revision(&Net::Testnet, Revision::R2).unwrap()
 }
 
 /// The same UIVK as a ZIP 316 revision 2 string, which starts with `uvitest` where revision 0 has `uivk`
 fn uivk_r2(uivk: &str) -> String {
-    UnifiedIncomingViewingKey::decode(&NETWORK, uivk).unwrap().encode_revision(&NETWORK, Revision::R2).unwrap()
+    UnifiedIncomingViewingKey::decode(&Net::Testnet, uivk).unwrap().encode_revision(&Net::Testnet, Revision::R2).unwrap()
 }
 
 /// A well-formed ZIP 316 container whose Orchard item is one byte short of the 96 the parser expects
@@ -38,25 +38,25 @@ fn short_orchard_uivk() -> String {
 #[test]
 fn ufvk_is_detected_without_prefix_rules() {
     let ufvk = merchant("ufvk");
-    assert_eq!(decode_key(&ufvk).unwrap().kind(), "ufvk");
+    assert_eq!(decode_key(&ufvk, Net::Testnet).unwrap().kind(), "ufvk");
     let r2 = ufvk_r2(&ufvk);
     assert!(r2.starts_with("uvftest1"), "the revision 2 string must not look like a uview string");
-    assert_eq!(decode_key(&r2).unwrap().kind(), "ufvk");
+    assert_eq!(decode_key(&r2, Net::Testnet).unwrap().kind(), "ufvk");
 }
 
 #[test]
 fn uivk_decodes_as_uivk() {
     let uivk = merchant("uivk");
-    assert_eq!(decode_key(&uivk).unwrap().kind(), "uivk");
+    assert_eq!(decode_key(&uivk, Net::Testnet).unwrap().kind(), "uivk");
     let r2 = uivk_r2(&uivk);
     assert!(r2.starts_with("uvitest1"), "the revision 2 string must not look like a uivk string");
-    assert_eq!(decode_key(&r2).unwrap().kind(), "uivk");
+    assert_eq!(decode_key(&r2, Net::Testnet).unwrap().kind(), "uivk");
 }
 
 #[test]
 fn address_is_not_a_key() {
     // Keys is not Debug, so unwrap_err does not compile
-    let Err(err) = decode_key(&merchant("orchardOnlyAddress")) else {
+    let Err(err) = decode_key(&merchant("orchardOnlyAddress"), Net::Testnet) else {
         panic!("an address must not decode as a key");
     };
     assert!(err.contains("not a testnet unified"), "{err}");
@@ -66,7 +66,7 @@ fn address_is_not_a_key() {
 #[test]
 fn malformed_key_errors_never_echo_key_bytes() {
     for key in [short_orchard_ufvk(), short_orchard_uivk()] {
-        let Err(err) = decode_key(&key) else {
+        let Err(err) = decode_key(&key, Net::Testnet) else {
             panic!("a short Orchard item must not decode");
         };
         assert!(err.contains("not a testnet unified"), "{err}");
@@ -76,10 +76,10 @@ fn malformed_key_errors_never_echo_key_bytes() {
 
 #[test]
 fn key_for_another_network_is_reported_as_such_and_nothing_else() {
-    let ufvk = UnifiedFullViewingKey::decode(&NETWORK, &merchant("ufvk")).unwrap().encode(&Network::MainNetwork).unwrap();
-    let uivk = UnifiedIncomingViewingKey::decode(&NETWORK, &merchant("uivk")).unwrap().encode(&Network::MainNetwork).unwrap();
+    let ufvk = UnifiedFullViewingKey::decode(&Net::Testnet, &merchant("ufvk")).unwrap().encode(&Network::MainNetwork).unwrap();
+    let uivk = UnifiedIncomingViewingKey::decode(&Net::Testnet, &merchant("uivk")).unwrap().encode(&Network::MainNetwork).unwrap();
     for (key, kind, other) in [(ufvk, "full viewing key", "incoming viewing key"), (uivk, "incoming viewing key", "full viewing key")] {
-        let Err(err) = decode_key(&key) else {
+        let Err(err) = decode_key(&key, Net::Testnet) else {
             panic!("a mainnet key must not decode on testnet");
         };
         assert!(err.contains(&format!("not a testnet unified {kind}")) && err.contains("Main"), "{err}");
@@ -90,7 +90,7 @@ fn key_for_another_network_is_reported_as_such_and_nothing_else() {
 #[test]
 fn address_errors_never_echo_a_key() {
     let uivk = merchant("uivk");
-    let Err(err) = decode_ua(&uivk) else {
+    let Err(err) = decode_ua(&uivk, Net::Testnet) else {
         panic!("a key must not decode as an address");
     };
     assert!(err.contains("not a testnet unified address"), "{err}");

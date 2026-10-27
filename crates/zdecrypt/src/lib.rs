@@ -2,16 +2,19 @@
 // (github.com/nickthelegend/zec-shielded-x402 @ 0330760, MIT) and Hanko packages/core/src/lib.rs
 // (github.com/nickthelegend/zec-payment-verify-sdk @ 3c7edae, MIT). See NOTICE.md.
 
-//! Parse a Zcash testnet transaction and trial-decrypt its shielded outputs with a viewing key.
+//! Parse a Zcash transaction and trial-decrypt its shielded outputs with a viewing key, on regtest,
+//! testnet or mainnet.
 //!
 //! The facilitator path is `decode_key` once at startup, then `inspect` once per deposit. `inspect`
 //! parses the raw bytes under the consensus branch for the given height, rejects trailing bytes,
 //! counts the transparent part, and trial-decrypts every Sapling output and every Orchard and
 //! Ironwood action. Ironwood is the Orchard-family pool added in NU6.3 that carries new shielded
-//! payments on testnet. Its notes go to the UA's Orchard receiver and decrypt with the same Orchard
-//! incoming viewing key, but under the V3 note plaintext rules. A UIVK yields external-scope keys
-//! only. A UFVK adds internal-scope keys, which see a wallet's own change. Nothing here touches
-//! the network.
+//! payments. Its notes go to the UA's Orchard receiver and decrypt with the same Orchard incoming
+//! viewing key, but under the V3 note plaintext rules. A UIVK yields external-scope keys only. A
+//! UFVK adds internal-scope keys, which see a wallet's own change. Nothing here talks to a node.
+//! `Net` names which Zcash network a key, an address or a transaction belongs to. `Keys` remembers
+//! the one it was decoded for, so `inspect` judges a transaction under the same prefixes and
+//! activation heights that accepted the key.
 
 #[cfg(feature = "testbuild")]
 pub mod testbuild;
@@ -25,6 +28,7 @@ use sapling::keys::PreparedIncomingViewingKey as SaplingPivk;
 use sapling::note_encryption::SaplingDomain;
 use serde_json::{json, Value};
 use zcash_address::unified::ParseError;
+use zcash_address::{ConversionError, ZcashAddress};
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_keys::encoding::UnifiedDecodingError;
 use zcash_keys::keys::{
@@ -34,14 +38,80 @@ use zcash_keys::keys::{
 use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
+use zcash_protocol::consensus::{BlockHeight, BranchId, Network, NetworkType, NetworkUpgrade, Parameters};
+use zcash_protocol::local_consensus::LocalNetwork;
 use zcash_protocol::memo::{Memo, MemoBytes};
 use zcash_protocol::value::ZatBalance;
 use zip32::Scope;
 
-pub const NETWORK: Network = Network::TestNetwork;
+const fn since(h: u32) -> Option<BlockHeight> {
+    Some(BlockHeight::from_u32(h))
+}
+
+/// Heights from the Z3 stack's Zebra regtest config, where NU7 never activates
+const REGTEST: LocalNetwork = LocalNetwork {
+    overwinter: since(1),
+    sapling: since(1),
+    blossom: since(1),
+    heartwood: since(1),
+    canopy: since(1),
+    nu5: since(2),
+    nu6: since(2),
+    nu6_1: since(2),
+    nu6_2: since(2),
+    nu6_3: since(2),
+    nu7: None,
+};
+
+/// The Zcash network a key, an address or a transaction belongs to
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Net {
+    Regtest,
+    Testnet,
+    Mainnet,
+}
+
+impl Net {
+    pub fn name(self) -> &'static str {
+        match self {
+            Net::Regtest => "regtest",
+            Net::Testnet => "testnet",
+            Net::Mainnet => "mainnet",
+        }
+    }
+}
+
+impl std::str::FromStr for Net {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Net, Self::Err> {
+        [Net::Regtest, Net::Testnet, Net::Mainnet]
+            .into_iter()
+            .find(|n| n.name() == s.trim())
+            .ok_or("must be regtest, testnet or mainnet")
+    }
+}
+
+impl Parameters for Net {
+    fn network_type(&self) -> NetworkType {
+        match self {
+            Net::Regtest => REGTEST.network_type(),
+            Net::Testnet => Network::TestNetwork.network_type(),
+            Net::Mainnet => Network::MainNetwork.network_type(),
+        }
+    }
+
+    fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
+        match self {
+            Net::Regtest => REGTEST.activation_height(nu),
+            Net::Testnet => Network::TestNetwork.activation_height(nu),
+            Net::Mainnet => Network::MainNetwork.activation_height(nu),
+        }
+    }
+}
 
 pub struct Keys {
+    net: Net,
     kind: &'static str,
     pub uivk: UnifiedIncomingViewingKey,
     orchard: Vec<(Scope, OrchardIvk)>,
@@ -52,6 +122,11 @@ impl Keys {
     /// Whichever of "ufvk" or "uivk" `decode_key` accepted
     pub fn kind(&self) -> &'static str {
         self.kind
+    }
+
+    /// The network `decode_key` accepted the key for
+    pub fn network(&self) -> Net {
+        self.net
     }
 }
 
@@ -91,10 +166,10 @@ pub struct Decrypted {
     pub note_version: Option<u8>,
 }
 
-/// Tries a UFVK decode, then a UIVK decode, never a prefix test, since revision 2 keys start uvftest or uvitest
-pub fn decode_key(s: &str) -> Result<Keys, String> {
+/// Tries a UFVK decode, then a UIVK decode, never a prefix test, since revision 2 keys use other prefixes
+pub fn decode_key(s: &str, net: Net) -> Result<Keys, String> {
     let s = s.trim();
-    let ufvk_err = match UnifiedFullViewingKey::decode(&NETWORK, s) {
+    let ufvk_err = match UnifiedFullViewingKey::decode(&net, s) {
         Ok(ufvk) => {
             let mut orchard = Vec::new();
             if let Some(fvk) = ufvk.orchard() {
@@ -107,14 +182,14 @@ pub fn decode_key(s: &str) -> Result<Keys, String> {
                 sapling.push((Scope::Internal, SaplingPivk::new(&dfvk.to_ivk(Scope::Internal))));
             }
             let uivk = ufvk.to_unified_incoming_viewing_key();
-            return Ok(Keys { kind: "ufvk", uivk, orchard, sapling });
+            return Ok(Keys { net, kind: "ufvk", uivk, orchard, sapling });
         }
         Err(e) => e,
     };
-    let uivk = UnifiedIncomingViewingKey::decode(&NETWORK, s).map_err(|e| key_error(&ufvk_err, &e))?;
+    let uivk = UnifiedIncomingViewingKey::decode(&net, s).map_err(|e| key_error(net, &ufvk_err, &e))?;
     let orchard = uivk.orchard().iter().map(|k| (Scope::External, k.clone())).collect();
     let sapling = uivk.sapling().iter().map(|k| (Scope::External, k.prepare())).collect();
-    Ok(Keys { kind: "uivk", uivk, orchard, sapling })
+    Ok(Keys { net, kind: "uivk", uivk, orchard, sapling })
 }
 
 /// What a failed key decode says, kept to typed fields because upstream error text can hold key bytes
@@ -133,19 +208,19 @@ fn why(e: &UnifiedDecodingError) -> Why {
 }
 
 /// A decode that fails on the prefix alone is the wrong kind of key, so only the other decode's reason is worth reporting
-fn key_error(ufvk: &UnifiedDecodingError, uivk: &UnifiedDecodingError) -> String {
-    const FULL: &str = "not a testnet unified full viewing key";
-    const INCOMING: &str = "not a testnet unified incoming viewing key";
+fn key_error(net: Net, ufvk: &UnifiedDecodingError, uivk: &UnifiedDecodingError) -> String {
+    let full = format!("not a {} unified full viewing key", net.name());
+    let incoming = format!("not a {} unified incoming viewing key", net.name());
     match (why(ufvk), why(uivk)) {
-        (Why::UnknownPrefix(hrp), Why::UnknownPrefix(_)) => format!("{FULL} and {INCOMING} (prefix {hrp})"),
-        (Why::Reason(r), Why::UnknownPrefix(_)) => format!("{FULL} ({r})"),
-        (Why::UnknownPrefix(_), Why::Reason(r)) => format!("{INCOMING} ({r})"),
-        (Why::Reason(a), Why::Reason(b)) => format!("{FULL} ({a}) and {INCOMING} ({b})"),
+        (Why::UnknownPrefix(hrp), Why::UnknownPrefix(_)) => format!("{full} and {incoming} (prefix {hrp})"),
+        (Why::Reason(r), Why::UnknownPrefix(_)) => format!("{full} ({r})"),
+        (Why::UnknownPrefix(_), Why::Reason(r)) => format!("{incoming} ({r})"),
+        (Why::Reason(a), Why::Reason(b)) => format!("{full} ({a}) and {incoming} ({b})"),
     }
 }
 
 pub fn encode_uivk(keys: &Keys) -> Result<String, String> {
-    keys.uivk.encode(&NETWORK).map_err(|e| format!("{e:?}"))
+    keys.uivk.encode(&keys.net).map_err(|e| format!("{e:?}"))
 }
 
 fn scope_name(s: Scope) -> &'static str {
@@ -155,14 +230,14 @@ fn scope_name(s: Scope) -> &'static str {
     }
 }
 
-fn orchard_recipient(addr: &orchard::Address) -> String {
+fn orchard_recipient(addr: &orchard::Address, net: Net) -> String {
     UnifiedAddress::from_receivers(Some(*addr), None, None, None, None)
-        .map(|ua| ua.encode(&NETWORK))
+        .map(|ua| ua.encode(&net))
         .unwrap_or_default()
 }
 
-fn sapling_recipient(addr: &sapling::PaymentAddress) -> String {
-    Address::from(*addr).encode(&NETWORK)
+fn sapling_recipient(addr: &sapling::PaymentAddress, net: Net) -> String {
+    Address::from(*addr).encode(&net)
 }
 
 fn note_version_number(v: NoteVersion) -> u8 {
@@ -184,7 +259,7 @@ fn orchard_family(pool: &'static str, bundle: &OrchardBundle, keys: &Keys, out: 
                 value_zat: note.value().inner(),
                 memo,
                 receiver: addr.to_raw_address_bytes(),
-                recipient: orchard_recipient(&addr),
+                recipient: orchard_recipient(&addr, keys.net),
                 diversifier_index: ivk.diversifier_index(&addr).map(u128::from),
                 note_version: Some(note_version_number(note.version())),
             });
@@ -196,7 +271,7 @@ fn orchard_family(pool: &'static str, bundle: &OrchardBundle, keys: &Keys, out: 
 pub fn decrypt(tx: &Transaction, keys: &Keys, height: BlockHeight) -> Vec<Decrypted> {
     let mut out = Vec::new();
     if let Some(bundle) = tx.sapling_bundle() {
-        let domain = SaplingDomain::new(zip212_enforcement(&NETWORK, height));
+        let domain = SaplingDomain::new(zip212_enforcement(&keys.net, height));
         for (index, output) in bundle.shielded_outputs().iter().enumerate() {
             for (scope, pivk) in &keys.sapling {
                 if let Some((note, addr, memo)) = try_note_decryption(&domain, pivk, output) {
@@ -207,7 +282,7 @@ pub fn decrypt(tx: &Transaction, keys: &Keys, height: BlockHeight) -> Vec<Decryp
                         value_zat: note.value().inner(),
                         memo,
                         receiver: addr.to_bytes(),
-                        recipient: sapling_recipient(&addr),
+                        recipient: sapling_recipient(&addr, keys.net),
                         diversifier_index: keys
                             .uivk
                             .sapling()
@@ -230,9 +305,10 @@ pub fn decrypt(tx: &Transaction, keys: &Keys, height: BlockHeight) -> Vec<Decryp
     out
 }
 
-pub fn parse_tx(raw: &[u8], height: BlockHeight) -> Result<Transaction, String> {
+/// `net` and `height` pick the consensus branch a pre-v5 tx is read under, a v5 or v6 tx carries its own
+pub fn parse_tx(raw: &[u8], height: BlockHeight, net: Net) -> Result<Transaction, String> {
     let mut cursor = Cursor::new(raw);
-    let tx = Transaction::read(&mut cursor, BranchId::for_height(&NETWORK, height))
+    let tx = Transaction::read(&mut cursor, BranchId::for_height(&net, height))
         .map_err(|e| format!("transaction does not parse: {e}"))?;
     if cursor.position() as usize != raw.len() {
         return Err(format!(
@@ -284,11 +360,13 @@ pub fn pay_to_info(keys: &Keys, ua: &UnifiedAddress) -> Value {
     })
 }
 
-pub fn decode_ua(s: &str) -> Result<UnifiedAddress, String> {
-    match Address::decode(&NETWORK, s.trim()) {
-        Some(Address::Unified(ua)) => Ok(*ua),
-        // The input is not echoed because a misplaced key would be printed with it
-        _ => Err("not a testnet unified address".into()),
+pub fn decode_ua(s: &str, net: Net) -> Result<UnifiedAddress, String> {
+    let wrong = format!("not a {} unified address", net.name());
+    // The input is not echoed because a misplaced key would be printed with it
+    match s.parse::<ZcashAddress>().map(|z| Address::try_from_zcash_address(&net, z)) {
+        Ok(Ok(Address::Unified(ua))) => Ok(*ua),
+        Ok(Err(ConversionError::IncorrectNetwork { actual, .. })) => Err(format!("{wrong} (for the {actual:?} network)")),
+        _ => Err(wrong),
     }
 }
 
@@ -352,7 +430,7 @@ pub fn inspect_expect(
 ) -> Result<Value, String> {
     let height = at.height();
     let t_parse = Instant::now();
-    let tx = parse_tx(raw, height)?;
+    let tx = parse_tx(raw, height, keys.net)?;
     let parse_us = t_parse.elapsed().as_micros() as u64;
 
     let t_decrypt = Instant::now();
@@ -398,7 +476,7 @@ pub fn inspect_expect(
         "branch": format!("{branch:?}"),
         "heightUsed": u32::from(height),
         "heightKind": at.kind(),
-        "branchMatchesHeight": branch == BranchId::for_height(&NETWORK, height),
+        "branchMatchesHeight": branch == BranchId::for_height(&keys.net, height),
         "lockTime": tx.lock_time(),
         "expiryHeight": expiry,
         "expired": expiry != 0 && u32::from(height) > expiry,
@@ -428,10 +506,10 @@ pub fn inspect_expect(
     Ok(report)
 }
 
-/// A fresh testnet account from a 32-byte seed, ZIP 32 account 0
-pub fn keygen(seed: &[u8; 32]) -> Result<Value, String> {
+/// A fresh account on `net` from a 32-byte seed, ZIP 32 account 0
+pub fn keygen(seed: &[u8; 32], net: Net) -> Result<Value, String> {
     use ReceiverRequirement::{Omit, Require};
-    let usk = UnifiedSpendingKey::from_seed(&NETWORK, seed, zip32::AccountId::ZERO)
+    let usk = UnifiedSpendingKey::from_seed(&net, seed, zip32::AccountId::ZERO)
         .map_err(|e| format!("key derivation failed: {e:?}"))?;
     let ufvk = usk.to_unified_full_viewing_key();
     let uivk = ufvk.to_unified_incoming_viewing_key();
@@ -442,14 +520,14 @@ pub fn keygen(seed: &[u8; 32]) -> Result<Value, String> {
         .default_address(UnifiedAddressRequest::ORCHARD)
         .map_err(|e| format!("{e:?}"))?;
     Ok(json!({
-        "network": "testnet",
+        "network": net.name(),
         "seedHex": hex::encode(seed),
-        "ufvk": ufvk.encode(&NETWORK).map_err(|e| format!("{e:?}"))?,
-        "uivk": uivk.encode(&NETWORK).map_err(|e| format!("{e:?}"))?,
-        "address": ua.encode(&NETWORK),
+        "ufvk": ufvk.encode(&net).map_err(|e| format!("{e:?}"))?,
+        "uivk": uivk.encode(&net).map_err(|e| format!("{e:?}"))?,
+        "address": ua.encode(&net),
         "addressDiversifierIndex": u128::from(ua_index).to_string(),
         "addressReceivers": { "orchard": ua.orchard().is_some(), "sapling": ua.sapling().is_some(), "transparent": ua.has_transparent() },
-        "orchardOnlyAddress": orchard_ua.encode(&NETWORK),
+        "orchardOnlyAddress": orchard_ua.encode(&net),
         "orchardOnlyDiversifierIndex": u128::from(orchard_index).to_string(),
     }))
 }
