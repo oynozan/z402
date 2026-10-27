@@ -74,7 +74,7 @@ A deposit record is keyed by its lowercase txid and bound to exactly one session
 | conf ≥ 10 | `final` (no longer polled) |
 | height = 2^64 − 1 (side chain only) | `orphaned`, counts nowhere |
 | unmined, expiry ≠ 0, tip ≥ expiry | `dead` |
-| 3 consecutive definitive "-5 not found" answers spanning ≥ 60 s, unmined | `dead` |
+| only definitive "-5 not found" answers for ≥ 120 s and ≥ 2 new blocks, unmined. A found answer resets the streak; other errors neither count nor reset | `dead` |
 
 A `dead` deposit is re-inspected for 20 more blocks. If it shows up mined it becomes `confirmed`, never `pending` again. A `confirmed` deposit that reads mempool, orphaned or not-found is demoted.
 
@@ -100,7 +100,7 @@ Per-session worst-case loss is min(W, Σ pending) + min(C_max, r·D_conf), plus 
 4. If `depositTxid` is present and new to this session, check ownership first:
    - Owned by another session gives `z402_deposit_other_session`; recorded dead gives `z402_deposit_dead`.
    - If the voucher fits **without** the deposit, return valid at once and look the deposit up in the background (lazy crediting).
-   - Otherwise wait for the lookup, at most 15 s.
+   - Otherwise wait for the lookup, at most 30 s (`depositWaitMs`). Load-balanced lightwalletd backends see a new tx up to about 16 s apart, so the API's facilitator client allows 60 s.
 5. If the voucher still does not fit and a live pending deposit exists, refresh that session's deposits from the chain (at most once per 5 s per session) and recompute.
 6. If it still does not fit: `z402_awaiting_confirmation` if a live pending deposit exists, else `z402_deposit_required`.
 7. Reply HTTP 200 `{isValid, invalidReason?, payer: sessionKey, extra: {session}}`. The snapshot is projected as if the presented deposit were credited.
@@ -187,6 +187,8 @@ Proposed to the client agent on 2026-10-27; it is to be frozen as v1 with both A
 
 - **Zero-conf trust:** an unconfirmed deposit is trusted on Zebra's mempool validation and an honest lightwalletd. Loss is bounded by §4.2.
 - **Single lightwalletd:** testnet.zec.rocks is the only working public testnet endpoint. If it goes down, crediting and confirmations stop, but voucher-only calls keep working up to the limit.
+  - It load-balances across five backends, which see a new tx up to about 16 s apart. Its tip comes from an edge cache that lags 0–9 s.
+  - For the demo, the agent wallet and the facilitator can both point at the same backend (`Z402_LWD_URL=https://na-lax.testnet.zec.rocks:443`, an undocumented name, used as a config switch only).
 - **Privacy:** the merchant's targeted `GetTransaction` seconds after the agent's broadcast lets the lightwalletd operator link the two.
 - **Unbound vouchers:** vouchers are not bound to a resource, so a leaked `PAYMENT-SIGNATURE` can be raced. TLS is the defence; `PAYMENT-SIGNATURE` is never logged.
 - **No refunds:** unused deposit balance stays with the merchant (unchanged from the doc).
