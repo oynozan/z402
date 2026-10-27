@@ -10,13 +10,13 @@
 | `@z402/lightwalletd` live test | 3 live tests pass against Zaino (branch id `37a5165b`, a tip, an unknown txid is a definitive not-found), 1 testnet-only test is skipped. Whole package: 63 passed, 1 skipped |
 | Facilitator start (port 4098) | The ready line appeared within 1 s of `pnpm --filter @z402/facilitator start`, after the self-test, ownership and branch checks passed |
 | API start (port 4097) | About 1 s after the facilitator, having loaded `/supported` from it |
-| Unpaid `GET /chunk` | **402** with a `PAYMENT-REQUIRED` header. `accepts[0]` is `prepaid-voucher` on `zcash:regtest`, 500 ZEC zat, `payTo` the merchant, `windowZat` 100000 |
+| Unpaid `GET /chunk` | **402** with a `PAYMENT-REQUIRED` header. `accepts[0]` is `prepaid-voucher` on `zcash:regtest` with `amount "500"` (zat) and `asset "ZEC"`, `payTo` the merchant and `windowZat` 100000 |
 | Unpaid `HEAD /chunk` | 402 as well |
 | Facilitator `GET /supported` | 401 without the bearer token, 200 with it |
 | First real deposit | `98e84dab...0eaf`, mined at height 115, expiry 155, one external Ironwood output of 100000 zat to the merchant, memo `<sessionKey>:1`, no transparent part, fee 10,000 zat |
 | Zallet `z_sendmany` for it | 5.1 s from the call to `success` (tip 114 at send) |
-| Chain visibility | About 0.5 s from broadcast to the first `found` through `@z402/lightwalletd`, about 1.4 s from `mineNow(1)` to mined. Zaino answered with the old tip and height `"0"` for a few seconds after Zebra had the block |
-| Decrypting that transaction | `parseMicros` 69 to 91, `decryptMicros` 1484 to 1707, for 9,166 bytes and 2 Ironwood actions |
+| Chain visibility | First deposit: after the block, Zebra reported height 115 with 1 confirmation at once, while Zaino answered the old tip and height `"0"` for a few seconds. Later deposit `0fcb6eae...54df`, through `@z402/lightwalletd`: seen in the mempool 523 ms after broadcast, and mined 1359 ms after `mineNow(1)` |
+| Decrypting that transaction | `parseMicros` 61 to 91, `decryptMicros` 926 to 1707 over three runs, for 9,166 bytes and 2 Ironwood actions |
 
 ## 1. Environment
 
@@ -79,7 +79,7 @@ Z402_NETWORK=regtest Z402_FACILITATOR_URL=http://127.0.0.1:4098 Z402_FACILITATOR
   Z402_PAY_TO=$(jq -r .orchardOnlyAddress .secrets/merchant-regtest.json) Z402_API_PORT=4097 pnpm --filter @z402/api start
 ```
 
-Ready lines (stdout; the rest of the two logs was pnpm's `$ tsx src/main.ts` echo and one line per request, such as `GET /supported 200`):
+Ready lines (stdout). Each log also held pnpm's `$ tsx src/main.ts` echo. Only the facilitator logs requests, as one line each such as `GET /supported 200`, and the API's log held nothing more:
 
 ```
 facilitator listening on http://127.0.0.1:4098 network=zcash:regtest payTo=uregtest1etwr...vjrl2j73d8nck7g35axkz
@@ -128,14 +128,15 @@ The body is `{}`. The decoded header has the keys `accepts`, `error`, `resource`
 - `GET http://127.0.0.1:4098/supported` answered 401 without the token and 200 with it, with one kind: `prepaid-voucher` on `zcash:regtest` and the same terms and `payTo`.
 - `HEAD http://127.0.0.1:4097/chunk` answered 402.
 
-`scripts/show-deposit.sh 98e84dab...` ran against the live Zebra while both processes were up. The commentary is on stderr:
+`scripts/show-deposit.sh 98e84dab...` ran against the live Zebra twice. The first run, at 20:54Z while both processes were up, printed the same report with `parseMicros` 91 and `decryptMicros` 1707. The output below is from a re-run at 22:19Z, after the review fixes reworded the commentary. The commentary is on stderr:
 
 ```
 ==> Deposit 98e84dabd476c1a59543ca3c51b9040e0080252abdd1c6b25c7eec1255df0eaf
     mined at height 115, 18 confirmations
     raw transaction: 9166 bytes (18332 hex characters)
     starts with:     0600008098b684d85b16a537000000009b0000000000000000023354ca5f0ff8698735494b8ebf8e7d335e5491994702...
-    That hex is all a block explorer has. It carries no plaintext amount and no address, only ciphertext.
+    That hex is all a block explorer has: no plaintext output amount and no recipient address, only ciphertext.
+    Only the net value balance (here the fee) is public.
 
 ==> Decrypted with the merchant's viewing key (UIVK, not printed)
 ```
@@ -148,7 +149,7 @@ and the report is on stdout:
   "branchId": "0x37a5165b",
   "branchMatchesHeight": true,
   "coinbase": false,
-  "decryptMicros": 1707,
+  "decryptMicros": 926,
   "expired": false,
   "expiryHeight": 155,
   "heightKind": "mined",
@@ -179,7 +180,7 @@ and the report is on stdout:
       "valueZat": 100000
     }
   ],
-  "parseMicros": 91,
+  "parseMicros": 61,
   "payTo": {
     "hasTransparent": false,
     "orchardOwned": true,
@@ -208,11 +209,11 @@ These values come from the joint run of the controller and z402-08's agent. The 
 | `z_sendmany` call to `success` | 5.1 s |
 | Tip at send | 114 |
 | Memo | `aa80f78d384bdfad5a714585bac5ce6628110234f48a50476c81d92389c92046:1` (session key, then deposit index) |
-| Broadcast to the first `found` lookup through `@z402/lightwalletd` | about 0.5 s |
-| `mineNow(1)` to mined, as seen through `@z402/lightwalletd` | about 1.4 s |
+| Broadcast to the first `found` lookup | not measured on this deposit (see the later deposits) |
+| Mined, as Zaino showed it | a few seconds after the block, because Zaino lagged Zebra (see below) |
 | Fee | 10,000 zat (2 Ironwood actions, `valueBalance` 10000) |
 
-At send, before any block (zero-conf):
+At send, before any block:
 
 | Check | Value |
 |---|---|
@@ -221,8 +222,10 @@ At send, before any block (zero-conf):
 | Outputs | one external Ironwood output of 100000 zat |
 | `toPayTo` | true |
 | Transparent in and out | 0 and 0 |
-| `expiryHeight` | 155, which is a margin of 41 blocks over the tip of 114 and passes `zeroConfMinExpiryBlocks` of 20 |
+| `expiryHeight` | 155, with the tip at 114 |
 | zdecrypt verdict | ok |
+
+zdecrypt's verdict covers the output to the key, the memo, the recipient, the minimum amount, any transparent part and the expiry. It is not the facilitator's zero-conf rule. That rule asks for a value of at least `windowZat` and an expiry margin of at least `zeroConfMinExpiryBlocks`, counted from the tip when the deposit is first seen (the facilitator's `firstSeenTip`). The recorded values meet it: 100000 is at least 100000, and with the tip of 114 at send the margin is 155 - 114 = 41, which is at least 20. The facilitator's own `zeroConf` flag for this deposit was not recorded.
 
 After one mined block: Zebra reported height 115 with 1 confirmation immediately. Zaino still answered height `"0"` and tip 114 for a few seconds, and then reported 115 and 115.
 
@@ -231,7 +234,7 @@ Fees seen for deposits of this shape:
 - 10,000 zat when the wallet makes one recipient output and one change output (2 Ironwood actions), as for this deposit.
 - 25,000 zat for the Zallet sends that split the change into 4 notes (5 actions), which the client agent also saw (`z3-live.md` section 2, item 4).
 
-Later deposits from the client's live tests, all harmless:
+Later deposits from the client's live tests, all harmless. On `0fcb6eae...54df` the client measured, through `@z402/lightwalletd`, 523 ms from broadcast to the first sighting in the mempool (about 0.5 s) and 1359 ms from `mineNow(1)` until Zaino showed it mined (about 1.4 s). Those two figures belong to that deposit, not to `98e84dab`, where Zaino lagged by a few seconds.
 
 | Txid | Value | Mined | Expiry |
 |---|---|---|---|
@@ -239,16 +242,16 @@ Later deposits from the client's live tests, all harmless:
 | `e984638e...8eb9` | 100000 zat | 118 | |
 | `ffc61849...50e5` | 0 zat | 116 | |
 
-The 0-zat transaction pays nobody and is not a deposit.
+`ffc61849...50e5` is a 0-zat output that carries a z402-shaped memo (`abab...ab:1`), from the client's tests. It is harmless, because 0 zat can never meet `windowZat`.
 
 An unknown txid is gRPC 13 INTERNAL from Zaino, with `RPC error: LegacyRpcError { code: -5, message: "No such mempool or main chain transaction" }`. Zebra's `getrawtransaction` answers the same unknown txid with JSON-RPC error -5 and `No such mempool or main chain transaction`.
 
-Not in the recorded values: the HTTP status of the agent's call 1, and the time from `mineNow()` until the facilitator's snapshot shows `confirmedZat` of at least 100000. The zero-conf verdict was ok before the block, which is what lets call 1 be served unconfirmed. The snapshot lags the chain by the few seconds Zaino lags Zebra plus the watcher's 5 s poll. Task 13's rehearsals record both.
+Not in the recorded values: the HTTP status of the agent's call 1, the facilitator's own `zeroConf` flag for this deposit, and the time from `mineNow()` until the facilitator's snapshot shows `confirmedZat` of at least 100000. The recorded values meet the zero-conf rule above, so the deposit was eligible for credit before it was mined. The snapshot lags the chain by the few seconds Zaino lags Zebra plus the watcher's 5 s poll. Task 13's rehearsals record all three.
 
 ## 6. What this means for the next tasks
 
 - The facilitator sees the chain through Zaino only. Zebra had the block with 1 confirmation at once, while Zaino stayed on the old tip for a few seconds, so a deposit stays `pending` for that long after it is mined. A confirmation that arrives after the lag plus one poll interval (5 s) is normal.
-- The first lookup right after a broadcast can be a not-found, because of the 0.5 s or so that the mempool takes to show a transaction. Zallet also needs 5 to 10 s to build the proof before any txid exists. The facilitator's resolver retries a not-found within its wait for an unseen deposit (30 s by default), so one early not-found is normal.
+- The first lookup right after a broadcast can be a not-found, because of the 0.5 s or so that the mempool takes to show a transaction (523 ms on the later deposit `0fcb6eae...54df`). Zallet also needs 5 to 10 s to build the proof before any txid exists. The facilitator's resolver retries a not-found within its wait for an unseen deposit (30 s by default), so one early not-found is normal.
 - Zallet's default expiry is the tip at build plus 41, so the margin of 41 passes the zero-conf rule of 20 with room to spare.
 - A deposit costs 10,000 zat in fees when the change is one note, and 25,000 when Zallet splits it. Two deposits of 100,000 at the worst-case fee come to 250,000 zat in all, which is the demo's floor in `scripts/demo.sh`.
 - `termsVersion` `c455cfbbe728c486` is what the default terms, the price of 500 and the regtest payTo give. It changes when any of them does.

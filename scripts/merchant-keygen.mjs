@@ -5,10 +5,12 @@
  *   node scripts/merchant-keygen.mjs --network <regtest|testnet|mainnet> [--force] [--out <absolute path>]
  *
  * The file holds the seed, which is the only backup of the account. It is created with mode 0600 in a 0700
- * directory and an existing file is replaced only with --force. The only output is the shielded-only
- * address on stdout, plus a backup reminder on stderr. The seed, the UFVK and the UIVK are never printed,
- * and the seed never reaches argv, because zdecrypt draws it from the OS itself. The binary and the default
- * output are found from this file's location, never from the working directory.
+ * directory. An existing file is replaced only with --force, and the old file is then kept as
+ * <file>.replaced-<UTC time> with mode 0600, so no seed is ever destroyed. --out takes an absolute path outside
+ * the repository or inside .secrets/, since a key file anywhere else in the work tree can be committed by accident.
+ * The only output is the shielded-only address on stdout, plus a backup reminder on stderr. The seed, the UFVK and
+ * the UIVK are never printed, and the seed never reaches argv, because zdecrypt draws it from the OS itself.
+ * The binary and the default output are found from this file's location, never from the working directory.
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -20,12 +22,13 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -37,8 +40,9 @@ const SEED_RE = /^[0-9a-f]{64}$/;
 const USAGE = `usage: node scripts/merchant-keygen.mjs --network <regtest|testnet|mainnet> [--force] [--out <absolute path>]
 
   --network   network of the merchant account (required)
-  --force     replace an existing key file, the seed it holds is lost for good
-  --out       write here instead of .secrets/merchant-<network>.json, an absolute path
+  --force     replace an existing key file, which is kept as <file>.replaced-<UTC time>
+  --out       write here instead of .secrets/merchant-<network>.json, an absolute path outside the
+              repository or inside its .secrets/ directory
 
 Prints the shielded-only address on stdout. The seed, the UFVK and the UIVK are only written to the file.`;
 
@@ -97,13 +101,41 @@ function shown(path) {
   return rel === "" || rel.startsWith("..") || isAbsolute(rel) ? path : rel;
 }
 
-function exists(path) {
+function lstatOrNothing(path) {
   try {
-    lstatSync(path);
-    return true;
+    return lstatSync(path);
   } catch (e) {
-    if (e.code === "ENOENT") return false;
+    if (e.code === "ENOENT") return undefined;
     throw e;
+  }
+}
+
+// Where a file at path would really land, with the symlinks of its existing ancestors resolved
+function landing(path) {
+  const rest = [basename(path)];
+  let dir = dirname(path);
+  for (;;) {
+    try {
+      return join(realpathSync.native(dir), ...rest);
+    } catch (e) {
+      if (e.code !== "ENOENT" || dirname(dir) === dir) throw e;
+      rest.unshift(basename(dir));
+      dir = dirname(dir);
+    }
+  }
+}
+
+const inside = (base, path) => path === base || path.startsWith(base + sep);
+
+function checkOut(target) {
+  const root = realpathSync.native(ROOT);
+  const where = landing(target);
+  if (inside(root, where) && !inside(join(root, ".secrets"), where)) {
+    throw new Fail(
+      "--out must be outside the repository or inside its .secrets/ directory, " +
+        "since a key file anywhere else in the work tree can be committed by accident",
+      2,
+    );
   }
 }
 
@@ -153,14 +185,54 @@ function generate(network) {
 
 /* Storage */
 
+function stamp() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+}
+
+// A second name for the old file, so that replacing the first one cannot lose it
+function keepOld(target) {
+  const base = `${target}.replaced-${stamp()}`;
+  for (let n = 1; ; n += 1) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    try {
+      linkSync(target, name);
+    } catch (e) {
+      if (e.code === "EEXIST") continue;
+      if (e.code === "ENOENT") return undefined;
+      throw e;
+    }
+    try {
+      chmodSync(name, 0o600);
+    } catch (e) {
+      rmSync(name, { force: true });
+      if (e.code === "ENOENT") return undefined;
+      throw e;
+    }
+    return name;
+  }
+}
+
+// The new directory entry must be durable before the address is shown
+function syncDir(dir) {
+  const fd = openSync(dir, "r");
+  try {
+    fsyncSync(fd);
+  } catch (e) {
+    if (e.code !== "EINVAL" && e.code !== "ENOTSUP") throw e;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 // Written to a private temp file first, so a crash never leaves half a seed at the target
-function store(target, text, force) {
+function store(target, text, replace) {
   const dir = dirname(target);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (dir === SECRETS_DIR) chmodSync(dir, 0o700);
 
   const tmp = `${target}.${process.pid}.tmp`;
   const fd = openSync(tmp, "wx", 0o600);
+  let kept;
   try {
     try {
       fchmodSync(fd, 0o600);
@@ -169,12 +241,25 @@ function store(target, text, force) {
     } finally {
       closeSync(fd);
     }
-    // link fails if the target exists, rename replaces it, and neither follows a symlink at the target
-    if (force) renameSync(tmp, target);
-    else linkSync(tmp, target);
+    if (replace) kept = keepOld(target);
+    try {
+      // link fails if the target exists, rename replaces it, and neither follows a symlink at the target
+      if (replace) renameSync(tmp, target);
+      else linkSync(tmp, target);
+    } catch (e) {
+      if (kept) rmSync(kept, { force: true });
+      throw e;
+    }
   } finally {
     rmSync(tmp, { force: true });
   }
+  try {
+    syncDir(dir);
+  } catch (e) {
+    const why = `${e.code ?? "error"}`;
+    throw new Fail(`cannot sync the directory of ${shown(target)} (${why}), so the new file may not survive a crash`);
+  }
+  return kept;
 }
 
 function main(argv) {
@@ -185,21 +270,25 @@ function main(argv) {
   }
   const { network, force } = opts;
   const target = resolve(opts.out ?? join(SECRETS_DIR, `merchant-${network}.json`));
+  if (opts.out !== undefined) checkOut(target);
 
   const refusal = new Fail(
     `refusing to replace ${shown(target)}, which may hold the only copy of a seed (--force replaces it)`,
   );
-  const existed = exists(target);
-  if (existed && !force) throw refusal;
+  const old = lstatOrNothing(target);
+  if (old?.isDirectory()) throw new Fail(`${shown(target)} is a directory`);
+  if (old && !force) throw refusal;
 
   const { address, text } = generate(network);
+  let kept;
   try {
-    store(target, text, force);
+    kept = store(target, text, old !== undefined);
   } catch (e) {
     throw e.code === "EEXIST" ? refusal : e;
   }
 
-  const where = `${shown(target)} (mode ${(statSync(target).mode & 0o777).toString(8)})`;
+  const modeOf = (path) => (statSync(path).mode & 0o777).toString(8);
+  const where = `${shown(target)} (mode ${modeOf(target)})`;
   console.log(address);
   if (network === "mainnet") {
     console.error(`WARNING: MAINNET keys. The seed in ${where} controls real money and is the only backup.`);
@@ -207,7 +296,10 @@ function main(argv) {
   } else {
     console.error(`Saved ${where}. Its seed is the only backup of this account, keep a copy somewhere safe.`);
   }
-  if (existed) console.error("The file it replaced is gone, and so is the seed that was in it.");
+  if (kept) {
+    console.error(`The file it replaced was kept as ${shown(kept)} (mode ${modeOf(kept)}).`);
+    if (network === "mainnet") console.error("Its seed may still control funds, so back it up too.");
+  }
 }
 
 try {

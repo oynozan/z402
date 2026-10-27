@@ -5,15 +5,18 @@
 #
 # The raw transaction comes from Zebra through getrawtransaction with verbose 1, at Z3_ZEBRA_RPC with Basic auth from
 # Z3_RPC_USER and Z3_RPC_PASSWORD (the defaults are the Z3 regtest ones, see usage). zdecrypt decrypts it at its
-# mined height, or at the chain tip while it is still in the mempool. The keys file supplies the viewing key and the
+# mined height, or at the chain tip plus one while it is in the mempool. The keys file supplies the viewing key and the
 # payTo address. The key reaches zdecrypt through ZDECRYPT_KEY only, so it is never an argument and never printed.
 # The JSON report goes to stdout and all commentary to stderr, so the report can be piped. scripts/demo.sh show runs
 # this script with just the txid.
+
+# An inherited xtrace (bash -x or SHELLOPTS) would print the viewing key and the RPC password
+set +x
 set -euo pipefail
 export LC_ALL=C
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
+HERE="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+ROOT="$(CDPATH='' cd -- "$HERE/.." >/dev/null && pwd)"
 ZDECRYPT="$ROOT/crates/zdecrypt/target/release/zdecrypt"
 
 RPC_URL="${Z3_ZEBRA_RPC:-http://127.0.0.1:29232}"
@@ -63,17 +66,22 @@ need() {
   done
 }
 
+# Printable ASCII only, so nothing that Zebra sends can carry terminal escape sequences
+plain() { tr -cd ' -~' | cut -c1-200; }
+
 # Calls Zebra and prints the result as JSON, or dies with the reason
 rpc() {
-  local method="$1" params="$2" reply
-  reply="$(curl -sS --connect-timeout 5 --max-time 30 -K - -H 'content-type: application/json' \
+  local method="$1" params="$2" reply reason
+  reply="$(curl -q -sS --noproxy '*' --connect-timeout 5 --max-time 30 -K - -H 'content-type: application/json' \
     --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" "$RPC_URL" \
     <<<"header = \"Authorization: Basic $AUTH\"")" ||
     die "cannot reach Zebra at $RPC_URL (is the Z3 stack up? bash infra/z3/up.sh)"
-  jq -e . >/dev/null 2>&1 <<<"$reply" ||
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$reply" ||
     die "Zebra at $RPC_URL did not answer $method with JSON-RPC (wrong Z3_ZEBRA_RPC, Z3_RPC_USER or Z3_RPC_PASSWORD?)"
   if jq -e '.error != null' >/dev/null <<<"$reply"; then
-    die "Zebra $method failed: $(jq -r '.error.message // "unknown error"' <<<"$reply")"
+    reason="$(jq -r '.error | if type == "object" then .message // "unknown error" else . end | tostring' \
+      <<<"$reply" | plain)"
+    die "Zebra $method failed: ${reason:-unknown error}"
   fi
   jq -c '.result' <<<"$reply"
 }
@@ -155,16 +163,21 @@ AUTH="$(printf '%s' "$RPC_USER:$RPC_PASSWORD" | base64 | tr -d '\n')"
 
 step "Deposit $TXID"
 tx="$(rpc getrawtransaction "[\"$TXID\",1]")" || exit 1
+jq -e 'type == "object"' >/dev/null 2>&1 <<<"$tx" || die "Zebra returned an unexpected getrawtransaction result"
 hex="$(jq -r '.hex // empty' <<<"$tx")"
 height="$(jq -r '.height // empty' <<<"$tx")"
 confirmations="$(jq -r '.confirmations // empty' <<<"$tx")"
 case "$hex" in
   '' | *[!0-9a-f]*) die "Zebra returned something that is not transaction hex" ;;
 esac
+case "$confirmations" in
+  *[!0-9]*) die "Zebra returned an unexpected confirmation count" ;;
+esac
 [ $((${#hex} % 2)) -eq 0 ] || die "Zebra returned transaction hex of odd length"
 
 if [ -n "$height" ]; then
   case "$height" in
+    -1) die "the transaction is only on a side chain (not in the best chain), so it is not a usable deposit" ;;
     *[!0-9]*) die "Zebra returned an unexpected height" ;;
   esac
   at_flag="--height"
@@ -181,7 +194,8 @@ else
 fi
 info "raw transaction: $((${#hex} / 2)) bytes (${#hex} hex characters)"
 info "starts with:     ${hex:0:96}..."
-info "That hex is all a block explorer has. It carries no plaintext amount and no address, only ciphertext."
+info "That hex is all a block explorer has: no plaintext output amount and no recipient address, only ciphertext."
+info "Only the net value balance (here the fee) is public."
 
 step "Decrypted with the merchant's viewing key (UIVK, not printed)"
 report="$(ZDECRYPT_KEY="$uivk" "$ZDECRYPT" decrypt --network "$NETWORK" "$at_flag" "$at_value" \
