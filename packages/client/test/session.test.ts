@@ -353,3 +353,67 @@ describe("Session.advanceAmbiguous", () => {
     expect(s.cumulative).toBe(4000n);
   });
 });
+
+describe("Session terminal states (dead and rejected never come back)", () => {
+  it.each(["dead", "rejected"] as const)("a %s deposit stays put when a snapshot lists it as pending", (state) => {
+    const s = newSession();
+    s.deposits.push(localDeposit(s.sessionKey, 1, state, TX));
+    s.applySnapshot(snapshot({ deposits: [snapshotDeposit(TX, "pending")] }));
+    expect(s.deposits[0]?.state).toBe(state);
+    expect(s.resendTxid()).toBeUndefined();
+  });
+
+  it("a rejected deposit stays rejected when a snapshot lists it as dead", () => {
+    const s = newSession();
+    s.deposits.push(localDeposit(s.sessionKey, 1, "rejected", TX));
+    s.applySnapshot(snapshot({ deposits: [snapshotDeposit(TX, "dead")] }));
+    expect(s.deposits[0]?.state).toBe("rejected");
+  });
+
+  it.each(["dead", "rejected"] as const)("a settle transaction does not ack a %s deposit", (state) => {
+    for (const success of [true, false]) {
+      const s = newSession();
+      s.deposits.push(localDeposit(s.sessionKey, 1, state, TX));
+      s.applySettle(settle({ success, transaction: TX }), 500n);
+      expect(s.deposits[0]?.state).toBe(state);
+    }
+  });
+});
+
+describe("Session failed-settle ack (protocol.md §7.3)", () => {
+  it("a failed settle whose transaction is our txid acks that deposit, so it is not resent", () => {
+    const s = newSession();
+    s.deposits.push(localDeposit(s.sessionKey, 1, "sent", TX));
+    s.applySettle(settle({ success: false, errorReason: REASON.cumulativeMismatch, transaction: TX }), 500n);
+    expect(s.deposits[0]?.state).toBe("acked");
+    expect(s.resendTxid()).toBeUndefined();
+  });
+});
+
+describe("Session.hasPending with local terminal states", () => {
+  it.each(["dead", "rejected"] as const)("ignores a snapshot pending entry whose txid is locally %s", (state) => {
+    const s = newSession();
+    s.applySnapshot(snapshot({ deposits: [snapshotDeposit(TX, "pending")] }));
+    expect(s.hasPending()).toBe(true);
+    s.deposits.push(localDeposit(s.sessionKey, 1, state, TX));
+    expect(s.hasPending()).toBe(false);
+  });
+
+  it("still sees another pending entry next to a locally dead one", () => {
+    const s = newSession();
+    const other = txid(0xd2);
+    s.deposits.push(localDeposit(s.sessionKey, 1, "sent", TX));
+    s.applySnapshot(snapshot({ deposits: [snapshotDeposit(TX, "pending"), snapshotDeposit(other, "pending")] }));
+    s.markDead(TX);
+    expect(s.hasPending()).toBe(true);
+  });
+
+  it("a locally dead deposit no longer makes the decision none", () => {
+    const s = newSession();
+    s.deposits.push(localDeposit(s.sessionKey, 1, "sent", TX));
+    s.applySnapshot(snapshot({ cumulative: 600n, limit: 1000n, deposits: [snapshotDeposit(TX, "pending")] }));
+    expect(s.depositDecision(500n, 100_000n, true)).toBe("none");
+    s.markDead(TX);
+    expect(s.depositDecision(500n, 100_000n, true)).toBe("inline");
+  });
+});

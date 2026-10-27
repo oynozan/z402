@@ -12,6 +12,9 @@ export interface LocalDeposit {
 /** States that mean a deposit exists or may exist, so the first call must not make another one. */
 const LIVE_STATES: ReadonlySet<LocalDeposit["state"]> = new Set(["sending", "sent", "acked", "uncertain"]);
 
+/** No snapshot or settle ack ever moves a deposit out of these */
+const TERMINAL_STATES: ReadonlySet<LocalDeposit["state"]> = new Set(["dead", "rejected"]);
+
 /** What the client knows about one `payTo` + network session. Pure state: no I/O, no timers. */
 export class Session {
   readonly payTo: string;
@@ -29,12 +32,15 @@ export class Session {
     this.sessionKey = publicKeyFromSeed(i.seed);
   }
 
-  /** The snapshot lists a pending deposit, or a local `sent` one is neither acked nor dead. */
+  /** A snapshot pending entry not locally dead or rejected, or a local `sent` deposit */
   hasPending(): boolean {
-    return (
-      (this.snapshot?.deposits.some((d) => d.status === "pending") ?? false) ||
-      this.deposits.some((d) => d.state === "sent")
-    );
+    return this.pendingTxid() !== undefined;
+  }
+
+  /** The deposit `hasPending` sees, the first such snapshot entry or else the newest local `sent` one */
+  pendingTxid(): string | undefined {
+    const listed = this.snapshot?.deposits.find((d) => d.status === "pending" && !this.isTerminal(d.txid));
+    return listed?.txid ?? this.resendTxid();
   }
 
   depositDecision(price: bigint, trigger: bigint, canDeposit: boolean): "inline" | "background" | "none" {
@@ -62,7 +68,9 @@ export class Session {
     this.cumulative = BigInt(s.cumulativeZat);
     for (const listed of s.deposits) {
       const local = this.find(listed.txid);
-      if (local !== undefined) local.state = listed.status === "dead" ? "dead" : "acked";
+      if (local !== undefined && !TERMINAL_STATES.has(local.state)) {
+        local.state = listed.status === "dead" ? "dead" : "acked";
+      }
     }
     this.snapshot = s;
   }
@@ -70,7 +78,7 @@ export class Session {
   applySettle(s: SettleResponse, attempted: bigint): void {
     if (typeof s.transaction === "string" && s.transaction !== "") {
       const local = this.find(s.transaction);
-      if (local !== undefined) local.state = "acked";
+      if (local !== undefined && !TERMINAL_STATES.has(local.state)) local.state = "acked";
     }
     if (s.success !== true) return;
     const snapshot = snapshotFromExtra(s.extra);
@@ -95,5 +103,10 @@ export class Session {
 
   private find(txid: string): LocalDeposit | undefined {
     return this.deposits.find((d) => d.txid === txid);
+  }
+
+  private isTerminal(txid: string): boolean {
+    const local = this.find(txid);
+    return local !== undefined && TERMINAL_STATES.has(local.state);
   }
 }
