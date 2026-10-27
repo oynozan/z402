@@ -1,6 +1,6 @@
 # z402 wire contract
 
-**Version: v0-draft** · 2026-10-27 · drafted by the client agent, under review by the facilitator agent.
+**Version: v1** (frozen 2026-10-27; ACKed by both agents) · drafted by the client agent, reviewed by the facilitator agent. Code may rely on every value here; changes need a message, both ACKs, and a version bump.
 
 This is the one contract the client library (`@z402/client`) and the merchant side (`@z402/facilitator`, `@z402/server`, `apps/api`) both build against. It refines [mvp-build-doc.md](mvp-build-doc.md) with what research found; where they disagree, this file wins.
 
@@ -24,10 +24,10 @@ This is the one contract the client library (`@z402/client`) and the merchant si
 ```json
 {
   "scheme": "prepaid-voucher",
-  "network": "zcash:testnet",
+  "network": "zcash:regtest",
   "amount": "500",
   "asset": "ZEC",
-  "payTo": "utest1…",
+  "payTo": "uregtest1…",
   "maxTimeoutSeconds": 60,
   "extra": {
     "windowZat": "100000",
@@ -98,7 +98,7 @@ sig     = Ed25519 (RFC 8032, pure) over message, 64 bytes, lowercase hex
 - The client always deposits exactly `windowZat` in one output.
 
 ### 5.2 Crediting
-- The credit unit is the lowercase txid. It is consumed once, globally, under the key `zcash:testnet:<txid>`. **One transaction funds one session.**
+- The credit unit is the lowercase txid. It is consumed once, globally, under the key `<network>:<txid>` (e.g. `zcash:regtest:<txid>`). The facilitator ledger file is per network (`.data/facilitator-ledger.<network>.jsonl`). Delete the regtest ledger after `docker compose down -v`, because regtest heights restart. **One transaction funds one session.**
 - Credited value = the sum of outputs to `payTo` whose memo matches this session's pattern. Outputs with other memos are ignored.
 - Rejections:
 
@@ -128,7 +128,7 @@ sig     = Ed25519 (RFC 8032, pure) over message, 64 bytes, lowercase hex
 - **Not-found streaks.** Any *found* answer resets the streak. Non-definitive answers (any other error, timeouts) neither count nor reset it. Distinct `x-backend` values are recorded when gRPC metadata exposes them but are not required: with 5 balanced backends, a single lagging backend cannot kill a live deposit, because any found answer resets the streak. Both sides use `NOT_FOUND_DEAD_MS = 120000` and `NOT_FOUND_DEAD_BLOCKS = 2`.
 - `confirmations(h, tip) = max(tip, h) − h + 1`. A transaction's height can run ahead of `GetLatestBlock`'s cached tip.
 - `isDepositDead`: the tip ≥ expiry boundary is exact. Zebra evicts at `tip ≥ expiryHeight`, and block `tip+1` cannot include the transaction.
-- `expiryHeight` is a little-endian u32 at bytes 16..20 of the raw v5 or v6 transaction.
+- `expiryHeight` is a little-endian u32 at bytes 16..20 of the raw v5 or v6 transaction. Default expiry deltas: +40 under NU6.3 (Z3 regtest; mainnet until NU7; Zallet `tx_expiry_delta` 40), and +120 for zingo under NU7. All pass `zeroConfMinExpiryBlocks = 20`.
 - Dead records are never deleted. Re-presenting a dead txid gives `z402_deposit_dead`.
 - **Zero-conf eligible** ⇔ `valueZat ≥ windowZat` ∧ (`expiryHeight == 0` ∨ `expiryHeight − referenceTip ≥ zeroConfMinExpiryBlocks`). A transparent part is already rejected (§5.2).
   - `referenceTip` = the tip when the facilitator first resolved the deposit (`firstSeenTip`). The facilitator records it in its ledger and never re-evaluates it, so `zeroConf` is fixed per deposit.
@@ -251,7 +251,27 @@ A facilitator timeout reaches the client as HTTP 502 with **neither** header, wh
 - 5 s deadline per RPC. Transport errors map to `z402_chain_unavailable`; only lightwalletd's `-5: Transaction not found in mempool or best chain` means not-found.
 - Check `payTo`, `amount` and the terms against its own config: `invalid_payment_requirements` on mismatch.
 
-## 11. Chain access facts (live-verified 2026-10-27)
+## 11. Chain access facts
+
+### 11.0 Z3 regtest (the development network; source-derived, see `docs/research/client/z3.md`; live values in `docs/research/client/z3-live.md`)
+
+- **Stack.** Z3 `ZcashFoundation/z3@e84ce9fd`: Zebra 6.2.3 and Zallet `v0.1.0-beta.1`, with Zaino overridden to `zingodevops/zainod:0.10.2-no-tls` (Zaino < 0.8 reports a mempool tx at the tip height and is unsupported). It is owned by the client agent under `infra/z3/`.
+- **Endpoints.**
+  - Zaino CompactTxStreamer: `http://127.0.0.1:28137` (plaintext h2c; TLS follows the URL scheme).
+  - Zebra RPC: `http://127.0.0.1:29232`.
+  - Zallet RPC: `http://127.0.0.1:50232` (Basic `zebra:zebra`).
+- **Heights.** Overwinter…Canopy at 1, NU5…NU6.3 at 2, NU7 not active. Deposits are Ironwood outputs in v6 transactions, branch `0x37a5165b`.
+- **Blocks** exist only when mined: `infra/z3/rpc.mjs` exports `mineNow(n)`, and `infra/z3/clock.mjs run --every 25` mines on a clock. Without the clock nothing confirms or expires.
+- **`GetLightdInfo.chainName`** is `"test"` on regtest. Never derive the network from `chainName`; assert `consensusBranchId` against the configured network instead.
+- Zaino polls the mempool every 500 ms, so one not-found right after a broadcast is normal.
+
+### 11.1 Mainnet (Phase 2)
+
+- NU6.3 (Ironwood) is active, branch `0x37a5165b`. NU7 activates at 3,543,405 (branch `0x77190ad9`), about 2026-11-05/06, after the deadline.
+- Endpoint: `zec.rocks:443` (TLS) or a regional `na|eu|ap|sa.zec.rocks:443`. Use one host for both wallet and facilitator. Blocks average about 75 s.
+
+### 11.2 Public testnet (research record, live-verified 2026-10-27; unusable for funding)
+
 
 - **Endpoint.** The only working public testnet endpoint is `testnet.zec.rocks:443` (TLS). It runs a zec.rocks fork of lightwalletd v0.5.4 on Zebra 7.0.0. Protos: `github.com/zcash/lightwallet-protocol`.
 - **Load balancing.** It balances `GetTransaction` per request across about 5 backends; first-sight skew reaches about 16 s. `GetLatestBlock` and `GetLightdInfo` come from an edge cache that lags 0–9 s.
@@ -260,15 +280,15 @@ A facilitator timeout reaches the client as HTTP 502 with **neither** header, wh
 - **Network upgrades.** NU7 has been active on testnet since height 4,465,026, branch `0x77190ad9`. Blocks average ~25 s (median 20 s, p90 53 s, max 164 s), and mempool → mined has a median of 22 s.
 - **`TxFilter.hash`.** Takes the **byte-reversed** display txid. Display order returns NotFound.
 - **`RawTransaction.height`.** 0 for the mempool, `h` once mined, `2^64−1` on a fork. Read it as a string or BigInt.
-- **Not-found.** Only the message `-5: Transaction not found in mempool or best chain` means not-found. The fork maps every backend error to NotFound and retries for about 22 s first.
+- **Not-found.** See the matcher table in §15. On lightwalletd only NOT_FOUND + `-5: Transaction not found in mempool or best chain` means not-found; the fork maps every backend error to NotFound and retries for about 22 s first.
 - **`SendTransaction`.** Returns OK even on rejection; check `errorCode`.
 - **Crates.** Only crates on the `zcash_protocol 0.11` / `zcash_primitives 0.31` / `orchard 0.16` line parse NU7 transactions; `zcash_protocol ≤ 0.10.6` fails on every transaction.
 
-## 12. Demo terms (pending the user's decision)
+## 12. Demo terms (option A chosen by the user, 2026-10-27)
 
 | Option | Price `p` | Honest run | Cheat run | Simulated |
 |---|---|---|---|---|
-| **A (recommended)** | 500 zat | 1 call/s, 150 calls ≈ 156 s, no stall. Credit line and D2 appear in 87–92 % of runs. | Local speed: refused at cumulative 125,000. | 0 stalls in 4,000 runs |
+| **A (chosen)** | 500 zat | 1 call/s, 150 calls ≈ 156 s, no stall. Credit line and D2 appear in 87–92 % of runs. | Local speed: refused at cumulative 125,000. | 0 stalls in 4,000 runs |
 | B | 1,000 zat (the doc's value) | Pre-confirm D1 off camera, then run at local speed; D2 at call 1 shows zero-conf. | Same refusal at 125,000. | 0 stalls, but "served on an unconfirmed deposit" is shown by D2, not D1 |
 
 W = 100,000, 2500 bps, C_max = 200,000 and `zeroConfMinExpiryBlocks` = 20 in both options.
@@ -281,6 +301,8 @@ The client agent drafts it; both agents own it from v1. Pure TypeScript, no netw
 // constants
 SCHEME = "prepaid-voucher"; ASSET = "ZEC"; ZEC_DECIMALS = 8
 NETWORK_REGTEST = "zcash:regtest"; NETWORK_TESTNET = "zcash:testnet"; NETWORK_MAINNET = "zcash:mainnet"
+type ZcashNetwork = typeof NETWORK_REGTEST | typeof NETWORK_TESTNET | typeof NETWORK_MAINNET
+ZCASH_NETWORKS: readonly ZcashNetwork[]; isZcashNetwork(s: string): s is ZcashNetwork
 VOUCHER_DOMAIN = "z402-voucher-v1"; MAX_MONEY_ZAT = 2_100_000_000_000_000n; FINAL_CONFIRMATIONS = 10
 NOT_FOUND_DEAD_MS = 120_000; NOT_FOUND_DEAD_BLOCKS = 2                // §5.3 not-found streak
 // validation
@@ -371,7 +393,7 @@ Neither agent edits the other's paths; requests go by message.
 // @z402/lightwalletd
 type RawTx = { found: false }
            | { found: true; raw: Uint8Array; location: "mempool" | "mined" | "orphaned"; height: number | null };
-createLightwalletdClient(opts: { url: string; rpcDeadlineMs?: number /* 5000 */ }): {
+createLightwalletdClient(opts: { url: string /* http:// = plaintext, https:// = TLS */; rpcDeadlineMs?: number /* 5000 */ }): {
   getTip(): Promise<number>;
   getTransaction(txid: string): Promise<RawTx>;   // txid = 64 lowercase hex, display order; TypeError otherwise
   getLightdInfo(): Promise<{ chainName: string; consensusBranchId: string; blockHeight: number; version: string }>;
@@ -386,21 +408,25 @@ createLightwalletdClient(opts: { url: string; rpcDeadlineMs?: number /* 5000 */ 
 | proto height `"0"` | `location: "mempool"`, `height: null` |
 | proto height `"18446744073709551615"` | `location: "orphaned"`, `height: null` |
 | any other proto height `h` | `location: "mined"`, `height: Number(h)` |
-| gRPC NotFound whose details contain `-5: Transaction not found in mempool or best chain` | `{ found: false }` (the only source of it) |
-| anything else | throws `ChainUnavailableError` |
+| **definitive not-found** (`isDefinitiveNotFound()`, exactly these three rows) | `{ found: false }` (its only source) |
+| · lightwalletd: gRPC `NOT_FOUND` (5), details contain `-5: Transaction not found in mempool or best chain` | |
+| · Zaino ≥ 0.10.1: gRPC `INTERNAL` (13), details contain `LegacyRpcError { code: -5, message: "No such mempool or main chain transaction" }` | |
+| · Zebra ≥ 6.4 built-in gRPC (fallback): gRPC `NOT_FOUND`, details contain `transaction not found` | |
+| anything else (other codes or texts, `UNAVAILABLE`, deadline) | throws `ChainUnavailableError` |
 
 ```ts
 // @z402/facilitator
 interface FacilitatorOptions {
-  chain: ChainView; payTo: string; priceZat: bigint; terms: Terms;
+  network: ZcashNetwork; chain: ChainView; payTo: string; priceZat: bigint; terms: Terms;
   authToken?: string; ledgerPath?: string; host?: string /* 127.0.0.1 */; port?: number /* 0 */;
   pollIntervalMs?: number /* 5000 */; depositWaitMs?: number /* 30000: cross-backend first-sight skew reaches ~16 s */;
 }
 startFacilitator(o: FacilitatorOptions): Promise<{ url: string; pollNow(): Promise<void>; close(): Promise<void> }>
 
 // @z402/api
-interface ApiOptions { facilitatorUrl: string /* "" throws */; facilitatorToken?: string; payTo: string; priceZat: bigint; host?: string; port?: number }
+interface ApiOptions { network: ZcashNetwork; facilitatorUrl: string /* "" throws */; facilitatorToken?: string; payTo: string; priceZat: bigint; host?: string; port?: number }
 startApi(o: ApiOptions): Promise<{ url: string; close(): Promise<void> }>
+// both throw unless isValidPayTo(payTo, network); apps/e2e passes NETWORK_REGTEST
 ```
 
 - The paid route is `GET /chunk`. Its body is `{ chunk: number, cumulativeZat: string, data: string }` with `chunk = cumulativeZat / price`, so it never moves on refused or `HEAD` calls.
