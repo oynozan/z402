@@ -1,6 +1,6 @@
 import { createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
 import type { KeyObject } from "node:crypto";
-import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET, VOUCHER_DOMAIN } from "./constants.js";
+import { isZcashNetwork, VOUCHER_DOMAIN } from "./constants.js";
 import { ProtocolError } from "./errors.js";
 import { REASON } from "./reasons.js";
 import { isValidPayTo, parseZat, SESSION_KEY_RE, SIG_RE } from "./validate.js";
@@ -14,7 +14,6 @@ export interface VoucherFields {
 }
 
 const SCHEME_RE = /^[a-z0-9-]{1,64}$/;
-const NETWORKS: readonly string[] = [NETWORK_REGTEST, NETWORK_TESTNET, NETWORK_MAINNET];
 
 // ASN.1 DER headers for a raw Ed25519 key: PKCS#8 PrivateKeyInfo (seed) and SPKI (public key).
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
@@ -54,7 +53,7 @@ export function voucherMessage(f: VoucherFields): Uint8Array {
   const cumulativeZat = requireString(f.cumulativeZat, "cumulativeZat");
 
   if (!SCHEME_RE.test(scheme)) throw invalid("scheme is malformed");
-  if (!NETWORKS.includes(network)) throw invalid("network is not a known network");
+  if (!isZcashNetwork(network)) throw invalid("network is not a known network");
   if (!isValidPayTo(payTo, network)) throw invalid("payTo is not a unified address for the network");
   if (!SESSION_KEY_RE.test(sessionKey)) throw invalid("sessionKey is not 64 lowercase hex");
   parseZat(cumulativeZat);

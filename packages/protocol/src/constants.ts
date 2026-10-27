@@ -4,6 +4,19 @@ export const NETWORK_TESTNET = "zcash:testnet";
 export const NETWORK_REGTEST = "zcash:regtest";
 export const NETWORK_MAINNET = "zcash:mainnet";
 
+export type ZcashNetwork = typeof NETWORK_REGTEST | typeof NETWORK_TESTNET | typeof NETWORK_MAINNET;
+
+export const ZCASH_NETWORKS: readonly ZcashNetwork[] = Object.freeze([
+  NETWORK_REGTEST,
+  NETWORK_TESTNET,
+  NETWORK_MAINNET,
+]);
+
+/** Exact string membership in `ZCASH_NETWORKS`; never consults the prototype chain. */
+export function isZcashNetwork(s: unknown): s is ZcashNetwork {
+  return typeof s === "string" && (ZCASH_NETWORKS as readonly string[]).includes(s);
+}
+
 export const ASSET = "ZEC";
 export const ZEC_DECIMALS = 8;
 
