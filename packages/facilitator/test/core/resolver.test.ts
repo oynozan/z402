@@ -400,6 +400,90 @@ describe("startBackground and peek", () => {
   });
 });
 
+describe("inFlight", () => {
+  test("is false before a lookup, true while it waits on the chain, and false once it settles", async () => {
+    vi.useFakeTimers();
+    const chain = new ScriptedChain();
+    chain.delayMs = 100;
+    const resolver = new DepositResolver({ chain });
+    expect(resolver.inFlight(T)).toBe(false);
+
+    const lookup = resolver.lookup(T, 0);
+    expect(resolver.inFlight(T)).toBe(true);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(resolver.inFlight(T)).toBe(true);
+    expect(resolver.inFlight(txidOf(2))).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(50);
+    await lookup;
+    expect(resolver.inFlight(T)).toBe(false);
+  });
+
+  test("is true for a background lookup until it resolves, when peek takes over", async () => {
+    vi.useFakeTimers();
+    const chain = new ScriptedChain();
+    chain.delayMs = 100;
+    chain.script(T, [found(T)]);
+    const resolver = new DepositResolver({ chain });
+
+    resolver.startBackground(T, 1000);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(resolver.inFlight(T)).toBe(true);
+    expect(resolver.peek(T)).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(resolver.inFlight(T)).toBe(false);
+    expect(resolver.peek(T)).toMatchObject({ kind: "found" });
+  });
+
+  test("is true for a lookup that is still queued for a slot", async () => {
+    vi.useFakeTimers();
+    const chain = new ScriptedChain();
+    chain.delayMs = 100;
+    const resolver = new DepositResolver({ chain, maxConcurrent: 1 });
+
+    const running = resolver.lookup(txidOf(1), 0);
+    const queued = resolver.lookup(txidOf(2), 0);
+    expect(chain.calls.has(txidOf(2))).toBe(false);
+    expect(resolver.inFlight(txidOf(2))).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(resolver.inFlight(txidOf(1))).toBe(false);
+    expect(resolver.inFlight(txidOf(2))).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await Promise.all([running, queued]);
+    expect(resolver.inFlight(txidOf(2))).toBe(false);
+  });
+
+  test("is true for a new lookup of a txid whose earlier result is still held", async () => {
+    vi.useFakeTimers();
+    const chain = new ScriptedChain();
+    chain.script(T, [found(T)]);
+    const resolver = new DepositResolver({ chain });
+    await resolver.lookup(T, 0);
+    expect(resolver.inFlight(T)).toBe(false);
+
+    chain.delayMs = 100;
+    const again = resolver.lookup(T, 0);
+
+    expect(resolver.inFlight(T)).toBe(true);
+    expect(resolver.peek(T)).toMatchObject({ kind: "found" });
+    await vi.advanceTimersByTimeAsync(200);
+    await again;
+    expect(resolver.inFlight(T)).toBe(false);
+  });
+
+  test("is false again after a lookup that failed", async () => {
+    const { chain, resolver } = rig();
+    chain.script(T, [new TypeError("boom")]);
+
+    await expect(resolver.lookup(T, 0)).rejects.toThrow("boom");
+
+    expect(resolver.inFlight(T)).toBe(false);
+  });
+});
+
 describe("a slow chain", () => {
   test("lookup(t, 30000) with 4 s per call settles within 30000 + 5000 ms", async () => {
     vi.useFakeTimers();

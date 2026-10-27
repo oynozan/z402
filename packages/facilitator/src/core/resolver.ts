@@ -66,6 +66,11 @@ export class DepositResolver {
     return held.lookup;
   }
 
+  /** True while a lookup for the txid is running or queued, however it was started */
+  inFlight(txid: string): boolean {
+    return this.#flights.has(txid);
+  }
+
   forget(txid: string): void {
     this.#results.delete(txid);
   }
