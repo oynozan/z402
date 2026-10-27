@@ -92,6 +92,15 @@ importers:
         specifier: ^2.4.0
         version: 2.4.0
 
+  packages/server:
+    dependencies:
+      '@x402/core':
+        specifier: 2.28.0
+        version: 2.28.0
+      '@z402/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   packages/testkit:
     dependencies:
       '@z402/protocol':
