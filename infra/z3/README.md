@@ -38,9 +38,11 @@ Every port the stack publishes (Zebra RPC 29232 and health 28080, Zaino gRPC 281
 JSON-RPC 28237, Zallet RPC 50232) binds to `127.0.0.1` only, through
 [`compose.loopback.yml`](compose.loopback.yml). Z3's own compose files publish them on every
 interface, which put Zebra's unauthenticated RPC and Zallet's `zebra:zebra` RPC on the LAN.
-One gap remains: on the very first run, Z3's `scripts/regtest-init.sh` starts Zebra once with
-Z3's own two files, so Zebra listens on every interface for the minute the wallet takes to
-initialise, until `up.sh` recreates it with the loopback binding.
+One gap remains. Z3's `scripts/regtest-init.sh` starts Zebra once with Z3's own two files. That
+happens on the first run, and again on the first `up.sh` after `down.sh --wipe`. Zebra then
+listens on every interface for the minute the wallet takes to initialise, until `up.sh` recreates
+it with the loopback binding. If `regtest-init.sh` fails part-way, Zebra stays on every interface
+until `bash infra/z3/down.sh` runs.
 
 ### Applying the loopback binding to a running stack
 
