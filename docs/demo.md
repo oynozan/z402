@@ -22,8 +22,8 @@ Do all of this before you start recording.
 2. **The stack is up.** `scripts/demo.sh up` brings up Z3 (idempotent), then the facilitator and the API, and ends with both ready lines:
 
    ```
-   facilitator ready after 3s: facilitator listening on http://127.0.0.1:4022 network=regtest payTo=uregtest1etwr...
-   api ready after 2s: api listening on http://127.0.0.1:4021 network=regtest
+   facilitator ready after 3s: facilitator listening on http://127.0.0.1:4022 network=zcash:regtest payTo=uregtest1etwr...
+   api ready after 2s: api listening on http://127.0.0.1:4021 network=zcash:regtest
    ```
 
    Each waits up to 60 s. If one does not appear, the script prints the log tail and exits 1 (see Troubleshooting).
