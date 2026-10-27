@@ -126,11 +126,12 @@ group_has_marker() {
 
 command_of() { ps -ww -o command= -p "$1" 2>/dev/null || true; }
 
+# The tail of each spawn command line, kept free of ROOT because a logical pwd can differ from the real path
 marker_of() {
   case "$1" in
-    facilitator) printf '%s' "@z402/facilitator" ;;
-    api) printf '%s' "@z402/api" ;;
-    clock) printf '%s' "clock.mjs" ;;
+    facilitator) printf '%s' "--filter @z402/facilitator start" ;;
+    api) printf '%s' "--filter @z402/api start" ;;
+    clock) printf '%s' "infra/z3/clock.mjs run --every" ;;
   esac
 }
 
@@ -176,10 +177,12 @@ already_running() {
   return 1
 }
 
-# Bounds a command to 10 s by killing the child, since a Go binary such as docker ignores SIGALRM
-BOUND='my $p = fork // exit 127; unless ($p) { exec @ARGV or exit 127 } $SIG{ALRM} = sub { kill "TERM", $p; sleep 1; kill "KILL", $p; waitpid $p, 0; exit 142 }; alarm 10; waitpid $p, 0; exit($? & 127 ? 1 : $? >> 8)'
+# bounded <seconds> <command...> kills the child at the deadline, since a Go binary such as docker ignores SIGALRM
+BOUND='my $t = shift; my $p = fork // exit 127; unless ($p) { exec @ARGV or exit 127 } $SIG{ALRM} = sub { kill "TERM", $p; sleep 1; kill "KILL", $p; waitpid $p, 0; exit 142 }; alarm $t; waitpid $p, 0; exit($? & 127 ? 1 : $? >> 8)'
 
-docker_answers() { { perl -e "$BOUND" -- docker info >/dev/null; } 2>/dev/null; }
+bounded() { perl -e "$BOUND" -- "$@"; }
+
+docker_answers() { { bounded 10 docker info >/dev/null; } 2>/dev/null; }
 
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
@@ -367,29 +370,40 @@ cmd_cheat() {
 # Deposit memo transactions of the agent wallet, newest first, without expired or zero-value ones
 DEPOSIT_TXIDS='[.[] | select(.expired_unmined != true) | select(any(.outputs[]?; ((.memo // "") | test("^[0-9a-f]{64}:[0-9]+$")) and ((.value // 0) > 0)))] | sort_by(.mined_height // 1e12) | reverse | .[].txid'
 
-# The newest deposit transaction that Zebra knows, so an unbroadcast one cannot shadow a mined one
+# Prints the newest deposit txid that Zebra knows, so an unbroadcast one cannot shadow a mined one
+# Returns 1 when the wallet has no deposit, 2 with the number tried when Zebra knows none, 3 when Zallet cannot be read
 newest_deposit_txid() {
-  local account rows txid
-  account="$(zrpc zallet z_listaccounts | jq -r '.[0].account_uuid // empty')" || return 1
-  [ -n "$account" ] || return 1
-  rows="$(zrpc zallet z_listtransactions "\"$account\"")" || return 1
+  local account rows txid tried=0
+  account="$(zrpc zallet z_listaccounts | jq -r '.[0].account_uuid // empty')" || return 3
+  [ -n "$account" ] || return 3
+  rows="$(zrpc zallet z_listtransactions "\"$account\"")" || return 3
   for txid in $(jq -r "$DEPOSIT_TXIDS" <<<"$rows" | head -n 10); do
+    tried=$((tried + 1))
     if zrpc zebra getrawtransaction "\"$txid\"" 0 >/dev/null 2>&1; then
       printf '%s' "$txid"
       return 0
     fi
   done
-  return 0
+  if [ "$tried" -eq 0 ]; then return 1; fi
+  printf '%s' "$tried"
+  return 2
 }
 
 cmd_show() {
-  local txid="${1:-}" tmp raw_json height tip hex_len out uivk pay_to at_flag at_value
+  local txid="${1:-}" tmp raw_json height tip hex_len out uivk pay_to at_flag at_value rc
   [ $# -le 1 ] || die "usage: scripts/demo.sh show [txid]"
   if [ $# -eq 0 ]; then
     need jq node
     step "Newest deposit in the agent wallet"
-    txid="$(newest_deposit_txid 2>/dev/null)" || die "could not read the agent wallet's transactions from Zallet (is the stack up?)"
-    [ -n "$txid" ] || die "the agent wallet has sent no z402 deposit yet, pass a txid"
+    bounded 10 node "$ROOT/infra/z3/rpc.mjs" zebra getblockcount >/dev/null 2>&1 || die "Zebra does not answer, run scripts/demo.sh up"
+    rc=0
+    txid="$(newest_deposit_txid 2>/dev/null)" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) die "the agent wallet has sent no z402 deposit yet, pass a txid" ;;
+      2) die "none of the $txid newest deposits is known to Zebra, pass a txid" ;;
+      *) die "could not read the agent wallet's transactions from Zallet (is the stack up?)" ;;
+    esac
     info "$txid"
   fi
   case "$txid" in
@@ -519,6 +533,9 @@ descendants_of() {
     }' || true
 }
 
+# Prints the pids of the members of process group $1
+group_members() { ps -A -o pid=,pgid= 2>/dev/null | awk -v g="$1" '$2 == g { print $1 }' || true; }
+
 # wait_gone <pgid> <seconds> <descendant pids> returns 0 once the group and every listed pid have exited
 wait_gone() {
   local pid="$1" i=0 max=$(($2 * 5)) extra="$3" d busy
@@ -546,7 +563,9 @@ stop_proc() {
     desc="$(descendants_of "$pid" | tr '\n' ' ')"
   elif is_orphaned "$name"; then
     pid="$(pid_of "$name")"
-    info "$name: its leader exited, signalling the members of its process group"
+    for d in $(group_members "$pid"); do desc="$desc $(descendants_of "$d" | tr '\n' ' ')"; done
+    desc="$(printf '%s\n' $desc | sort -un | tr '\n' ' ')"
+    info "$name: its leader exited, signalling the members of its process group and their descendants"
   else
     info "$name: not running, removing its stale pidfile (nothing was signalled)"
     rm -f "$DATA/$name.pid"
@@ -583,6 +602,9 @@ cmd_down() {
 
   if [ "$wipe" -eq 1 ]; then
     step "Ledger"
+    if [ "$failed" -ne 0 ]; then
+      die "a process did not stop, not deleting the ledger"
+    fi
     if port_open "$FAC_PORT"; then
       die "something still listens on $FAC_URL, not deleting the ledger under it"
     fi
