@@ -3,7 +3,7 @@ name = "zdecrypt"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
-description = "z402 spike that parses a possibly unconfirmed Zcash testnet tx and trial-decrypts it with a UIVK or UFVK"
+description = "z402 deposit decryptor"
 license = "MIT"
 publish = false
 

@@ -152,7 +152,7 @@ fn main() {
         }
         "derive-uivk" => {
             let keys = key_from(&args);
-            emit(&json!({ "uivk": encode_uivk(&keys).unwrap_or_else(|e| fail(e)), "from": keys.kind }), pretty);
+            emit(&json!({ "uivk": encode_uivk(&keys).unwrap_or_else(|e| fail(e)), "from": keys.kind() }), pretty);
         }
         "decrypt" => {
             let keys = key_from(&args);

@@ -1,3 +1,7 @@
+// zdecrypt follows the decrypt-loop shape of Kage crates/x402z-facilitator/src/verify.rs
+// (github.com/nickthelegend/zec-shielded-x402 @ 0330760, MIT) and Hanko packages/core/src/lib.rs
+// (github.com/nickthelegend/zec-payment-verify-sdk @ 3c7edae, MIT). See NOTICE.md.
+
 //! Parse a Zcash testnet transaction and trial-decrypt its shielded outputs with a viewing key.
 //!
 //! The facilitator path is `decode_key` once at startup, then `inspect` once per deposit. `inspect`
@@ -36,10 +40,17 @@ use zip32::Scope;
 pub const NETWORK: Network = Network::TestNetwork;
 
 pub struct Keys {
-    pub kind: &'static str,
+    kind: &'static str,
     pub uivk: UnifiedIncomingViewingKey,
     orchard: Vec<(Scope, OrchardIvk)>,
     sapling: Vec<(Scope, SaplingPivk)>,
+}
+
+impl Keys {
+    /// Whichever of "ufvk" or "uivk" `decode_key` accepted
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
 }
 
 /// Where the transaction is, which fixes the height its consensus rules are taken from
@@ -78,26 +89,29 @@ pub struct Decrypted {
     pub note_version: Option<u8>,
 }
 
+/// Tries a UFVK decode, then a UIVK decode, never a prefix test, since revision 2 keys start uvftest or uvitest
 pub fn decode_key(s: &str) -> Result<Keys, String> {
     let s = s.trim();
-    if s.starts_with("uview") {
-        let ufvk = UnifiedFullViewingKey::decode(&NETWORK, s)
-            .map_err(|e| format!("not a testnet unified full viewing key: {e}"))?;
-        let mut orchard = Vec::new();
-        if let Some(fvk) = ufvk.orchard() {
-            orchard.push((Scope::External, fvk.to_ivk(Scope::External)));
-            orchard.push((Scope::Internal, fvk.to_ivk(Scope::Internal)));
+    let ufvk_err = match UnifiedFullViewingKey::decode(&NETWORK, s) {
+        Ok(ufvk) => {
+            let mut orchard = Vec::new();
+            if let Some(fvk) = ufvk.orchard() {
+                orchard.push((Scope::External, fvk.to_ivk(Scope::External)));
+                orchard.push((Scope::Internal, fvk.to_ivk(Scope::Internal)));
+            }
+            let mut sapling = Vec::new();
+            if let Some(dfvk) = ufvk.sapling() {
+                sapling.push((Scope::External, SaplingPivk::new(&dfvk.to_ivk(Scope::External))));
+                sapling.push((Scope::Internal, SaplingPivk::new(&dfvk.to_ivk(Scope::Internal))));
+            }
+            let uivk = ufvk.to_unified_incoming_viewing_key();
+            return Ok(Keys { kind: "ufvk", uivk, orchard, sapling });
         }
-        let mut sapling = Vec::new();
-        if let Some(dfvk) = ufvk.sapling() {
-            sapling.push((Scope::External, SaplingPivk::new(&dfvk.to_ivk(Scope::External))));
-            sapling.push((Scope::Internal, SaplingPivk::new(&dfvk.to_ivk(Scope::Internal))));
-        }
-        let uivk = ufvk.to_unified_incoming_viewing_key();
-        return Ok(Keys { kind: "ufvk", uivk, orchard, sapling });
-    }
-    let uivk = UnifiedIncomingViewingKey::decode(&NETWORK, s)
-        .map_err(|e| format!("not a testnet unified incoming viewing key: {e}"))?;
+        Err(e) => e,
+    };
+    let uivk = UnifiedIncomingViewingKey::decode(&NETWORK, s).map_err(|e| {
+        format!("not a testnet unified full viewing key ({ufvk_err}) and not a testnet unified incoming viewing key ({e})")
+    })?;
     let orchard = uivk.orchard().iter().map(|k| (Scope::External, k.clone())).collect();
     let sapling = uivk.sapling().iter().map(|k| (Scope::External, k.prepare())).collect();
     Ok(Keys { kind: "uivk", uivk, orchard, sapling })
@@ -370,7 +384,7 @@ pub fn inspect_expect(
         })),
         "orchard": orchard_bundle_json(tx.orchard_bundle()),
         "ironwood": orchard_bundle_json(tx.ironwood_bundle()),
-        "keyKind": keys.kind,
+        "keyKind": keys.kind(),
         "outputs": outputs,
         "sizeBytes": raw.len(),
         "parseMicros": parse_us,
