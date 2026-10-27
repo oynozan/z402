@@ -91,7 +91,7 @@ interface PrepaidVoucherSchemeOptions {
    - **Inline** (awaited before signing) when there is no snapshot and no live deposit (call 1), or when `headroom < price` and nothing is pending.
    - **Background** (fire and forget) when the snapshot shows nothing pending and `headroom < depositTriggerZat`.
    - No deposit at all once `depositsMade ≥ maxDeposits`.
-4. **Sign.** `c_new = cumulative + price`. Sign `voucherMessage(...)`. Attach `depositTxid` = the newest deposit still in state `sent`. A deposit becomes `acked`, and is never resent, once `settle.transaction === txid` or the snapshot lists the txid with any status (protocol.md §7.3).
+4. **Sign.** `c_new = cumulative + price`. Sign `voucherMessage(...)`. Attach `depositTxid` = the newest deposit still in state `sent`. A deposit becomes `acked`, and is never resent, only on a **successful** settle (`success: true`) where `settle.transaction === txid` or that settle's snapshot lists the txid (protocol.md v1.1 §7.3). Refusal snapshots (corrective 402s, settle `success: false`) are projected: they resync `cumulative` and copy `dead`, but never ack. A snapshot whose `sessionKey` is not ours is ignored and is fatal.
 5. **Return.** Record the `attempt`, emit `voucher`, and return `{ x402Version, payload }`.
 
 ### 3.3 `onPaymentResponse` (the only place the outcome is visible)
@@ -110,7 +110,7 @@ On entry: clear the safety timer. Always release the mutex in `finally`.
 | Code | Not final | Final |
 |---|---|---|
 | `z402_awaiting_confirmation` | `waitForConfirmation(pendingTxid)`. Mined → `{recovered:true}`. Dead → redeposit inline (if allowed) → `{recovered:true}`. Timeout → return. | Return. |
-| `z402_deposit_required` | Inline deposit if allowed → `{recovered:true}`. In cheat mode → emit `refused` and return. | Background deposit if allowed; return. |
+| `z402_deposit_required` | If the attempt presented a txid that the snapshot does not list as dead or orphaned → halt (`fatal`), never pay again (protocol.md v1.1 §7.3 bullet 3). Otherwise inline deposit if allowed → `{recovered:true}`; in cheat mode → emit `refused` and return. | Same halt rule; otherwise background deposit if allowed; return. |
 | `z402_cumulative_mismatch` | Snapshot already resynced `cumulative` → `{recovered:true}` (without a snapshot: return). | Return. |
 | `z402_deposit_dead` | Mark it dead → inline deposit if allowed → `{recovered:true}`. | Mark it dead; background deposit. |
 | `z402_deposit_not_found` | Own `status(txid)`. Found → sleep 2 s → recover. Not found for ≥ 120 s and ≥ 2 new blocks → treat as dead. | Return. |
@@ -145,7 +145,7 @@ When it returns `{recovered:true}`, the hook adds `ctx.requirements` to the `rec
 
 ### 3.6 Events (`ClientEvent`, for the demo log and tests)
 
-`session`, `deposit_started {index, inline}`, `deposit_broadcast {index, txid, ms}`, `deposit_failed {index, error}`, `deposit_acked {txid}`, `deposit_confirmed {txid, height}`, `deposit_dead {txid}`, `voucher {cumulativeZat, depositTxid?}`, `paid {cumulativeZat, snapshot?}`, `refused {code, snapshot?, recovering}`, `waiting {txid}`, `ambiguous {attemptedZat}`, `fatal {code, message}`.
+`session`, `deposit_started {index, inline}`, `deposit_broadcast {index, txid, ms}`, `deposit_failed {index, error}`, `deposit_acked {txid}`, `deposit_confirmed {txid, height?}` (height only from the waiting path, which reads our own chain; snapshot-sourced confirmations carry none), `deposit_dead {txid}`, `voucher {cumulativeZat, depositTxid?}`, `paid {cumulativeZat, snapshot?}`, `refused {code, snapshot?, recovering}`, `waiting {txid}`, `ambiguous {attemptedZat}`, `fatal {code, message}`.
 
 ## 4. Wallet adapter: zingo-cli, one-shot
 
