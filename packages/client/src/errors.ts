@@ -8,3 +8,24 @@ export class DepositUncertainError extends Error {
     this.txid = txid;
   }
 }
+
+export class ZalletRpcError extends Error {
+  readonly code: number | undefined;
+
+  constructor(message: string, options?: { code?: number; cause?: unknown }) {
+    super(message, { cause: options?.cause });
+    this.name = "ZalletRpcError";
+    this.code = options?.code;
+  }
+}
+
+/** The deposit may or may not exist and no txid is known, so the caller must not pay again */
+export class DepositStatusUnknownError extends ZalletRpcError {
+  readonly memo: string;
+
+  constructor(memo: string, options?: { cause?: unknown }) {
+    super(`deposit status unknown for memo ${memo}`, options);
+    this.name = "DepositStatusUnknownError";
+    this.memo = memo;
+  }
+}

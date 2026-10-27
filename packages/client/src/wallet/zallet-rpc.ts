@@ -1,9 +1,12 @@
 import { TXID_RE, type DepositRequest, type ZcashWallet } from "@z402/protocol";
 import { systemClock, type Clock } from "../clock.js";
+import { DepositStatusUnknownError, ZalletRpcError } from "../errors.js";
 
 const ZAT_PER_ZEC = 100_000_000n;
 const INSUFFICIENT_RE = /insufficient/i;
 const CONNECT_FAILURES: ReadonlySet<unknown> = new Set(["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH"]);
+/** Empty z_getoperationresult answers in a row after which the opid counts as lost, e.g. by a Zallet restart */
+const LOST_OP_POLLS = 8;
 
 export interface ZalletRpcWalletOptions {
   /** Zallet JSON-RPC endpoint, the regtest default is on port 50232 */
@@ -34,34 +37,14 @@ export class InsufficientFundsError extends Error {
   }
 }
 
-export class ZalletRpcError extends Error {
-  readonly code: number | undefined;
-
-  constructor(message: string, options?: { code?: number; cause?: unknown }) {
-    super(message, { cause: options?.cause });
-    this.name = "ZalletRpcError";
-    this.code = options?.code;
-  }
-}
-
 /** Zallet answered with a refusal or never took the connection, so the request started nothing */
 class ZalletRefusedError extends ZalletRpcError {}
-
-/** The deposit may or may not exist and no txid is known, so the caller must not pay again */
-export class DepositStatusUnknownError extends ZalletRpcError {
-  readonly memo: string;
-
-  constructor(memo: string, options?: { cause?: unknown }) {
-    super(`deposit status unknown for memo ${memo}`, options);
-    this.name = "DepositStatusUnknownError";
-    this.memo = memo;
-  }
-}
 
 type Attempt = { txid: string } | { insufficient: string };
 
 type OperationState =
   | { kind: "pending" }
+  | { kind: "missing" }
   | { kind: "success"; txid: string | undefined }
   | { kind: "failed"; message: string; code: number | undefined }
   | { kind: "cancelled" }
@@ -228,9 +211,11 @@ export class ZalletRpcWallet implements ZcashWallet {
       }
     };
 
+    let missing = 0;
     for (;;) {
       if (opid !== undefined) {
         const op = await this.#pollOperation(opid);
+        missing = op.kind === "missing" ? missing + 1 : 0;
         switch (op.kind) {
           case "success":
             if (op.txid !== undefined) return { txid: op.txid };
@@ -239,14 +224,21 @@ export class ZalletRpcWallet implements ZcashWallet {
             reconciling = true;
             lastError = new ZalletRpcError("operation succeeded without a txid");
             break;
-          case "failed":
+          case "failed": {
             if (INSUFFICIENT_RE.test(op.message)) return { insufficient: op.message };
+            // A failure while broadcasting can leave a stored transaction that still mines
+            const txid = await lookup();
+            if (txid !== undefined) return { txid };
             throw new ZalletRpcError(`Zallet operation failed: ${op.message}`, { code: op.code });
+          }
           case "cancelled":
             throw new ZalletRpcError("Zallet operation was cancelled and nothing was sent");
           case "error":
             reconciling = true;
             lastError = op.cause;
+            break;
+          case "missing":
+            if (missing >= LOST_OP_POLLS) reconciling = true;
             break;
           case "pending":
             break;
@@ -279,8 +271,9 @@ export class ZalletRpcWallet implements ZcashWallet {
       return { kind: "error", cause: new ZalletRpcError("z_getoperationresult did not return an array") };
     }
     const entry = entries.find((e): e is Record<string, unknown> => isRecord(e) && e.id === opid);
+    if (entry === undefined) return { kind: "missing" };
     // Unknown statuses count as still running
-    switch (entry?.status) {
+    switch (entry.status) {
       case "success":
         return { kind: "success", txid: txidOf(entry.result) };
       case "failed":
@@ -350,9 +343,13 @@ export class ZalletRpcWallet implements ZcashWallet {
       throw new ZalletRpcError(`Zallet ${method}: HTTP ${status} with a non-JSON body`);
     }
     if (isRecord(body) && body.error !== undefined && body.error !== null) {
-      const error = isRecord(body.error) ? body.error : {};
-      const message = typeof error.message === "string" ? error.message : "unknown error";
-      throw new ZalletRefusedError(`Zallet ${method}: ${message}`, { code: typeof error.code === "number" ? error.code : undefined });
+      const error = body.error;
+      // Only Zallet's own JSON-RPC error object is a refusal, a proxy in between may answer any other shape
+      if (isRecord(error) && typeof error.code === "number") {
+        const message = typeof error.message === "string" ? error.message : "unknown error";
+        throw new ZalletRefusedError(`Zallet ${method}: ${message}`, { code: error.code });
+      }
+      throw new ZalletRpcError(`Zallet ${method}: HTTP ${status} with a non-JSON-RPC error ${JSON.stringify(error).slice(0, 200)}`);
     }
     if (status < 200 || status >= 300) throw new ZalletRpcError(`Zallet ${method}: HTTP ${status}`);
     if (!isRecord(body) || !("result" in body)) throw new ZalletRpcError(`Zallet ${method}: response has no result`);

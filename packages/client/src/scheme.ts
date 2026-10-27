@@ -30,13 +30,12 @@ import {
   type ZcashWallet,
 } from "@z402/protocol";
 import { systemClock, type Clock } from "./clock.js";
-import { DepositUncertainError } from "./errors.js";
+import { DepositStatusUnknownError, DepositUncertainError } from "./errors.js";
 import type { ClientEvent } from "./events.js";
 import { Mutex } from "./mutex.js";
 import { respond, type Attempt, type Recovery, type SchemeCore, type SessionState } from "./respond.js";
 import { Session, type LocalDeposit } from "./session.js";
 import { TxWatch, type Observation } from "./wait.js";
-import { DepositStatusUnknownError } from "./wallet/zallet-rpc.js";
 
 export interface PrepaidVoucherSchemeOptions {
   wallet: ZcashWallet;

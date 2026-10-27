@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DepositStatusUnknownError, ZalletRpcError } from "../src/errors.js";
 import {
-  DepositStatusUnknownError,
   InsufficientFundsError,
-  ZalletRpcError,
   ZalletRpcWallet,
   zatToZecString,
   type ZalletRpcWalletOptions,
@@ -195,17 +194,84 @@ describe("ZalletRpcWallet", () => {
       expect(fake.calls("z_sendmany")).toHaveLength(2);
     });
 
-    it("a failed operation that is not about funds throws ZalletRpcError without resending", async () => {
+    it("a failed operation that is not about funds and left no ledger row throws ZalletRpcError without resending", async () => {
       fake.on("z_getoperationresult", { result: [opFailed(-8, "Invalid recipient address")] });
 
       const error = await send(make()).catch((e: unknown) => e);
 
       expect(error).toBeInstanceOf(ZalletRpcError);
       expect(error).not.toBeInstanceOf(InsufficientFundsError);
+      expect(error).not.toBeInstanceOf(DepositStatusUnknownError);
       expect((error as ZalletRpcError).code).toBe(-8);
-      expect((error as ZalletRpcError).message).toContain("Invalid recipient address");
+      expect((error as ZalletRpcError).message).toBe("Zallet operation failed: Invalid recipient address");
       expect(fake.calls("z_sendmany")).toHaveLength(1);
+      expect(fake.calls("z_listtransactions")).toHaveLength(1);
       expect(clock.sleeps).toEqual([]);
+    });
+
+    it("a failed operation whose transaction the wallet stored anyway returns that txid without resending", async () => {
+      fake.on("z_getoperationresult", { result: [opFailed(-26, "Failed to broadcast transaction: connection reset")] });
+      fake.on("z_listtransactions", { result: [txRow({ txid: txid(5), minedHeight: null, outputs: [{ memo: MEMO }] })] });
+
+      await expect(send(make())).resolves.toEqual({ txid: txid(5) });
+
+      expect(fake.calls("z_sendmany")).toHaveLength(1);
+      expect(fake.calls("z_listtransactions")).toHaveLength(1);
+      expect(clock.sleeps).toEqual([]);
+    });
+
+    it("an insufficient-funds failure never looks in the ledger", async () => {
+      fake.on("z_getoperationresult", { result: [opFailed(-6, "Insufficient balance")] });
+
+      await expect(send(make({ preBroadcastRetries: 0 }))).rejects.toBeInstanceOf(InsufficientFundsError);
+      expect(fake.calls("z_listtransactions")).toHaveLength(0);
+    });
+
+    describe("an operation id Zallet no longer knows", () => {
+      const LONG = 10_000;
+
+      it("after 8 empty results in a row, keeps polling and finds the late ledger row with one z_sendmany", async () => {
+        fake.on("z_getoperationresult", { result: [] });
+        fake.on(
+          "z_listtransactions",
+          { result: [] },
+          { result: [] },
+          { result: [txRow({ txid: txid(4), minedHeight: null, outputs: [{ memo: MEMO }] })] },
+        );
+
+        await expect(send(make({ opTimeoutMs: LONG }))).resolves.toEqual({ txid: txid(4) });
+
+        expect(fake.calls("z_sendmany")).toHaveLength(1);
+        expect(fake.calls("z_getoperationresult")).toHaveLength(10);
+        expect(fake.calls("z_listtransactions")).toHaveLength(3);
+        expect(clock.sleeps).toEqual(Array<number>(9).fill(POLL));
+      });
+
+      it("fewer than 8 empty results in a row never look in the ledger", async () => {
+        const empty: Reply = { result: [] };
+        fake.on(
+          "z_getoperationresult",
+          ...Array<Reply>(7).fill(empty),
+          { result: [opPending()] },
+          ...Array<Reply>(7).fill(empty),
+          { result: [opSuccess(txid(3))] },
+        );
+
+        await expect(send(make({ opTimeoutMs: LONG }))).resolves.toEqual({ txid: txid(3) });
+
+        expect(fake.calls("z_getoperationresult")).toHaveLength(16);
+        expect(fake.calls("z_listtransactions")).toHaveLength(0);
+      });
+
+      it("the operation can still report after reconciling started", async () => {
+        const empty: Reply = { result: [] };
+        fake.on("z_getoperationresult", ...Array<Reply>(9).fill(empty), { result: [opSuccess(txid(2))] });
+
+        await expect(send(make({ opTimeoutMs: LONG }))).resolves.toEqual({ txid: txid(2) });
+
+        expect(fake.calls("z_sendmany")).toHaveLength(1);
+        expect(fake.calls("z_listtransactions")).toHaveLength(2);
+      });
     });
 
     it("op timeout reconciles by memo and never resends", async () => {
@@ -336,6 +402,9 @@ describe("ZalletRpcWallet", () => {
         ["a result that is not an opid", { result: 42 }, {}],
         ["an empty opid", { result: "" }, {}],
         ["a request that times out", { hang: true }, { requestTimeoutMs: 50 }],
+        ["a proxy body whose error is a string", { status: 502, body: JSON.stringify({ error: "Bad Gateway" }) }, {}],
+        ["an error object without a numeric code", { status: 200, body: JSON.stringify({ jsonrpc: "2.0", id: 1, error: { message: "boom" } }) }, {}],
+        ["an error object with a string code", { status: 500, body: JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: "-4", message: "boom" } }) }, {}],
       ];
       const row = () => txRow({ txid: txid(5), minedHeight: null, outputs: [{ memo: MEMO }] });
 
