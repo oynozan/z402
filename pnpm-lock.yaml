@@ -30,6 +30,9 @@ importers:
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
+      '@x402/fetch':
+        specifier: 2.28.0
+        version: 2.28.0
       '@z402/testkit':
         specifier: workspace:*
         version: link:../testkit
@@ -523,6 +526,9 @@ packages:
 
   '@x402/core@2.28.0':
     resolution: {integrity: sha512-Da/7zKxCKqpBoB4Msc9tFgkAv7tJTD8nG+DSSm+QdXAyJS4PQsmgVSKe17rDJTtlu0pwNbLcOje6MyQ6kaDkig==}
+
+  '@x402/fetch@2.28.0':
+    resolution: {integrity: sha512-kF5IjZIz/izg2TD/Zav+SVj0jtC0zBDfE7WcKCnMZWIsZcLCyL2GgvwXCn7CCSsNjpQ/z3Rz4OqTCA4AaeKySQ==}
 
   ansi-regex@5.0.1:
     resolution: {integrity: sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==}
@@ -1128,6 +1134,10 @@ snapshots:
   '@x402/core@2.28.0':
     dependencies:
       zod: 3.25.76
+
+  '@x402/fetch@2.28.0':
+    dependencies:
+      '@x402/core': 2.28.0
 
   ansi-regex@5.0.1: {}
 

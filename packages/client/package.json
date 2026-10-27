@@ -11,6 +11,7 @@
     "@z402/protocol": "workspace:*"
   },
   "devDependencies": {
+    "@x402/fetch": "2.28.0",
     "@z402/testkit": "workspace:*"
   }
 }
