@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEMO_TERMS, type DepositStatus, type FoundInspection, type TxInspection } from "@z402/protocol";
@@ -7,7 +7,7 @@ import { Ledger, type LedgerEvent } from "../../src/core/ledger.js";
 import { buildSnapshot } from "../../src/core/snapshot.js";
 import { commit, FacilitatorState } from "../../src/core/state.js";
 import { observe } from "../../src/core/transitions.js";
-import { depositEvent, statusEvent, voucherEvent } from "./events.js";
+import { depositEvent, statusEvent, unreadableEvents, voucherEvent } from "./events.js";
 import { OTHER_SESSION_KEY as OTHER, SESSION_KEY as K, TIP, txidOf } from "./records.js";
 
 let dir: string;
@@ -27,6 +27,61 @@ function stateWith(...events: LedgerEvent[]): FacilitatorState {
   const state = new FacilitatorState();
   for (const e of events) state.apply(e);
   return state;
+}
+
+const KEYS = [K, OTHER];
+const TXIDS = [1, 2, 3, 4].map(txidOf);
+const STATUSES: DepositStatus[] = ["pending", "confirmed", "final", "orphaned", "dead"];
+
+/** Everything an observer can read from a state, for comparing two states */
+function view(state: FacilitatorState) {
+  return {
+    deposits: TXIDS.map((txid) => state.deposit(txid)),
+    sessions: KEYS.map((key) => state.session(key)),
+    credited: KEYS.map((key) => state.depositsOf(key).map((d) => d.txid)),
+    live: state.liveDeposits(TIP).map((d) => d.txid),
+  };
+}
+
+/** The message `run` throws, or null when it does not throw */
+function refusal(run: () => void): string | null {
+  try {
+    run();
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+function rng(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Events over a small universe of txids and sessions, so that collisions and refusals are common */
+function randomEvent(next: () => number): () => LedgerEvent {
+  const pick = <T>(xs: readonly T[]): T => xs[Math.floor(next() * xs.length)] as T;
+  return () => {
+    const kind = pick(["deposit", "voucher", "status"] as const);
+    if (kind === "deposit") {
+      return depositEvent({ txid: pick(TXIDS), sessionKey: pick(KEYS), status: pick(STATUSES) });
+    }
+    if (kind === "voucher") {
+      return voucherEvent({ sessionKey: pick(KEYS), cumulativeZat: pick(["0", "100", "500", "5000"]) });
+    }
+    return statusEvent({
+      txid: pick(TXIDS),
+      status: pick(STATUSES),
+      minedHeight: pick([null, TIP]),
+      confirmations: pick([0, 3]),
+      deadAtTip: pick([null, TIP]),
+    });
+  };
 }
 
 describe("FacilitatorState deposits", () => {
@@ -240,6 +295,188 @@ describe("commit", () => {
     const ledger = new Ledger();
     commit(ledger, new FacilitatorState(), []);
     expect(ledger.replay()).toEqual([]);
+  });
+});
+
+describe.each<[string, () => Ledger]>([
+  ["file", () => new Ledger(join(dir, "ledger.jsonl"))],
+  ["memory", () => new Ledger()],
+])("commit refuses a bad batch before writing, with a %s ledger", (_kind, makeLedger) => {
+  test("a two-event batch whose second event is refused writes nothing and applies nothing", () => {
+    const ledger = makeLedger();
+    const state = new FacilitatorState();
+    commit(ledger, state, [voucherEvent({ cumulativeZat: "5000" })]);
+    const written = ledger.replay();
+
+    expect(() => commit(ledger, state, [depositEvent(), voucherEvent({ cumulativeZat: "100" })])).toThrow(/below/);
+
+    expect(ledger.replay()).toEqual(written);
+    expect(state.ownerOf(txidOf(1))).toBeUndefined();
+    expect(state.depositsOf(K)).toEqual([]);
+    expect(state.session(K)?.cLast).toBe(5000n);
+  });
+
+  test("a batch that credits one txid twice is refused whole", () => {
+    const ledger = makeLedger();
+    const state = new FacilitatorState();
+    expect(() => commit(ledger, state, [depositEvent(), depositEvent()])).toThrow(/already credited/);
+    expect(ledger.replay()).toEqual([]);
+    expect(state.ownerOf(txidOf(1))).toBeUndefined();
+  });
+
+  test("a second voucher below the first in one batch is refused whole", () => {
+    const ledger = makeLedger();
+    const state = new FacilitatorState();
+    const batch = [voucherEvent({ cumulativeZat: "5000" }), voucherEvent({ cumulativeZat: "4000" })];
+    expect(() => commit(ledger, state, batch)).toThrow(/below/);
+    expect(ledger.replay()).toEqual([]);
+    expect(state.session(K)).toBeUndefined();
+  });
+
+  test("a status for a deposit nobody credited is refused with the batch it came in", () => {
+    const ledger = makeLedger();
+    const state = new FacilitatorState();
+    const batch = [depositEvent(), statusEvent({ txid: txidOf(2) })];
+    expect(() => commit(ledger, state, batch)).toThrow(/unknown deposit/);
+    expect(ledger.replay()).toEqual([]);
+    expect(state.ownerOf(txidOf(1))).toBeUndefined();
+  });
+
+  test("a deposit and its status in one batch are accepted together", () => {
+    const ledger = makeLedger();
+    const state = new FacilitatorState();
+    commit(ledger, state, [depositEvent(), statusEvent()]);
+    expect(ledger.replay()).toEqual([depositEvent(), statusEvent()]);
+    expect(state.deposit(txidOf(1))?.status).toBe("confirmed");
+  });
+
+  test.each(unreadableEvents)("a batch ending in %s is refused before anything is written", (_what, bad) => {
+    const ledger = makeLedger();
+    const state = new FacilitatorState();
+    const batch = [voucherEvent(), bad as LedgerEvent];
+    expect(() => commit(ledger, state, batch)).toThrow(/event 2 is not a ledger event/);
+    expect(ledger.replay()).toEqual([]);
+    expect(state.session(K)).toBeUndefined();
+  });
+});
+
+describe("commit and the ledger file", () => {
+  const path = () => join(dir, "ledger.jsonl");
+
+  test("a refused first batch leaves no file behind", () => {
+    const batch = [depositEvent(), statusEvent({ txid: txidOf(2) })];
+    expect(() => commit(new Ledger(path()), new FacilitatorState(), batch)).toThrow();
+    expect(existsSync(path())).toBe(false);
+  });
+
+  test("a refused batch leaves the file byte for byte as it was", () => {
+    const ledger = new Ledger(path());
+    const state = new FacilitatorState();
+    commit(ledger, state, [voucherEvent({ cumulativeZat: "5000" })]);
+    const before = readFileSync(path(), "utf8");
+    expect(() => commit(ledger, state, [depositEvent(), voucherEvent({ cumulativeZat: "100" })])).toThrow(/below/);
+    expect(readFileSync(path(), "utf8")).toBe(before);
+  });
+
+  test("a restart after a refused batch replays cleanly into the same state", () => {
+    const ledger = new Ledger(path());
+    const live = new FacilitatorState();
+    commit(ledger, live, [depositEvent(), voucherEvent({ cumulativeZat: "5000" })]);
+    expect(() => commit(ledger, live, [statusEvent(), voucherEvent({ cumulativeZat: "10" })])).toThrow(/below/);
+
+    const restarted = stateWith(...new Ledger(path()).replay());
+    expect(view(restarted)).toEqual(view(live));
+    expect(restarted.deposit(txidOf(1))?.status).toBe("pending");
+  });
+});
+
+describe("FacilitatorState.check", () => {
+  test("a valid batch passes and changes nothing", () => {
+    const state = new FacilitatorState();
+    expect(state.check([depositEvent(), statusEvent(), voucherEvent()])).toBeUndefined();
+    expect(view(state)).toEqual(view(new FacilitatorState()));
+  });
+
+  test("an empty batch passes", () => {
+    expect(() => new FacilitatorState().check([])).not.toThrow();
+  });
+
+  test("it does not modify the batch it is given", () => {
+    const batch = Object.freeze([depositEvent(), voucherEvent()]);
+    expect(() => new FacilitatorState().check(batch)).not.toThrow();
+    expect(batch).toEqual([depositEvent(), voucherEvent()]);
+  });
+
+  test("a deposit already credited in the state is refused", () => {
+    expect(() => stateWith(depositEvent()).check([depositEvent()])).toThrow(/already credited/);
+  });
+
+  test("a deposit credited earlier in the batch is already credited for the next event", () => {
+    expect(() => new FacilitatorState().check([depositEvent(), depositEvent({ sessionKey: OTHER })])).toThrow(
+      /already credited/,
+    );
+  });
+
+  test("a voucher is judged against the cumulative the batch has already reached", () => {
+    const state = stateWith(voucherEvent({ cumulativeZat: "100" }));
+    const pair = (second: string) => [voucherEvent({ cumulativeZat: "5000" }), voucherEvent({ cumulativeZat: second })];
+    expect(() => state.check(pair("4999"))).toThrow(/below/);
+    expect(() => state.check(pair("5000"))).not.toThrow();
+  });
+
+  test("a status may follow the deposit it moves in the same batch, and not precede it", () => {
+    expect(() => new FacilitatorState().check([depositEvent(), statusEvent()])).not.toThrow();
+    expect(() => new FacilitatorState().check([statusEvent(), depositEvent()])).toThrow(/unknown deposit/);
+  });
+
+  test.each(unreadableEvents)("%s is refused with its position in the batch", (_what, bad) => {
+    expect(() => new FacilitatorState().check([voucherEvent(), bad as LedgerEvent])).toThrow(
+      /event 2 is not a ledger event/,
+    );
+  });
+
+  test("it throws exactly what applying the batch one event at a time throws", () => {
+    const next = rng(20261027);
+    const event = randomEvent(next);
+    let accepted = 0;
+    let refused = 0;
+    for (let trial = 0; trial < 400; trial++) {
+      const history: LedgerEvent[] = [];
+      const state = new FacilitatorState();
+      for (let i = 0; i < 6; i++) {
+        const e = event();
+        if (refusal(() => state.apply(e)) === null) history.push(e);
+      }
+      const batch = Array.from({ length: 1 + Math.floor(next() * 4) }, event);
+
+      const expected = refusal(() => {
+        const reference = stateWith(...history);
+        for (const e of batch) reference.apply(e);
+      });
+      expect(refusal(() => state.check(batch))).toBe(expected);
+      expect(view(state)).toEqual(view(stateWith(...history)));
+      if (expected === null) accepted++;
+      else refused++;
+    }
+    expect(accepted).toBeGreaterThan(40);
+    expect(refused).toBeGreaterThan(40);
+  });
+});
+
+describe("commit under random batches", () => {
+  test("whatever it is given, the file replays into exactly the live state", () => {
+    const next = rng(7);
+    const event = randomEvent(next);
+    const path = join(dir, "ledger.jsonl");
+    const ledger = new Ledger(path);
+    const live = new FacilitatorState();
+    let refused = 0;
+    for (let i = 0; i < 300; i++) {
+      const batch = Array.from({ length: 1 + Math.floor(next() * 3) }, event);
+      if (refusal(() => commit(ledger, live, batch)) !== null) refused++;
+      expect(view(stateWith(...new Ledger(path).replay()))).toEqual(view(live));
+    }
+    expect(refused).toBeGreaterThan(30);
   });
 });
 

@@ -35,7 +35,10 @@ export class Ledger {
     if (path !== undefined) mkdirSync(dirname(path), { recursive: true });
   }
 
+  /** Writes the batch in one call, or throws without writing when an event is not one replay accepts */
   appendSync(events: LedgerEvent[]): void {
+    const bad = events.findIndex((e) => !isEvent(e));
+    if (bad >= 0) throw new Error(`event ${bad + 1} is not a ledger event`);
     if (events.length === 0) return;
     if (this.#path === undefined) {
       this.#memory.push(...structuredClone(events));
@@ -94,7 +97,8 @@ const isCount = (v: unknown): boolean => typeof v === "number" && Number.isSafeI
 const isHeight = (v: unknown): boolean => v === null || isCount(v);
 const isStatus = (v: unknown): boolean => typeof v === "string" && (DEPOSIT_STATUSES as readonly string[]).includes(v);
 
-function isEvent(x: unknown): x is LedgerEvent {
+/** The shape check of replay, shared with the writers so that no line is written that replay would refuse */
+export function isEvent(x: unknown): x is LedgerEvent {
   if (typeof x !== "object" || x === null) return false;
   const e = x as Record<string, unknown>;
   switch (e.t) {

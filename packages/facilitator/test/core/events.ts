@@ -34,3 +34,16 @@ export function statusEvent(over: Partial<Of<"status">> = {}): Of<"status"> {
     ...over,
   };
 }
+
+/** Values that pass for ledger events until replay refuses their line, each with what is wrong */
+export const unreadableEvents: Array<[string, unknown]> = [
+  ["a NaN confirmations", { ...depositEvent(), confirmations: NaN }],
+  ["an Infinity minedHeight", { ...statusEvent(), minedHeight: Infinity }],
+  ["an undefined amount", { ...voucherEvent(), cumulativeZat: undefined }],
+  ["an unknown status", { ...statusEvent(), status: "bogus" }],
+  ["a bigint amount", { ...depositEvent(), valueZat: 100000n }],
+  ["a signed amount", { ...voucherEvent(), cumulativeZat: "-5" }],
+  ["an empty txid", { ...statusEvent(), txid: "" }],
+  ["an unknown event type", { t: "bogus" }],
+  ["null", null],
+];

@@ -1,4 +1,4 @@
-import type { Ledger, LedgerEvent } from "./ledger.js";
+import { isEvent, type Ledger, type LedgerEvent } from "./ledger.js";
 import { DEAD_RECHECK_BLOCKS, type DepositRecord } from "./types.js";
 
 type Of<T extends LedgerEvent["t"]> = Extract<LedgerEvent, { t: T }>;
@@ -18,6 +18,16 @@ export class FacilitatorState {
         return this.#settle(e);
       case "status":
         return this.#move(e);
+    }
+  }
+
+  /** Dry run of a batch on a scratch state, throwing what apply would and changing nothing */
+  check(events: readonly LedgerEvent[]): void {
+    const scratch = new FacilitatorState();
+    for (const [i, e] of events.entries()) {
+      if (!isEvent(e)) throw new Error(`event ${i + 1} is not a ledger event`);
+      this.#lend(scratch, e);
+      scratch.apply(e);
     }
   }
 
@@ -45,6 +55,17 @@ export class FacilitatorState {
 
   liveDeposits(tip: number): DepositRecord[] {
     return [...this.#deposits.values()].filter((d) => isLive(d, tip));
+  }
+
+  // Copies what apply reads for this event, unless an earlier event of the batch already put it there
+  #lend(scratch: FacilitatorState, e: LedgerEvent): void {
+    if (e.t === "voucher") {
+      const session = this.#sessions.get(e.sessionKey);
+      if (session !== undefined && !scratch.#sessions.has(e.sessionKey)) scratch.#sessions.set(e.sessionKey, session);
+      return;
+    }
+    const deposit = this.#deposits.get(e.txid);
+    if (deposit !== undefined && !scratch.#deposits.has(e.txid)) scratch.#deposits.set(e.txid, deposit);
   }
 
   #credit(e: Of<"deposit">): void {
@@ -97,8 +118,9 @@ function isLive(deposit: DepositRecord, tip: number): boolean {
   return deposit.status !== "final";
 }
 
-/** Synchronous on purpose, so a settle can check and commit with no await between */
+/** Refuses a bad batch before writing a byte, and stays synchronous so a settle commits with no await between */
 export function commit(ledger: Ledger, state: FacilitatorState, events: LedgerEvent[]): void {
+  state.check(events);
   ledger.appendSync(events);
   for (const e of events) state.apply(e);
 }

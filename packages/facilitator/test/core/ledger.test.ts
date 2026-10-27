@@ -2,8 +2,8 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { Ledger } from "../../src/core/ledger.js";
-import { depositEvent, statusEvent, voucherEvent } from "./events.js";
+import { Ledger, type LedgerEvent } from "../../src/core/ledger.js";
+import { depositEvent, statusEvent, unreadableEvents, voucherEvent } from "./events.js";
 
 let dir: string;
 beforeEach(() => {
@@ -155,6 +155,18 @@ describe("Ledger recovery", () => {
     writeFileSync(file(), line(depositEvent()) + line(bad));
     expect(() => new Ledger(file()).replay()).toThrow(/ledger line 2/);
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe.each<[string, () => Ledger]>([
+  ["file", () => new Ledger(file())],
+  ["memory", () => new Ledger()],
+])("Ledger.appendSync with a %s ledger", (_kind, makeLedger) => {
+  test.each(unreadableEvents)("%s is refused and nothing from its batch is written", (_what, bad) => {
+    const ledger = makeLedger();
+    ledger.appendSync([depositEvent()]);
+    expect(() => ledger.appendSync([voucherEvent(), bad as LedgerEvent])).toThrow(/event 2 is not a ledger event/);
+    expect(ledger.replay()).toEqual([depositEvent()]);
   });
 });
 
