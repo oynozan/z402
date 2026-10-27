@@ -249,13 +249,28 @@ describe("paid /chunk through the whole stack", () => {
     "awaiting_confirmation while D1 is pending",
     async () => {
       const s = await fullStack();
-      s.client.pendingTxid = deposit(s.chain, s.client.sessionKey, 1);
+      const d1 = deposit(s.chain, s.client.sessionKey, 1);
+      s.client.pendingTxid = d1;
       for (let i = 1; i <= 200; i++) await paidChunk(await s.chunk());
       expect(s.client.settled.at(-1)?.session.cumulativeZat).toBe("100000");
 
       const refusal = await refusalOf(await s.chunk());
       expect(refusal.error).toBe(REASON.awaitingConfirmation);
       expect(sessionOf(refusal)).toMatchObject({ cumulativeZat: "100000", limitZat: "100000", pendingZat: "100000" });
+
+      // A second pending deposit adds nothing to the window, and the refusal lists it as if credited
+      const d2 = deposit(s.chain, s.client.sessionKey, 2);
+      s.client.pendingTxid = d2;
+      const projected = await refusalOf(await s.chunk());
+      expect(projected.error).toBe(REASON.awaitingConfirmation);
+      expect(sessionOf(projected)?.deposits.map((d) => d.txid)).toEqual([d1, d2]);
+      expect(s.client.pendingTxid).toBe(d2);
+      expect(s.client.acked).toEqual([d1]);
+
+      s.chain.mine(1);
+      await s.facilitator.pollNow();
+      expect(await paidChunk(await s.chunk())).toEqual({ chunk: 201, cumulativeZat: "100500", data: "chunk-201" });
+      expect(s.client.acked).toEqual([d1, d2]);
     },
     LONG,
   );
