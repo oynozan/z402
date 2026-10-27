@@ -31,6 +31,7 @@ Source spec: [`docs/spec/mvp-build-doc.md`](../../spec/mvp-build-doc.md). Eviden
 | D4 | Builds of external code | Approve building **zingo-cli** at tag `zingolib_v8.0.0-rc.0` (client side). Hanko is not needed if D1 is accepted | Research agents were denied "code from external" builds. The client wallet cannot work without zingo-cli |
 | D5 | Merchant keys | Generate them with `zdecrypt keygen` (a seed stored in a gitignored `.secrets/`), payTo = the Orchard-only UA | No zingo-cli is needed on the server side. The facilitator holds only the UIVK |
 | D6 | Git | `git init` at the repo root and commit per task | The folder is not a repo yet; the plans commit after every task |
+| D7 | Target chain (user decision, 2026-10-27) | **Z3 regtest first, mainnet later**: Zebra 6.2.3 + Zaino 0.10.2-no-tls + Zallet beta.1 in Docker, coins mined locally. Public testnet stays a config option | Testnet wallets can't be funded: the faucets are dead. Regtest runs NU6.3 with Ironwood, the same deposit path as mainnet before NU7. Blocks are mined on demand, so the demo is deterministic |
 
 ## 3. Architecture
 
@@ -156,7 +157,7 @@ Every reply is HTTP 200 and schema-complete: `{success, errorReason?, errorMessa
 1. Config parses: payTo matches `^(utest1|zutest1)[02-9ac-hj-np-z]+$` and the UIVK matches `^(uivktest1|uvitest1)`.
 2. `zdecrypt` decrypts the bundled Kage vector `030c3cbf…8351` to Ironwood 100,000 zat with memo `x402z-f19a63da20cbc0749ea800b3`.
 3. `zdecrypt owns --address <payTo>` reports `ownedByKey: true` and no transparent receiver.
-4. `GetLightdInfo.chainName === "test"`. The branch id is logged.
+4. `GetLightdInfo.consensusBranchId` equals the configured expected branch: `37a5165b` on regtest (NU6.3), `77190ad9` on testnet (NU7); on mainnet it only logs. `chainName` is never trusted, since Zaino reports `"test"` on regtest.
 5. The ledger replays cleanly; a truncated last line is dropped with a warning.
 
 ## 5. What the server side needs from `protocol.md`
