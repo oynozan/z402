@@ -1,0 +1,7 @@
+{
+  "seedHex": "test-fixture-not-a-seed",
+  "ufvk": "uviewregtest1testfixturenotakey",
+  "uivk": "uivkregtest1testfixturenotakey",
+  "address": "uregtest1testfixturenotanaddress",
+  "orchardOnlyAddress": "uregtest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+}
