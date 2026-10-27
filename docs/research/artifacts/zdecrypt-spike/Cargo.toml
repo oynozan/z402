@@ -1,0 +1,56 @@
+[package]
+name = "zdecrypt"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "z402 spike that parses a possibly unconfirmed Zcash testnet tx and trial-decrypts it with a UIVK or UFVK"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "zdecrypt"
+path = "src/main.rs"
+
+[features]
+default = []
+# Builds real v6 test transactions for the positive tests, never needed by the facilitator
+testbuild = [
+    "zcash_primitives/circuits",
+    "zcash_primitives/transparent-inputs",
+    "zcash_primitives/multicore",
+    "dep:zcash_transparent",
+    "sapling/test-dependencies",
+    "orchard/circuit",
+    "dep:secp256k1",
+    "dep:rand",
+    "dep:incrementalmerkletree",
+]
+
+[dependencies]
+# Stable NU7 line from crates.io, no zcash_unstable cfg needed
+zcash_primitives = { version = "=0.31.0", default-features = false, features = ["std"] }
+zcash_protocol = { version = "=0.11.0", default-features = false, features = ["std"] }
+zcash_keys = { version = "=0.17.0", default-features = false, features = ["std", "orchard", "sapling"] }
+zcash_address = { version = "=0.14.0", default-features = false, features = ["std"] }
+orchard = { version = "=0.16.0", default-features = false, features = ["std"] }
+sapling = { package = "sapling-crypto", version = "=0.9.0", default-features = false, features = ["std"] }
+zcash_note_encryption = "=0.5.1"
+zip32 = "=0.3.0"
+hex = "0.4"
+serde_json = "1"
+getrandom = "0.3"
+
+zcash_transparent = { version = "=0.11.0", optional = true, features = ["transparent-inputs"] }
+secp256k1 = { version = "0.33", optional = true }
+rand = { version = "0.10", optional = true }
+incrementalmerkletree = { version = "0.9", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+# Halo2 proving in testbuild is unusably slow unoptimized
+[profile.dev.package."*"]
+opt-level = 3
