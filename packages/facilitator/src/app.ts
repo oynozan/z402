@@ -57,7 +57,7 @@ export interface FacilitatorOptions {
 
 export interface FacilitatorHandle {
   url: string;
-  /** One best effort pass over every live deposit */
+  /** One best effort pass over every live deposit, which does nothing once closed */
   pollNow(): Promise<void>;
   close(): Promise<void>;
 }
@@ -375,7 +375,7 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
   let closing: Promise<void> | undefined;
   return {
     url: `http://${host.includes(":") ? `[${host}]` : host}:${port}`,
-    pollNow: () => watcher.pollNow(),
+    pollNow: () => (closing === undefined ? watcher.pollNow() : Promise.resolve()),
     close: () =>
       (closing ??= new Promise<void>((resolve, reject) => {
         watcher.stop();

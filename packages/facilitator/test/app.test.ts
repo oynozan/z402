@@ -807,6 +807,21 @@ describe("startFacilitator", () => {
     expect(ok.json.invalidReason).not.toBe(REASON.invalidPaymentRequirements);
   });
 
+  test("pollNow() after close() reads nothing and writes nothing", async () => {
+    const view = new FakeChain({ expiryDelta: 40 }).viewFor(PAY_TO);
+    const reads = { tip: 0, inspect: 0 };
+    const counting: ChainView = {
+      tip: () => (reads.tip++, view.tip()),
+      inspect: (txid) => (reads.inspect++, view.inspect(txid)),
+    };
+    const { handle } = await boot({ chain: counting });
+    await handle.close();
+
+    const before = { ...reads };
+    await handle.pollNow();
+    expect(reads).toEqual(before);
+  });
+
   test("close() stops the server and the watcher, and may be called twice", async () => {
     const ledgerPath = join(scratch, "close.jsonl");
     const { handle, url, chain } = await boot({ ledgerPath, pollIntervalMs: 20 });
