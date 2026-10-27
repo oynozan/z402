@@ -59,9 +59,14 @@ test(
     let resolved = false;
     const call201 = s.paidFetch(`${s.api.url}/chunk`);
     pending = call201;
-    void call201.finally(() => {
-      resolved = true;
-    });
+    call201.then(
+      () => {
+        resolved = true;
+      },
+      () => {
+        resolved = true;
+      },
+    );
     const waiting = (): boolean => events.some((e) => e.type === "waiting" && e.txid === d1);
     await Promise.all([sleep(HELD_MS), until(waiting, REACH_WAIT_MS, "the hook to wait on D1")]);
 

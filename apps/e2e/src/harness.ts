@@ -55,25 +55,30 @@ export async function startStack(o: StackOptions): Promise<Stack> {
     port: 0,
   });
 
-  let api: ApiHandle;
+  let api: ApiHandle | undefined;
   try {
     api = await startApi({ network: NETWORK, facilitatorUrl: facilitator.url, payTo: PAY_TO, priceZat, port: 0 });
+    const wallet = new MockWallet(chain);
+    const scheme = new PrepaidVoucherScheme({
+      wallet,
+      chain: chain.statusSource(),
+      pollIntervalMs: 20,
+      facilitatorLagMs: 100,
+      ...(o.maxDeposits !== undefined && { maxDeposits: o.maxDeposits }),
+      ...(o.onEvent !== undefined && { onEvent: o.onEvent }),
+    });
+    const paidFetch = wrapFetchWithPayment(fetch, new x402Client().register(NETWORK, scheme));
+    return stack({ chain, wallet, paidFetch, scheme, facilitator, api });
   } catch (e) {
-    await facilitator.close();
+    // The failure that stopped the start is the one worth reporting, not a close that fails after it
+    await api?.close().catch(() => undefined);
+    await facilitator.close().catch(() => undefined);
     throw e;
   }
+}
 
-  const wallet = new MockWallet(chain);
-  const scheme = new PrepaidVoucherScheme({
-    wallet,
-    chain: chain.statusSource(),
-    pollIntervalMs: 20,
-    facilitatorLagMs: 100,
-    ...(o.maxDeposits !== undefined && { maxDeposits: o.maxDeposits }),
-    ...(o.onEvent !== undefined && { onEvent: o.onEvent }),
-  });
-  const paidFetch = wrapFetchWithPayment(fetch, new x402Client().register(NETWORK, scheme));
-
+function stack(parts: Omit<Stack, "close">): Stack {
+  const { scheme, api, facilitator } = parts;
   let closing: Promise<void> | undefined;
   const close = async (): Promise<void> => {
     try {
@@ -86,7 +91,7 @@ export async function startStack(o: StackOptions): Promise<Stack> {
       }
     }
   };
-  return { chain, wallet, paidFetch, scheme, facilitator, api, close: () => (closing ??= close()) };
+  return { ...parts, close: () => (closing ??= close()) };
 }
 
 /** The decoded PAYMENT-RESPONSE of a paid call */
