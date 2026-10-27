@@ -28,6 +28,8 @@ export interface SessionState {
   attempt: Attempt | undefined;
   inflightDeposit: Promise<string> | undefined;
   readonly uncertain: Map<string, { nextCheckAt: number; watch: TxWatch }>;
+  /** Set by a deposit rejection, after which the session never deposits or signs again */
+  halted: { code: string; txid: string | undefined } | undefined;
 }
 
 /** What the response handlers need from the scheme */
@@ -137,6 +139,8 @@ async function refused(
     case "reject_txid": {
       const txid = attempt.depositTxid;
       if (txid !== undefined) core.tracked(state, () => session.markRejected(txid));
+      // The wallet's next deposit would likely be rejected the same way, losing another window
+      state.halted = { code, txid };
       core.emit({ type: "fatal", code, message: messageOf(settle, code) });
       return undefined;
     }

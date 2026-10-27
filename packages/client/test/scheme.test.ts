@@ -745,6 +745,69 @@ describe("onPaymentResponse refusals", () => {
   });
 });
 
+const REJECTIONS = [
+  REASON.depositNotToMerchant,
+  REASON.depositMemoMismatch,
+  REASON.depositTransparent,
+  REASON.depositOtherSession,
+];
+
+describe("halt after a deposit rejection", () => {
+  it.each(REJECTIONS)("after %s the next payload rejects, naming code and txid, without paying", async (code) => {
+    const { wallet, clock, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+    await expect(hook(refused(R, r1, code, snap()))).resolves.toBeUndefined();
+    const seen = events.length;
+
+    const next = pay(makeReq());
+    await expect(next).rejects.toThrow(code);
+    await expect(next).rejects.toThrow(t1);
+    expect(wallet.sent).toHaveLength(1);
+    expect(clock.pendingTimers).toBe(0);
+    expect(events).toHaveLength(seen);
+  });
+
+  it("a call queued on the lock does not make the deposit that was due", async () => {
+    const { wallet, hook, pay } = setup();
+    const R1 = makeReq();
+    const r1 = await pay(R1);
+    const queued = pay(makeReq());
+    queued.catch(() => {});
+
+    await hook(refused(R1, r1, REASON.depositNotToMerchant, snap(0n, 60_500n)));
+    await expect(queued).rejects.toThrow(REASON.depositNotToMerchant);
+    await flush();
+    expect(wallet.sent).toHaveLength(1);
+  });
+
+  it("a refusal without a presented txid still halts", async () => {
+    const { hook, pay } = setup();
+    const R1 = makeReq();
+    const r1 = await pay(R1);
+    await hook(paid(R1, r1, { transaction: voucher(r1).depositTxid as string, session: snap(500n, 125_000n) }));
+    const R2 = makeReq();
+    const r2 = await pay(R2);
+    expect(voucher(r2).depositTxid).toBeUndefined();
+    await hook(refused(R2, r2, REASON.depositOtherSession, snap(500n, 125_000n)));
+    await expect(pay(makeReq())).rejects.toThrow("(none presented)");
+  });
+
+  it("other sessions are unaffected", async () => {
+    const { wallet, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    await hook(refused(R, r1, REASON.depositMemoMismatch, snap()));
+    await expect(pay(makeReq())).rejects.toThrow(REASON.depositMemoMismatch);
+
+    const other = "uregtest1" + "p".repeat(60);
+    const r = await pay(makeReq({ payTo: other }));
+    expect(voucher(r).depositTxid).toBeDefined();
+    expect(wallet.sent.map((d) => d.to)).toEqual([PAY_TO, other]);
+  });
+});
+
 describe("ambiguous outcomes and background deposits", () => {
   it("ambiguous outcome advances cumulative", async () => {
     const { events, hook, pay } = setup();

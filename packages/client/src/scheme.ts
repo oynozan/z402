@@ -86,6 +86,10 @@ function nonNegative(name: string, value: number): number {
   return value;
 }
 
+function haltedError(halt: { code: string; txid: string | undefined }): Error {
+  return new Error(`session halted by ${halt.code} on deposit ${halt.txid ?? "(none presented)"}`);
+}
+
 /** Parses one field and prefixes any failure with the field's name */
 function field<T>(name: string, parse: () => T): T {
   try {
@@ -133,7 +137,7 @@ export class PrepaidVoucherScheme implements SchemeNetworkClient {
           // A logging callback must never break a payment
         }
       },
-      canDeposit: (state) => state.session.depositsMade < maxDeposits,
+      canDeposit: (state) => state.halted === undefined && state.session.depositsMade < maxDeposits,
       decision: (state) =>
         state.session.depositDecision(
           state.price,
@@ -172,8 +176,11 @@ export class PrepaidVoucherScheme implements SchemeNetworkClient {
   ): Promise<PaymentPayloadResult> {
     const { price, terms } = this.#validate(req, ctx);
     const state = this.#stateFor(req, terms, price);
+    if (state.halted !== undefined) throw haltedError(state.halted);
     const release = await state.mutex.acquire();
     try {
+      // A call queued on the lock may have waited through the hook that halted the session
+      if (state.halted !== undefined) throw haltedError(state.halted);
       state.terms = terms;
       state.price = price;
       await this.#recheckUncertain(state);
@@ -257,6 +264,7 @@ export class PrepaidVoucherScheme implements SchemeNetworkClient {
         attempt: undefined,
         inflightDeposit: undefined,
         uncertain: new Map(),
+        halted: undefined,
       };
       this.#states.set(key, state);
       this.#core.emit({ type: "session", network: req.network, payTo: req.payTo, sessionKey: session.sessionKey });
@@ -322,6 +330,7 @@ export class PrepaidVoucherScheme implements SchemeNetworkClient {
   /** One wallet send per session at a time, shared by inline and background triggers */
   #deposit(state: SessionState, inline: boolean): Promise<string> {
     if (state.inflightDeposit !== undefined) return state.inflightDeposit;
+    if (state.halted !== undefined) return Promise.reject(haltedError(state.halted));
     const send = this.#sendDeposit(state, inline);
     state.inflightDeposit = send;
     const clear = (): void => {
