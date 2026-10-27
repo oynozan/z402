@@ -16,7 +16,7 @@ This is the one contract the client library (`@z402/client`) and the merchant si
 |---|---|---|
 | x402 version | `2` | Pin `@x402/core`, `@x402/fetch`, `@x402/express` to exactly `2.28.0`. |
 | Scheme id | `prepaid-voucher` | No collision found. Taken ids include `exact`, `upto`, `batch-settlement`, `deferred`, `channel`, `escrow`, `zcash-shielded`, `zcash-shielded-tab`; avoid `z402*` (npm `z402` exists). |
-| Network id | `zcash:testnet` | Valid CAIP-2 syntax; passes every 2.28.0 check. Provisional: there is no registered `zcash` CAIP-2 namespace (alternative: `bip122:05a60a92d99d85997cce3b87616c089f`). Exported as one constant, so a rename touches one line per side. |
+| Network id | **config value**: `zcash:regtest` (development on the local Z3 stack, per the user), then `zcash:mainnet`; `zcash:testnet` stays supported | Valid CAIP-2 syntax; passes every 2.28.0 check. Provisional: there is no registered `zcash` CAIP-2 namespace (testnet alternative: `bip122:05a60a92d99d85997cce3b87616c089f`). Each network is one exported constant (`NETWORK_REGTEST`, `NETWORK_TESTNET`, `NETWORK_MAINNET`); the network is part of the signed voucher bytes. |
 | Asset | `ZEC` | 8 decimals. Amounts are zatoshi decimal strings. |
 
 ## 2. Payment requirements (one `accepts` entry)
@@ -42,7 +42,7 @@ This is the one contract the client library (`@z402/client`) and the merchant si
 | Field | Rule |
 |---|---|
 | `amount` | Price per call, zat, canonical decimal ≥ 1. Demo value pending the user's decision (§12). |
-| `payTo` | Merchant shielded-only unified address. Matches `^(utest1\|zutest1)[02-9ac-hj-np-z]+$`. Never `tutest1…` (it includes transparent receivers). |
+| `payTo` | Merchant shielded-only unified address, validated **per network** with `isValidPayTo(ua, network)`. Allowed HRPs come from `zcash_address` 0.14.0 `src/constants.rs`, as R0 or R2 shielded-only: regtest `uregtest` / `zuregtest`; testnet `utest` / `zutest`; mainnet `u` / `zu`. The body is bech32 lowercase `[02-9ac-hj-np-z]+`. R2 transparent-including HRPs (`turegtest`, `tutest`, `tu`) are always rejected. |
 | `extra.windowZat` | One deposit, zat, decimal string. |
 | `extra.creditRatioBps` | Integer basis points, 0–10000 (2500 = 25 %). Replaces the doc's float `creditRatio: 0.25`. |
 | `extra.creditCapZat` | Credit cap, zat, decimal string. |
@@ -279,13 +279,15 @@ The client agent drafts it; both agents own it from v1. Pure TypeScript, no netw
 
 ```ts
 // constants
-SCHEME = "prepaid-voucher"; NETWORK_TESTNET = "zcash:testnet"; ASSET = "ZEC"; ZEC_DECIMALS = 8
+SCHEME = "prepaid-voucher"; ASSET = "ZEC"; ZEC_DECIMALS = 8
+NETWORK_REGTEST = "zcash:regtest"; NETWORK_TESTNET = "zcash:testnet"; NETWORK_MAINNET = "zcash:mainnet"
 VOUCHER_DOMAIN = "z402-voucher-v1"; MAX_MONEY_ZAT = 2_100_000_000_000_000n; FINAL_CONFIRMATIONS = 10
 NOT_FOUND_DEAD_MS = 120_000; NOT_FOUND_DEAD_BLOCKS = 2                // §5.3 not-found streak
 // validation
-SESSION_KEY_RE, ZAT_RE, SIG_RE, TXID_RE, PAY_TO_RE, DEPOSIT_INDEX_RE
+SESSION_KEY_RE, ZAT_RE, SIG_RE, TXID_RE, DEPOSIT_INDEX_RE
+PAY_TO_RES: Readonly<Record<"zcash:regtest" | "zcash:testnet" | "zcash:mainnet", RegExp>>
 parseZat(s: string): bigint                                   // throws ProtocolError("invalid_payload")
-isValidPayTo(ua: string): boolean                             // PAY_TO_RE
+isValidPayTo(ua: string, network: string): boolean            // PAY_TO_RES[network]; unknown network → false
 // terms
 interface PrepaidVoucherExtra { windowZat: string; creditRatioBps: number; creditCapZat: string; zeroConfMinExpiryBlocks: number }
 interface Terms { windowZat: bigint; creditRatioBps: number; creditCapZat: bigint; zeroConfMinExpiryBlocks: number }
