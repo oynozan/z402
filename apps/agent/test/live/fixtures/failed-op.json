@@ -1,0 +1,26 @@
+{
+  "request": {
+    "method": "z_sendmany",
+    "params": [
+      "uregtest1p23sr3mcska98d06rvw5lwmn3scys95duv73xm3zywpqemwf7xa6t7zzlj32f7gpl2xegjl0rkazpjz3qjw2zrn3ere2myta35c7esty",
+      [
+        {
+          "address": "uregtest1etwrjmjldyyet5pge876dfxerpgmsmarxg920s50y3dgc3wa36xmemqexfyw87jm3h0cttupk92qkrv8uafvjrl2j73d8nck7g35axkz",
+          "amount": "100000",
+          "memo": "393963643031316539353461623139613266356163333134393235356432313630663032636539663563356263343031333663396663346234373332646166313a31"
+        }
+      ],
+      1,
+      null,
+      "FullPrivacy"
+    ]
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "error": {
+      "code": -4,
+      "message": "Failed to propose transaction: Insufficient balance (have 6249680000, need 10000000030000 including fee)"
+    },
+    "id": 1
+  }
+}

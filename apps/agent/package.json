@@ -1,0 +1,22 @@
+{
+  "name": "@z402/agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "tsx src/smoke.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@x402/fetch": "2.28.0",
+    "@z402/client": "workspace:*",
+    "@z402/lightwalletd": "workspace:*",
+    "@z402/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.5"
+  }
+}
