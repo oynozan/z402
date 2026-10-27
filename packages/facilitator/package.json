@@ -1,0 +1,18 @@
+{
+  "name": "@z402/facilitator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build:native": "cargo build --release --locked --manifest-path ../../crates/zdecrypt/Cargo.toml"
+  },
+  "dependencies": {
+    "@z402/lightwalletd": "workspace:*",
+    "@z402/protocol": "workspace:*"
+  }
+}

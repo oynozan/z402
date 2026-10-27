@@ -65,6 +65,15 @@ importers:
         specifier: workspace:*
         version: link:../testkit
 
+  packages/facilitator:
+    dependencies:
+      '@z402/lightwalletd':
+        specifier: workspace:*
+        version: link:../lightwalletd
+      '@z402/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   packages/lightwalletd:
     dependencies:
       '@grpc/grpc-js':
