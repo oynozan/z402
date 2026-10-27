@@ -103,7 +103,7 @@ Per-session worst-case loss is min(W, Σ pending) + min(C_max, r·D_conf), plus 
    - If the voucher fits **without** the deposit, return valid at once and look the deposit up in the background (lazy crediting).
    - Otherwise wait for the lookup, at most 30 s (`depositWaitMs`). Load-balanced lightwalletd backends see a new tx up to about 16 s apart, so the API's facilitator client allows 60 s.
 5. If the voucher still does not fit and a live pending deposit exists, refresh that session's deposits from the chain (at most once per 5 s per session) and recompute.
-6. If it still does not fit: `z402_awaiting_confirmation` if a live pending deposit exists, else `z402_deposit_required`.
+6. If it still does not fit: `z402_awaiting_confirmation` if a live pending deposit exists, else `z402_deposit_required`. A presented txid whose lookup is still in flight, or whose cached result is a live deposit for this session, counts as pending. The facilitator never answers `deposit_required` while a presented deposit is unresolved (protocol.md v1.1 §7.3, where only a successful settle acks a deposit).
 7. Reply HTTP 200 `{isValid, invalidReason?, payer: sessionKey, extra: {session}}`. The snapshot is projected as if the presented deposit were credited.
 
 The lookup behind step 4:
