@@ -135,7 +135,7 @@ node infra/z3/rpc.mjs zebra getblock '"N"' 1 | jq -r '.tx[]'
 
 Then `scripts/demo.sh show <txid>`. The command does two things:
 
-1. It fetches the raw transaction from Zebra and prints its size and the first bytes. This is all a block explorer has: ciphertext, with no plaintext amount and no address.
+1. It fetches the raw transaction from Zebra and prints its size and the first bytes. This is all a block explorer has. It shows no output amount and no recipient address; the only number in the clear is the net value balance, which is the fee (10,000 zat here, `ironwood.valueBalanceZat` in the decrypt).
 2. It decrypts the same bytes with the merchant's viewing key (the key is never printed) and prints the JSON. Point at `"pool": "ironwood"`, `"valueZat": 100000`, `"toPayTo": true` with the merchant `"recipient"`, and `"memoText"` of the form `<sessionKey>:1`, which ties the deposit to the agent's session.
 
 The script uses `scripts/show-deposit.sh` when that file exists. Otherwise it runs the two raw commands itself (Zebra `getrawtransaction`, then `zdecrypt decrypt`).

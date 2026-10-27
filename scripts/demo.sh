@@ -447,7 +447,7 @@ cmd_show() {
   fi
   info "raw transaction: $((hex_len / 2)) bytes ($hex_len hex characters)"
   info "starts with:     $(head -c 96 "$tmp")..."
-  info "That hex is all a block explorer has. It carries no plaintext amount and no address, only ciphertext."
+  info "That hex is all a block explorer has. It shows no output amount and no recipient address. The only number in the clear is the net value balance, which is the fee."
 
   uivk="$(jq -r '.uivk // empty' "$KEYS")"
   pay_to="$(merchant_pay_to)"
