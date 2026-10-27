@@ -23,6 +23,7 @@ export class ChainWatcher {
   #lastTip: number | null = null;
   #timer: ReturnType<typeof setInterval> | undefined;
   #turn: Promise<void> = Promise.resolve();
+  #ticking = false;
 
   constructor(o: {
     chain: ChainView;
@@ -77,6 +78,8 @@ export class ChainWatcher {
   }
 
   async #tick(): Promise<void> {
+    if (this.#ticking) return;
+    this.#ticking = true;
     try {
       const tip = await this.#chain.tip();
       this.#lastTip = tip;
@@ -84,6 +87,8 @@ export class ChainWatcher {
       if (sweep === null || tip !== sweep.tip || this.#now() - sweep.at >= this.#sweepMs) await this.pollNow();
     } catch (e) {
       this.#log("chain tick failed", e);
+    } finally {
+      this.#ticking = false;
     }
   }
 

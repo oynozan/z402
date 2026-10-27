@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 /** A FakeChain behind a watcher that commits into a real state, with every committed batch recorded */
-function rig(wrap: (view: ChainView) => ChainView = (view) => view) {
+function rig(wrap: (view: ChainView) => ChainView = (view) => view, over: { sweepMs?: number } = {}) {
   const fake = new FakeChain({ expiryDelta: 40 });
   const view = fake.viewFor(PAY_TO);
   const ledger = new Ledger();
@@ -32,6 +32,7 @@ function rig(wrap: (view: ChainView) => ChainView = (view) => view) {
     chain: wrap(view),
     state,
     log,
+    ...over,
     commit: (events) => {
       if (control.commitError !== undefined) throw control.commitError;
       batches.push(events);
@@ -442,6 +443,23 @@ describe("when passes run", () => {
     await Promise.all([watcher.pollNow(), watcher.pollNow(), watcher.refreshSession(SESSION_KEY)]);
 
     expect(batches).toHaveLength(1);
+  });
+
+  test("ticks queue no pass behind one that is still running", async () => {
+    const slow = (view: ChainView): ChainView => ({
+      tip: () => view.tip(),
+      inspect: (txid) => new Promise((resolve) => setTimeout(() => resolve(view.inspect(txid)), 12_000)),
+    });
+    const { view, watcher, credit } = rig(slow, { sweepMs: TICK });
+    await credit();
+    const inspect = vi.spyOn(view, "inspect");
+
+    watcher.start();
+    await vi.advanceTimersByTimeAsync(TICK * 3 + 1000);
+    watcher.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(inspect).toHaveBeenCalledTimes(1);
   });
 
   test("start() ticks every 5 s, once even when called twice, and stop() ends the ticks", async () => {
