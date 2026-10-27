@@ -15,6 +15,13 @@ const LIVE_STATES: ReadonlySet<LocalDeposit["state"]> = new Set(["sending", "sen
 /** No snapshot or settle ack ever moves a deposit out of these */
 const TERMINAL_STATES: ReadonlySet<LocalDeposit["state"]> = new Set(["dead", "rejected"]);
 
+/** One of our deposits a snapshot lists as confirmed or final */
+export interface ConfirmedDeposit {
+  index: number;
+  txid: string;
+  height?: number;
+}
+
 /** What the client knows about one `payTo` + network session. Pure state: no I/O, no timers. */
 export class Session {
   readonly payTo: string;
@@ -25,6 +32,8 @@ export class Session {
   readonly deposits: LocalDeposit[] = [];
   nextIndex = 1;
   depositsMade = 0;
+  /** Txids already reported confirmed, so each is reported once */
+  private readonly confirmedTxids = new Set<string>();
 
   constructor(i: { payTo: string; network: string; seed: Uint8Array }) {
     this.payTo = i.payTo;
@@ -55,7 +64,7 @@ export class Session {
     return "none";
   }
 
-  /** The newest `sent` deposit. It leaves that state once acked (`settle.transaction` or the snapshot) or dead. */
+  /** The newest `sent` deposit. It leaves that state once a successful settle acks it, or once it is dead. */
   resendTxid(): string | undefined {
     for (let i = this.deposits.length - 1; i >= 0; i--) {
       const d = this.deposits[i];
@@ -64,26 +73,52 @@ export class Session {
     return undefined;
   }
 
-  applySnapshot(s: SessionSnapshot): void {
-    this.cumulative = BigInt(s.cumulativeZat);
-    for (const listed of s.deposits) {
-      const local = this.find(listed.txid);
-      if (local !== undefined && !TERMINAL_STATES.has(local.state)) {
-        local.state = listed.status === "dead" ? "dead" : "acked";
-      }
-    }
-    this.snapshot = s;
+  /** False for a snapshot of another session, which no method here applies */
+  owns(s: SessionSnapshot): boolean {
+    return s.sessionKey === this.sessionKey;
   }
 
+  /** Resyncs from a refusal's snapshot and copies dead statuses, but never acks, as it lists projected deposits */
+  applySnapshot(s: SessionSnapshot): void {
+    if (this.owns(s)) this.resync(s, false);
+  }
+
+  /** Only a successful settle acks, by its transaction or by listing the deposit in its snapshot (protocol.md §7.3) */
   applySettle(s: SettleResponse, attempted: bigint): void {
+    if (s.success !== true) return;
     if (typeof s.transaction === "string" && s.transaction !== "") {
       const local = this.find(s.transaction);
       if (local !== undefined && !TERMINAL_STATES.has(local.state)) local.state = "acked";
     }
-    if (s.success !== true) return;
     const snapshot = snapshotFromExtra(s.extra);
-    if (snapshot !== undefined) this.applySnapshot(snapshot);
+    if (snapshot !== undefined && this.owns(snapshot)) this.resync(snapshot, true);
     else this.cumulative = attempted;
+  }
+
+  /** Our live deposits `s` lists as confirmed or final that were not reported before, now marked reported */
+  newlyConfirmed(s: SessionSnapshot): ConfirmedDeposit[] {
+    const found: ConfirmedDeposit[] = [];
+    for (const listed of s.deposits) {
+      if (listed.status !== "confirmed" && listed.status !== "final") continue;
+      const local = this.find(listed.txid);
+      if (local === undefined || TERMINAL_STATES.has(local.state) || !this.noteConfirmed(listed.txid)) continue;
+      // With one confirmation the block may be ahead of the snapshot's cached tip
+      const height = listed.confirmations >= 2 ? s.tip - listed.confirmations + 1 : undefined;
+      const deposit: ConfirmedDeposit = { index: local.index, txid: listed.txid };
+      found.push(height === undefined ? deposit : { ...deposit, height });
+    }
+    return found;
+  }
+
+  /** True the first time `txid` is reported confirmed */
+  noteConfirmed(txid: string): boolean {
+    if (this.confirmedTxids.has(txid)) return false;
+    this.confirmedTxids.add(txid);
+    return true;
+  }
+
+  indexOf(txid: string): number | undefined {
+    return this.find(txid)?.index;
   }
 
   markDead(txid: string): void {
@@ -99,6 +134,17 @@ export class Session {
   /** The call's result is unknown, so the server may have charged it: never let `cumulative` fall behind. */
   advanceAmbiguous(attempted: bigint): void {
     if (attempted > this.cumulative) this.cumulative = attempted;
+  }
+
+  private resync(s: SessionSnapshot, ack: boolean): void {
+    this.cumulative = BigInt(s.cumulativeZat);
+    for (const listed of s.deposits) {
+      const local = this.find(listed.txid);
+      if (local === undefined || TERMINAL_STATES.has(local.state)) continue;
+      if (listed.status === "dead") local.state = "dead";
+      else if (ack) local.state = "acked";
+    }
+    this.snapshot = s;
   }
 
   private find(txid: string): LocalDeposit | undefined {

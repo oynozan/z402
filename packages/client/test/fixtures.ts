@@ -3,6 +3,7 @@ import type { PaymentRequirements } from "@x402/core/types";
 import {
   depositMemo,
   NETWORK_REGTEST,
+  publicKeyFromSeed,
   SCHEME,
   type DepositStatus,
   type SessionSnapshot,
@@ -13,6 +14,8 @@ import type { LocalDeposit } from "../src/session.js";
 export const PAY_TO = "uregtest1" + "q".repeat(60);
 export const NETWORK = NETWORK_REGTEST;
 export const SEED = new Uint8Array(32).fill(7);
+/** The key of a session built from `SEED`, which `snapshot()` uses unless told otherwise */
+export const SESSION_KEY = publicKeyFromSeed(SEED);
 
 export function txid(n: number): string {
   return n.toString(16).padStart(2, "0").repeat(32);
@@ -31,7 +34,7 @@ export function snapshot(o: {
   const cumulative = o.cumulative ?? 0n;
   const limit = o.limit ?? 125_000n;
   return {
-    sessionKey: o.sessionKey ?? "ab".repeat(32),
+    sessionKey: o.sessionKey ?? SESSION_KEY,
     cumulativeZat: cumulative.toString(),
     limitZat: limit.toString(),
     headroomZat: (limit - cumulative).toString(),

@@ -70,8 +70,12 @@ function eventText(e: ClientEvent): string | undefined {
       return `deposit D${e.index} failed: ${e.error.message}`;
     case "deposit_acked":
       return `deposit ${shortHex(e.txid)} acknowledged by the merchant`;
-    case "deposit_confirmed":
-      return `deposit ${shortHex(e.txid)} confirmed at height ${count(e.height)}`;
+    case "deposit_confirmed": {
+      const name = e.index === undefined ? shortHex(e.txid) : `D${e.index} ${shortHex(e.txid)}`;
+      const at = e.height === undefined ? "" : ` at height ${count(e.height)}`;
+      const credit = e.snapshot === undefined ? "" : ` (credit now ${formatZat(e.snapshot.creditZat)})`;
+      return `deposit ${name} confirmed${at}${credit}`;
+    }
     case "deposit_dead":
       return `deposit ${shortHex(e.txid)} DEAD, it will not count`;
     case "waiting":

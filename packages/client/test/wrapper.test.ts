@@ -119,6 +119,29 @@ describe("stock @x402/fetch wrapper against a scripted merchant", () => {
     expect(wallet.sent).toHaveLength(1);
   });
 
+  it("a merchant that keeps asking for a deposit while ignoring the presented one gets exactly one", async () => {
+    const chain = new FakeChain();
+    const wallet = new MockWallet(chain);
+    const events: ClientEvent[] = [];
+    merchant = await startScriptedMerchant((payload) => ({
+      kind: "refused",
+      code: REASON.depositRequired,
+      session: snapshotFor(voucherOf(payload).sessionKey),
+    }));
+    const paidFetch = paidFetchWith(wallet, chain, { onEvent: (e) => events.push(e) });
+
+    const first = await paidFetch(merchant.url);
+    expect(first.status).toBe(402);
+    for (let i = 0; i < 2; i++) {
+      await expect(paidFetch(merchant.url)).rejects.toThrow("z402_deposit_required_while_presented");
+    }
+
+    expect(wallet.sent).toHaveLength(1);
+    expect(events.filter((e) => e.type === "fatal").map((e) => (e as { code: string }).code)).toEqual([
+      "z402_deposit_required_while_presented",
+    ]);
+  });
+
   it("the recovery retry is the final attempt, so its refusal never waits", async () => {
     const chain = new FakeChain();
     const wallet = new MockWallet(chain);

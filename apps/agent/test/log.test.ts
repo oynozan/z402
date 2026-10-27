@@ -177,6 +177,22 @@ describe("formatEvent", () => {
     expect(line({ type: "deposit_dead", txid: TXID })).toBe("  * deposit 3f2a…c1 DEAD, it will not count");
   });
 
+  it("deposit_confirmed from a snapshot names the deposit and the credit it now earns", () => {
+    expect(line({ type: "deposit_confirmed", txid: TXID, index: 1, snapshot: AT_LIMIT })).toBe(
+      "  * deposit D1 3f2a…c1 confirmed (credit now 25,000)",
+    );
+    expect(line({ type: "deposit_confirmed", txid: TXID, index: 1, height: 1198, snapshot: AT_LIMIT })).toBe(
+      "  * deposit D1 3f2a…c1 confirmed at height 1,198 (credit now 25,000)",
+    );
+  });
+
+  it("deposit_confirmed with nothing but the txid still gets a line", () => {
+    expect(line({ type: "deposit_confirmed", txid: TXID })).toBe("  * deposit 3f2a…c1 confirmed");
+    expect(line({ type: "deposit_confirmed", txid: TXID, index: 2, height: 1203 })).toBe(
+      "  * deposit D2 3f2a…c1 confirmed at height 1,203",
+    );
+  });
+
   it("waiting names the deposit the call is held for", () => {
     expect(line({ type: "waiting", txid: TXID })).toBe("  * waiting for deposit 3f2a…c1 to confirm");
   });

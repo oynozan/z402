@@ -1,10 +1,10 @@
 import type { PaymentResponseContext } from "@x402/core/client";
 import type { SettleResponse } from "@x402/core/types";
-import { REASON, type SessionSnapshot, type Terms, type TxStatusSource } from "@z402/protocol";
+import { isDepositDead, REASON, type SessionSnapshot, type Terms, type TxStatusSource } from "@z402/protocol";
 import type { Clock } from "./clock.js";
 import type { ClientEvent } from "./events.js";
 import type { Mutex } from "./mutex.js";
-import { actionFor, classifyOutcome, type Action, type Outcome } from "./outcome.js";
+import { actionFor, classifyOutcome, type Action } from "./outcome.js";
 import type { Session } from "./session.js";
 import { watchTx, type TxWatch, type WatchResult } from "./wait.js";
 
@@ -28,7 +28,7 @@ export interface SessionState {
   attempt: Attempt | undefined;
   inflightDeposit: Promise<string> | undefined;
   readonly uncertain: Map<string, { nextCheckAt: number; watch: TxWatch }>;
-  /** Set by a deposit rejection, after which the session never deposits or signs again */
+  /** Set by a deposit rejection or an unaccounted deposit, after which the session never deposits or signs again */
   halted: { code: string; txid: string | undefined } | undefined;
 }
 
@@ -46,7 +46,7 @@ export interface SchemeCore {
   deposit(state: SessionState, inline: boolean): Promise<string>;
   /** Fire and forget, only while deposits are still allowed */
   background(state: SessionState): void;
-  /** Runs `change` and reports each deposit it moved to acked or dead */
+  /** Runs `change` and reports each deposit it moved to acked or dead, and each the snapshot first lists confirmed */
   tracked(state: SessionState, change: () => void): void;
 }
 
@@ -54,6 +54,10 @@ export interface SchemeCore {
 const NOT_FOUND_RECOVER_MS = 2_000;
 const CHAIN_UNAVAILABLE_BACKOFF_MS = 5_000;
 const UNEXPECTED_ERROR_BACKOFF_MS = 1_000;
+
+const DEPOSIT_REQUIRED_WHILE_PRESENTED = "z402_deposit_required_while_presented";
+const DEPOSIT_DEAD_BUT_ALIVE = "z402_deposit_dead_but_alive";
+const SNAPSHOT_SESSION_MISMATCH = "snapshot_session_mismatch";
 
 const RECOVERING_ACTIONS: ReadonlySet<Action> = new Set([
   "wait_confirmation",
@@ -89,35 +93,55 @@ export async function respond(
     return undefined;
   }
 
+  const snapshot = ownSnapshot(core, state, outcome.snapshot);
   if (outcome.kind === "paid") {
     if (settle !== undefined) core.tracked(state, () => session.applySettle(settle, attempt.cumulative));
-    core.emit({ type: "paid", cumulativeZat: session.cumulative.toString(), ...withSnapshot(outcome.snapshot) });
+    core.emit({ type: "paid", cumulativeZat: session.cumulative.toString(), ...withSnapshot(snapshot) });
     if (core.decision(state) === "background") core.background(state);
     return undefined;
   }
 
-  return refused(core, state, attempt, outcome, settle, isFinal);
+  return refused(core, state, attempt, outcome.code, snapshot, settle, isFinal);
+}
+
+/** The snapshot when it is this session's, else undefined after reporting it fatal */
+function ownSnapshot(
+  core: SchemeCore,
+  state: SessionState,
+  snapshot: SessionSnapshot | undefined,
+): SessionSnapshot | undefined {
+  if (snapshot === undefined || state.session.owns(snapshot)) return snapshot;
+  core.emit({
+    type: "fatal",
+    code: SNAPSHOT_SESSION_MISMATCH,
+    message: `ignored a snapshot of session ${snapshot.sessionKey}, this session is ${state.session.sessionKey}`,
+  });
+  return undefined;
 }
 
 async function refused(
   core: SchemeCore,
   state: SessionState,
   attempt: Attempt,
-  outcome: Extract<Outcome, { kind: "refused" }>,
+  code: string,
+  snapshot: SessionSnapshot | undefined,
   settle: SettleResponse | undefined,
   isFinal: boolean,
 ): Promise<Recovery> {
   const { session } = state;
-  const { code, snapshot } = outcome;
-  // A failed settle still acks its transaction (protocol.md §7.3) before the snapshot resyncs
-  core.tracked(state, () => {
-    if (settle !== undefined) session.applySettle(settle, attempt.cumulative);
-    if (snapshot !== undefined) session.applySnapshot(snapshot);
-  });
+  if (snapshot !== undefined) core.tracked(state, () => session.applySnapshot(snapshot));
 
+  const halt = await unaccountedDeposit(core, attempt, code, snapshot);
   const action = actionFor(code, { isFinal, canDeposit: core.canDeposit(state) });
-  const recovering = action === "resync" ? snapshot !== undefined : RECOVERING_ACTIONS.has(action);
+  const recovering =
+    halt === undefined && (action === "resync" ? snapshot !== undefined : RECOVERING_ACTIONS.has(action));
   core.emit({ type: "refused", code, ...withSnapshot(snapshot), recovering });
+
+  if (halt !== undefined) {
+    state.halted = { code: halt.code, txid: attempt.depositTxid };
+    core.emit({ type: "fatal", code: halt.code, message: halt.message });
+    return undefined;
+  }
 
   switch (action) {
     case "wait_confirmation":
@@ -154,6 +178,45 @@ async function refused(
         core.background(state);
       }
       return undefined;
+  }
+}
+
+/** The halt for a refusal asking to replace a presented deposit that may still count (protocol.md §7.3) */
+async function unaccountedDeposit(
+  core: SchemeCore,
+  attempt: Attempt,
+  code: string,
+  snapshot: SessionSnapshot | undefined,
+): Promise<{ code: string; message: string } | undefined> {
+  const txid = attempt.depositTxid;
+  if (txid === undefined) return undefined;
+  if (code === REASON.depositRequired) {
+    const status = snapshot?.deposits.find((d) => d.txid === txid)?.status;
+    if (status === "dead" || status === "orphaned") return undefined;
+    return {
+      code: DEPOSIT_REQUIRED_WHILE_PRESENTED,
+      message: `${code} while the presented deposit ${txid} is unaccounted for, stopping rather than paying again`,
+    };
+  }
+  if (code === REASON.depositDead && (await aliveOnChain(core.chain, txid))) {
+    return {
+      code: DEPOSIT_DEAD_BUT_ALIVE,
+      message: `${code} for deposit ${txid}, which our own chain still has alive, stopping rather than paying again`,
+    };
+  }
+  return undefined;
+}
+
+/** True only when our chain has the tx mined, or unmined in the mempool before its expiry */
+async function aliveOnChain(chain: TxStatusSource, txid: string): Promise<boolean> {
+  try {
+    const status = await chain.status(txid);
+    if (!status.found || status.location === "orphaned") return false;
+    if (status.location === "mined") return true;
+    return !isDepositDead({ minedHeight: null, expiryHeight: status.expiryHeight, tip: await chain.tip() });
+  } catch {
+    // Without an answer from our own chain the facilitator's verdict stands
+    return false;
   }
 }
 
@@ -209,11 +272,16 @@ async function waitForPending(core: SchemeCore, state: SessionState, attempt: At
   core.emit({ type: "waiting", txid });
   const result = await watch(core, txid, "mined");
   switch (result.kind) {
-    case "mined":
-      core.emit({ type: "deposit_confirmed", txid, height: result.height });
+    case "mined": {
+      const index = state.session.indexOf(txid);
+      if (state.session.noteConfirmed(txid)) {
+        const withIndex = index === undefined ? {} : { index };
+        core.emit({ type: "deposit_confirmed", txid, ...withIndex, height: result.height });
+      }
       // The single retry must not reach the facilitator before it has seen the block
       await core.clock.sleep(core.facilitatorLagMs);
       return recovered();
+    }
     case "dead":
       return redepositAfterDeath(core, state, attempt, txid);
     default:

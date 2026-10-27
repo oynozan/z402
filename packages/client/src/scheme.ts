@@ -150,13 +150,19 @@ export class PrepaidVoucherScheme implements SchemeNetworkClient {
         if (core.canDeposit(state)) this.#deposit(state, false).catch(() => {});
       },
       tracked: (state, change) => {
-        const before = state.session.deposits.map((d) => d.state);
+        const { session } = state;
+        const before = session.deposits.map((d) => d.state);
         change();
-        state.session.deposits.forEach((d, i) => {
+        session.deposits.forEach((d, i) => {
           if (d.txid === undefined || d.state === before[i]) return;
           if (d.state === "acked") core.emit({ type: "deposit_acked", txid: d.txid });
           else if (d.state === "dead") core.emit({ type: "deposit_dead", txid: d.txid });
         });
+        const snapshot = session.snapshot;
+        if (snapshot === undefined) return;
+        for (const confirmed of session.newlyConfirmed(snapshot)) {
+          core.emit({ type: "deposit_confirmed", ...confirmed, snapshot });
+        }
       },
     };
     this.#core = core;

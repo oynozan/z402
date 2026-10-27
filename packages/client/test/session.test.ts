@@ -169,13 +169,28 @@ describe("Session.applySnapshot", () => {
     expect(s.snapshot).toBe(snap);
   });
 
-  it("acks a local deposit the snapshot lists, whatever the status", () => {
-    for (const status of ["pending", "confirmed", "final", "orphaned"] as const) {
+  it.each(["pending", "confirmed", "final", "orphaned"] as const)(
+    "never acks a deposit a refusal's snapshot lists as %s, so it is still resent",
+    (status) => {
       const s = newSession();
       s.deposits.push(localDeposit(s.sessionKey, 1, "sent", TX));
-      s.applySnapshot(snapshot({ deposits: [snapshotDeposit(TX, status)] }));
-      expect(s.deposits[0]?.state).toBe("acked");
-    }
+      s.applySnapshot(snapshot({ cumulative: 4000n, deposits: [snapshotDeposit(TX, status)] }));
+      expect(s.deposits[0]?.state).toBe("sent");
+      expect(s.resendTxid()).toBe(TX);
+      expect(s.cumulative).toBe(4000n);
+    },
+  );
+
+  it("ignores a snapshot of another session: no resync, no dead copy, nothing stored", () => {
+    const s = newSession();
+    s.cumulative = 9000n;
+    s.deposits.push(localDeposit(s.sessionKey, 1, "sent", TX));
+    const foreign = snapshot({ cumulative: 4000n, sessionKey: "ab".repeat(32), deposits: [snapshotDeposit(TX, "dead")] });
+    expect(s.owns(foreign)).toBe(false);
+    s.applySnapshot(foreign);
+    expect(s.cumulative).toBe(9000n);
+    expect(s.snapshot).toBeUndefined();
+    expect(s.deposits[0]?.state).toBe("sent");
   });
 
   it("marks a local deposit dead when the snapshot lists it as dead", () => {
@@ -216,6 +231,24 @@ describe("Session.applySettle", () => {
     s.applySettle(settle({ session: { cumulativeZat: "7" } }), 1500n);
     expect(s.cumulative).toBe(1500n);
     expect(s.snapshot).toBeUndefined();
+  });
+
+  it.each(["pending", "confirmed", "final", "orphaned"] as const)("acks a deposit its snapshot lists as %s", (status) => {
+    const s = newSession();
+    s.deposits.push(localDeposit(s.sessionKey, 1, "sent", TX));
+    s.applySettle(settle({ session: snapshot({ cumulative: 500n, deposits: [snapshotDeposit(TX, status)] }) }), 500n);
+    expect(s.deposits[0]?.state).toBe("acked");
+    expect(s.resendTxid()).toBeUndefined();
+  });
+
+  it("success with another session's snapshot ignores it and falls back to the attempted value", () => {
+    const s = newSession();
+    s.deposits.push(localDeposit(s.sessionKey, 1, "sent", TX));
+    const foreign = snapshot({ cumulative: 7000n, sessionKey: "ab".repeat(32), deposits: [snapshotDeposit(TX, "pending")] });
+    s.applySettle(settle({ session: foreign }), 1500n);
+    expect(s.cumulative).toBe(1500n);
+    expect(s.snapshot).toBeUndefined();
+    expect(s.deposits[0]?.state).toBe("sent");
   });
 
   it("marks the deposit acked when transaction equals its txid", () => {
@@ -380,13 +413,73 @@ describe("Session terminal states (dead and rejected never come back)", () => {
   });
 });
 
-describe("Session failed-settle ack (protocol.md §7.3)", () => {
-  it("a failed settle whose transaction is our txid acks that deposit, so it is not resent", () => {
+describe("Session acks only on a successful settle (protocol.md §7.3)", () => {
+  it("a failed settle acks nothing, not even its own transaction, so the txid is still resent", () => {
     const s = newSession();
     s.deposits.push(localDeposit(s.sessionKey, 1, "sent", TX));
-    s.applySettle(settle({ success: false, errorReason: REASON.cumulativeMismatch, transaction: TX }), 500n);
-    expect(s.deposits[0]?.state).toBe("acked");
-    expect(s.resendTxid()).toBeUndefined();
+    s.applySettle(
+      settle({
+        success: false,
+        errorReason: REASON.cumulativeMismatch,
+        transaction: TX,
+        session: snapshot({ deposits: [snapshotDeposit(TX, "pending")] }),
+      }),
+      500n,
+    );
+    expect(s.deposits[0]?.state).toBe("sent");
+    expect(s.resendTxid()).toBe(TX);
+  });
+});
+
+describe("Session.newlyConfirmed", () => {
+  function sessionWith(...states: Array<[number, "sent" | "acked" | "dead" | "rejected" | "uncertain", string]>): Session {
+    const s = newSession();
+    for (const [index, state, id] of states) s.deposits.push(localDeposit(s.sessionKey, index, state, id));
+    return s;
+  }
+
+  it("lists each of our confirmed or final deposits once, with its index", () => {
+    const final = txid(0xd2);
+    const s = sessionWith([1, "acked", TX], [2, "sent", final]);
+    const snap = snapshot({ deposits: [snapshotDeposit(TX, "confirmed"), snapshotDeposit(final, "final")] });
+    expect(s.newlyConfirmed({ ...snap, tip: 100, deposits: snap.deposits.map((d) => ({ ...d, confirmations: 1 })) })).toEqual([
+      { index: 1, txid: TX },
+      { index: 2, txid: final },
+    ]);
+    expect(s.newlyConfirmed(snap)).toEqual([]);
+  });
+
+  it("gives the height when the confirmations pin it, tip minus confirmations plus one", () => {
+    const s = sessionWith([1, "acked", TX]);
+    const snap = snapshot({ deposits: [{ ...snapshotDeposit(TX, "confirmed"), confirmations: 3 }] });
+    expect(s.newlyConfirmed({ ...snap, tip: 1200 })).toEqual([{ index: 1, txid: TX, height: 1198 }]);
+  });
+
+  it("skips pending, orphaned and dead entries, txids that are not ours and our dead or rejected deposits", () => {
+    const s = sessionWith([1, "dead", txid(0xa1)], [2, "rejected", txid(0xa2)], [3, "sent", txid(0xa3)], [4, "sent", txid(0xa4)]);
+    const snap = snapshot({
+      deposits: [
+        snapshotDeposit(txid(0xa1), "confirmed"),
+        snapshotDeposit(txid(0xa2), "final"),
+        snapshotDeposit(txid(0xa3), "pending"),
+        snapshotDeposit(txid(0xa4), "orphaned"),
+        snapshotDeposit(txid(0xee), "confirmed"),
+      ],
+    });
+    expect(s.newlyConfirmed(snap)).toEqual([]);
+  });
+
+  it("does not list a deposit already noted confirmed from our own chain", () => {
+    const s = sessionWith([1, "sent", TX]);
+    expect(s.noteConfirmed(TX)).toBe(true);
+    expect(s.noteConfirmed(TX)).toBe(false);
+    expect(s.newlyConfirmed(snapshot({ deposits: [snapshotDeposit(TX, "confirmed")] }))).toEqual([]);
+  });
+
+  it("indexOf finds our deposit by txid", () => {
+    const s = sessionWith([3, "sent", TX]);
+    expect(s.indexOf(TX)).toBe(3);
+    expect(s.indexOf(txid(0xee))).toBeUndefined();
   });
 });
 

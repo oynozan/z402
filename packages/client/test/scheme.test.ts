@@ -446,7 +446,7 @@ describe("onPaymentResponse refusals", () => {
     await clock.advance(2_000);
     expect(h.done).toBe(false);
     expect(ofType(events, "deposit_confirmed")).toEqual([
-      { type: "deposit_confirmed", txid: t1, height: chain.height },
+      { type: "deposit_confirmed", txid: t1, index: 1, height: chain.height },
     ]);
 
     await clock.advance(6_000);
@@ -526,13 +526,17 @@ describe("onPaymentResponse refusals", () => {
 
   it("deposit_required deposits then recovers", async () => {
     const { wallet, hook, pay, events } = setup();
-    const R = makeReq();
-    const r1 = await pay(R);
+    const R1 = makeReq();
+    const r1 = await pay(R1);
     const t1 = voucher(r1).depositTxid as string;
+    await hook(paid(R1, r1, { transaction: t1, session: snap(500n, 125_000n, [dep(t1, "confirmed")]) }));
     expect(wallet.sent).toHaveLength(1);
 
+    const R = makeReq();
+    const r2 = await pay(R);
+    expect(voucher(r2).depositTxid).toBeUndefined();
     const session = snap(125_000n, 125_000n, [dep(t1, "confirmed")]);
-    await expect(hook(refused(R, r1, REASON.depositRequired, session))).resolves.toEqual({ recovered: true });
+    await expect(hook(refused(R, r2, REASON.depositRequired, session))).resolves.toEqual({ recovered: true });
     expect(wallet.sent).toHaveLength(2);
     expect(wallet.sent[1]?.memo).toBe(depositMemo(SESSION_KEY, 2));
     const [, second] = ofType(events, "deposit_broadcast");
@@ -568,27 +572,34 @@ describe("onPaymentResponse refusals", () => {
 
   it("cheat mode stops at the limit", async () => {
     const { wallet, events, hook, pay } = setup({ maxDeposits: 1 });
-    const R = makeReq();
-    const r1 = await pay(R);
+    const R1 = makeReq();
+    const r1 = await pay(R1);
     const t1 = voucher(r1).depositTxid as string;
+    await hook(paid(R1, r1, { transaction: t1, session: snap(124_500n, 125_000n, [dep(t1, "confirmed")]) }));
+    const R = makeReq();
+    const r2 = await pay(R);
     const session = snap(125_000n, 125_000n, [dep(t1, "confirmed")]);
-    await expect(hook(refused(R, r1, REASON.depositRequired, session))).resolves.toBeUndefined();
+    await expect(hook(refused(R, r2, REASON.depositRequired, session))).resolves.toBeUndefined();
     expect(ofType(events, "refused")).toEqual([
       { type: "refused", code: REASON.depositRequired, snapshot: session, recovering: false },
     ]);
+    expect(ofType(events, "fatal")).toEqual([]);
     expect(wallet.sent).toHaveLength(1);
   });
 
   it("deposit_required on the final attempt starts a background deposit and returns", async () => {
     const { wallet, hook, pay } = setup();
-    const R = makeReq();
-    const r1 = await pay(R);
+    const R1 = makeReq();
+    const r1 = await pay(R1);
     const t1 = voucher(r1).depositTxid as string;
-    await hook(refused(R, r1, REASON.cumulativeMismatch, snap(0n, 125_000n, [dep(t1, "confirmed")])));
+    await hook(paid(R1, r1, { transaction: t1, session: snap(500n, 125_000n, [dep(t1, "confirmed")]) }));
+    const R = makeReq();
     const r2 = await pay(R);
+    await hook(refused(R, r2, REASON.cumulativeMismatch, snap(1000n, 125_000n, [dep(t1, "confirmed")])));
+    const r3 = await pay(R);
     expect(wallet.sent).toHaveLength(1);
     const session = snap(125_000n, 125_000n, [dep(t1, "confirmed")]);
-    await expect(hook(refused(R, r2, REASON.depositRequired, session))).resolves.toBeUndefined();
+    await expect(hook(refused(R, r3, REASON.depositRequired, session))).resolves.toBeUndefined();
     await flush();
     expect(wallet.sent).toHaveLength(2);
   });
@@ -620,22 +631,24 @@ describe("onPaymentResponse refusals", () => {
     expect(voucher(await pay(R)).cumulativeZat).toBe("7500");
   });
 
-  it("a failed settle whose transaction is our txid acks it, so it is not resent", async () => {
-    const { hook, pay } = setup();
+  it("a failed settle does not ack, even with our txid as its transaction, so the retry resends it", async () => {
+    const { events, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
     const t1 = voucher(r1).depositTxid as string;
     await hook(settleRefused(R, r1, REASON.cumulativeMismatch, { transaction: t1, session: snap(500n, 125_000n) }));
     const retry = await pay(R);
-    expect(voucher(retry).depositTxid).toBeUndefined();
+    expect(voucher(retry).depositTxid).toBe(t1);
     expect(voucher(retry).cumulativeZat).toBe("1000");
+    expect(ofType(events, "deposit_acked")).toEqual([]);
   });
 
-  it("deposit_dead redeposits with the next index", async () => {
-    const { wallet, events, hook, pay } = setup();
+  it("deposit_dead redeposits with the next index once our own chain has lost the tx too", async () => {
+    const { chain, wallet, events, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
     const t1 = voucher(r1).depositTxid as string;
+    chain.drop(t1);
     await expect(hook(refused(R, r1, REASON.depositDead, snap(0n, 0n, [dep(t1, "dead")])))).resolves.toEqual({
       recovered: true,
     });
@@ -646,18 +659,20 @@ describe("onPaymentResponse refusals", () => {
   });
 
   it("deposit_dead without a snapshot marks the presented txid dead", async () => {
-    const { scheme, wallet, hook, pay } = setup();
+    const { chain, scheme, wallet, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
+    chain.drop(voucher(r1).depositTxid as string);
     await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
     expect(scheme.session(PAY_TO)?.deposits.map((d) => d.state)).toEqual(["dead", "sent"]);
     expect(wallet.sent).toHaveLength(2);
   });
 
   it("deposit_dead in cheat mode marks it dead and stops", async () => {
-    const { scheme, wallet, hook, pay } = setup({ maxDeposits: 1 });
+    const { chain, scheme, wallet, hook, pay } = setup({ maxDeposits: 1 });
     const R = makeReq();
     const r1 = await pay(R);
+    chain.drop(voucher(r1).depositTxid as string);
     await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toBeUndefined();
     expect(scheme.session(PAY_TO)?.deposits.map((d) => d.state)).toEqual(["dead"]);
     expect(wallet.sent).toHaveLength(1);
@@ -743,6 +758,301 @@ describe("onPaymentResponse refusals", () => {
     if (ctx.settleResponse) ctx.settleResponse.errorMessage = "bad sig";
     await hook(ctx);
     expect(ofType(events, "fatal")).toEqual([{ type: "fatal", code: REASON.invalidSignature, message: "bad sig" }]);
+  });
+});
+
+describe("acks come only from a successful settle (protocol.md §7.3)", () => {
+  it("after a refusal whose snapshot lists our unacked txid as pending, the recovered retry still carries it", async () => {
+    const { events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+
+    const projected = snap(7000n, 125_000n, [dep(t1, "pending")]);
+    await expect(hook(refused(R, r1, REASON.cumulativeMismatch, projected))).resolves.toEqual({ recovered: true });
+    expect(ofType(events, "deposit_acked")).toEqual([]);
+
+    const retry = await pay(R);
+    expect(voucher(retry).depositTxid).toBe(t1);
+    expect(voucher(retry).cumulativeZat).toBe("7500");
+  });
+
+  it("a settle refusal's snapshot listing our txid does not ack it either", async () => {
+    const { hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+    await hook(settleRefused(R, r1, REASON.cumulativeMismatch, { session: snap(7000n, 125_000n, [dep(t1, "confirmed")]) }));
+    expect(voucher(await pay(R)).depositTxid).toBe(t1);
+  });
+
+  it("after a successful settle whose snapshot lists it, the next voucher no longer carries it", async () => {
+    const { events, hook, pay } = setup();
+    const R1 = makeReq();
+    const r1 = await pay(R1);
+    const t1 = voucher(r1).depositTxid as string;
+    await hook(refused(R1, r1, REASON.cumulativeMismatch, snap(0n, 125_000n, [dep(t1, "pending")])));
+    const retry = await pay(R1);
+    expect(voucher(retry).depositTxid).toBe(t1);
+
+    await hook(paid(R1, retry, { transaction: "", session: snap(500n, 100_000n, [dep(t1, "pending")]) }));
+    expect(ofType(events, "deposit_acked")).toEqual([{ type: "deposit_acked", txid: t1 }]);
+    expect(voucher(await pay(makeReq())).depositTxid).toBeUndefined();
+  });
+});
+
+describe("a deposit request while the presented deposit is unaccounted for", () => {
+  const HALT = "z402_deposit_required_while_presented";
+
+  it.each<[string, (t1: string) => SessionSnapshot | undefined]>([
+    ["with no snapshot", () => undefined],
+    ["with a snapshot that does not list it", () => snap(0n, 0n)],
+    ["with a snapshot that lists it as pending", (t1) => snap(0n, 0n, [dep(t1, "pending")])],
+    ["with a snapshot that lists it as confirmed", (t1) => snap(125_000n, 125_000n, [dep(t1, "confirmed")])],
+  ])("halts %s instead of paying again", async (_name, session) => {
+    const { wallet, clock, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+
+    await expect(hook(refused(R, r1, REASON.depositRequired, session(t1)))).resolves.toBeUndefined();
+
+    expect(wallet.sent).toHaveLength(1);
+    expect(ofType(events, "refused")).toMatchObject([{ code: REASON.depositRequired, recovering: false }]);
+    const fatal = ofType(events, "fatal");
+    expect(fatal).toHaveLength(1);
+    expect(fatal[0]!.code).toBe(HALT);
+    expect(fatal[0]!.message).toContain(t1);
+    const next = pay(makeReq());
+    await expect(next).rejects.toThrow(HALT);
+    await expect(next).rejects.toThrow(t1);
+    await flush();
+    expect(wallet.sent).toHaveLength(1);
+    expect(clock.pendingTimers).toBe(0);
+  });
+
+  it("halts on the final attempt too, without a background deposit", async () => {
+    const { wallet, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+    await hook(refused(R, r1, REASON.cumulativeMismatch, snap(1000n, 125_000n)));
+    const r2 = await pay(R);
+    expect(voucher(r2).depositTxid).toBe(t1);
+
+    await expect(hook(refused(R, r2, REASON.depositRequired, snap(125_000n, 125_000n)))).resolves.toBeUndefined();
+    await flush();
+    expect(wallet.sent).toHaveLength(1);
+    expect(ofType(events, "fatal").map((e) => e.code)).toEqual([HALT]);
+  });
+
+  it("a facilitator that keeps asking never gets a second deposit", async () => {
+    const { wallet, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    await hook(refused(R, r1, REASON.depositRequired, snap(0n, 0n)));
+    for (let i = 0; i < 3; i++) await expect(pay(makeReq())).rejects.toThrow(HALT);
+    expect(wallet.sent).toHaveLength(1);
+  });
+
+  it.each(["dead", "orphaned"] as const)("still deposits again when the snapshot lists the presented txid as %s", async (status) => {
+    const { wallet, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+
+    await expect(hook(refused(R, r1, REASON.depositRequired, snap(0n, 0n, [dep(t1, status)])))).resolves.toEqual({
+      recovered: true,
+    });
+    expect(wallet.sent).toHaveLength(2);
+    expect(ofType(events, "fatal")).toEqual([]);
+    const [, second] = ofType(events, "deposit_broadcast");
+    expect(voucher(await pay(R)).depositTxid).toBe(second?.txid);
+  });
+});
+
+describe("deposit_dead for a deposit our own chain still sees", () => {
+  const HALT = "z402_deposit_dead_but_alive";
+
+  it("halts without a redeposit while the tx is in the mempool before its expiry", async () => {
+    const { wallet, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+
+    await expect(hook(refused(R, r1, REASON.depositDead, snap(0n, 0n, [dep(t1, "dead")])))).resolves.toBeUndefined();
+
+    expect(wallet.sent).toHaveLength(1);
+    const fatal = ofType(events, "fatal");
+    expect(fatal.map((e) => e.code)).toEqual([HALT]);
+    expect(fatal[0]!.message).toContain(t1);
+    await expect(pay(makeReq())).rejects.toThrow(HALT);
+    expect(wallet.sent).toHaveLength(1);
+  });
+
+  it("halts when the tx is already mined", async () => {
+    const { chain, wallet, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    chain.mine();
+    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toBeUndefined();
+    await expect(pay(makeReq())).rejects.toThrow(HALT);
+    expect(wallet.sent).toHaveLength(1);
+  });
+
+  it("halts on the final attempt too, without a background deposit", async () => {
+    const { wallet, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    await hook(refused(R, r1, REASON.cumulativeMismatch, snap(1000n, 125_000n)));
+    const r2 = await pay(R);
+    await expect(hook(refused(R, r2, REASON.depositDead))).resolves.toBeUndefined();
+    await flush();
+    expect(wallet.sent).toHaveLength(1);
+    await expect(pay(makeReq())).rejects.toThrow(HALT);
+  });
+
+  it("redeposits when our chain still lists the tx in the mempool at its expiry", async () => {
+    const chain = new FakeChain();
+    const inner = chain.statusSource();
+    let stale: string | undefined;
+    const source: TxStatusSource = {
+      tip: () => inner.tip(),
+      status: async (txid) =>
+        txid === stale
+          ? { found: true, location: "mempool", minedHeight: null, expiryHeight: chain.height }
+          : inner.status(txid),
+    };
+    const { wallet, events, hook, pay } = setup({ chain, source });
+    const R = makeReq();
+    const r1 = await pay(R);
+    stale = voucher(r1).depositTxid as string;
+    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
+    expect(wallet.sent).toHaveLength(2);
+    expect(ofType(events, "fatal")).toEqual([]);
+  });
+
+  it("redeposits when our chain has the tx orphaned", async () => {
+    const { chain, wallet, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    chain.mine();
+    chain.orphan(voucher(r1).depositTxid as string);
+    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
+    expect(wallet.sent).toHaveLength(2);
+  });
+
+  it("keeps the redeposit when our chain cannot answer", async () => {
+    const { chain, wallet, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    chain.setUnavailable(true);
+    await expect(hook(refused(R, r1, REASON.depositDead))).resolves.toEqual({ recovered: true });
+    expect(wallet.sent).toHaveLength(2);
+    expect(ofType(events, "fatal")).toEqual([]);
+  });
+});
+
+describe("snapshots of another session", () => {
+  const FOREIGN = "ab".repeat(32);
+  const foreign = (cumulative: bigint, deposits: SnapshotDeposit[] = []): SessionSnapshot => ({
+    ...snap(cumulative, 125_000n, deposits),
+    sessionKey: FOREIGN,
+  });
+
+  it("a paid settle ignores it, falls back to the attempted value and reports it", async () => {
+    const { events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+
+    await expect(hook(paid(R, r1, { session: foreign(7000n, [dep(t1, "pending")]) }))).resolves.toBeUndefined();
+
+    expect(ofType(events, "fatal")).toMatchObject([{ type: "fatal", code: "snapshot_session_mismatch" }]);
+    expect(ofType(events, "paid")).toEqual([{ type: "paid", cumulativeZat: "500" }]);
+    expect(ofType(events, "deposit_acked")).toEqual([]);
+    const next = await pay(makeReq());
+    expect(voucher(next).cumulativeZat).toBe("1000");
+    expect(voucher(next).depositTxid).toBe(t1);
+  });
+
+  it("a refusal does not resync from it, so cumulative_mismatch has nothing to recover with", async () => {
+    const { scheme, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+
+    await expect(hook(refused(R, r1, REASON.cumulativeMismatch, foreign(7000n)))).resolves.toBeUndefined();
+
+    expect(ofType(events, "fatal")).toMatchObject([{ type: "fatal", code: "snapshot_session_mismatch" }]);
+    expect(ofType(events, "refused")).toEqual([{ type: "refused", code: REASON.cumulativeMismatch, recovering: false }]);
+    expect(scheme.session(PAY_TO)?.snapshot).toBeUndefined();
+    expect(voucher(await pay(makeReq())).cumulativeZat).toBe("500");
+  });
+
+  it("a refusal does not copy its dead statuses", async () => {
+    const { scheme, hook, pay } = setup();
+    const R1 = makeReq();
+    const r1 = await pay(R1);
+    const t1 = voucher(r1).depositTxid as string;
+    await hook(paid(R1, r1, { transaction: t1, session: snap(500n, 125_000n, [dep(t1, "pending")]) }));
+    const R2 = makeReq();
+    const r2 = await pay(R2);
+    await hook(refused(R2, r2, REASON.cumulativeMismatch, foreign(500n, [dep(t1, "dead")])));
+    expect(scheme.session(PAY_TO)?.deposits.map((d) => d.state)).toEqual(["acked"]);
+  });
+});
+
+describe("deposit_confirmed from snapshots", () => {
+  it("is emitted once, when a snapshot first lists our deposit as confirmed, with its index and the snapshot", async () => {
+    const { events, hook, pay } = setup();
+    const R1 = makeReq();
+    const r1 = await pay(R1);
+    const t1 = voucher(r1).depositTxid as string;
+    await hook(paid(R1, r1, { transaction: t1, session: snap(500n, 100_000n, [dep(t1, "pending")]) }));
+    expect(ofType(events, "deposit_confirmed")).toEqual([]);
+
+    const R2 = makeReq();
+    const r2 = await pay(R2);
+    const confirmed = { ...snap(1000n, 125_000n, [dep(t1, "confirmed")]), creditZat: "25000" };
+    await hook(paid(R2, r2, { session: confirmed }));
+    expect(ofType(events, "deposit_confirmed")).toEqual([
+      { type: "deposit_confirmed", txid: t1, index: 1, snapshot: confirmed },
+    ]);
+    const types = events.map((e) => e.type);
+    expect(types.lastIndexOf("deposit_confirmed")).toBeLessThan(types.lastIndexOf("paid"));
+
+    const R3 = makeReq();
+    const r3 = await pay(R3);
+    await hook(paid(R3, r3, { session: snap(1500n, 125_000n, [{ ...dep(t1, "final"), confirmations: 10 }]) }));
+    expect(ofType(events, "deposit_confirmed")).toHaveLength(1);
+  });
+
+  it("carries the height when the snapshot's confirmations pin it", async () => {
+    const { events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+    const session = snap(500n, 125_000n, [{ ...dep(t1, "confirmed"), confirmations: 3 }]);
+    await hook(paid(R, r1, { transaction: t1, session }));
+    expect(ofType(events, "deposit_confirmed")).toEqual([
+      { type: "deposit_confirmed", txid: t1, index: 1, height: 998, snapshot: session },
+    ]);
+  });
+
+  it("is not repeated after the wait for a block already reported it", async () => {
+    const { chain, clock, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+    const h = track(hook(refused(R, r1, REASON.awaitingConfirmation, snap(0n, 0n, [dep(t1, "pending")]))));
+    await flush();
+    chain.mine();
+    await clock.advance(8_000);
+    expect(h.value).toEqual({ recovered: true });
+
+    const retry = await pay(R);
+    await hook(paid(R, retry, { transaction: t1, session: snap(500n, 125_000n, [dep(t1, "confirmed")]) }));
+    expect(ofType(events, "deposit_confirmed")).toHaveLength(1);
   });
 });
 

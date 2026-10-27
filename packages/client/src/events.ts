@@ -7,7 +7,7 @@ export type ClientEvent =
   | { type: "deposit_broadcast"; index: number; txid: string; ms: number }
   | { type: "deposit_failed"; index: number; error: Error }
   | { type: "deposit_acked"; txid: string }
-  | { type: "deposit_confirmed"; txid: string; height: number }
+  | { type: "deposit_confirmed"; txid: string; index?: number; height?: number; snapshot?: SessionSnapshot }
   | { type: "deposit_dead"; txid: string }
   | { type: "voucher"; cumulativeZat: string; depositTxid?: string }
   | { type: "paid"; cumulativeZat: string; snapshot?: SessionSnapshot }
