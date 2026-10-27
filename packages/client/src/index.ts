@@ -6,3 +6,11 @@ export { actionFor, classifyOutcome, snapshotFromExtra, type Action, type Outcom
 export { PrepaidVoucherScheme, type PrepaidVoucherSchemeOptions, type SessionView } from "./scheme.js";
 export { Session, type LocalDeposit } from "./session.js";
 export { waitForConfirmation, type WaitOptions } from "./wait.js";
+export {
+  InsufficientFundsError,
+  ZalletRpcError,
+  ZalletRpcWallet,
+  zatToZecString,
+  type SentTransaction,
+  type ZalletRpcWalletOptions,
+} from "./wallet/zallet-rpc.js";
