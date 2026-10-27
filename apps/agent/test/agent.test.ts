@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
 import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
 import type { PaymentRequired, PaymentRequirements, SchemeNetworkClient } from "@x402/core/types";
 import { ASSET, NETWORK_REGTEST, REASON, SCHEME, ZEC_DECIMALS, type SessionSnapshot } from "@z402/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runAgent, stopAtDepositRefusal } from "../src/agent.js";
+import { runAgent } from "../src/agent.js";
 import { FLAG_DEFAULTS, type Flags } from "../src/flags.js";
+import { stopAtDepositRefusal } from "../src/log.js";
 
 const SESSION_KEY = `a1b2${"4".repeat(58)}ff`;
 const TXID = `3f2a${"0".repeat(58)}c1`;
@@ -74,6 +76,22 @@ function lines(): { print: (line: string) => void; out: string[] } {
   const out: string[] = [];
   return { out, print: (line) => out.push(line) };
 }
+
+describe("agent.ts, the file shown on camera", () => {
+  const source = readFileSync(new URL("../src/agent.ts", import.meta.url), "utf8");
+
+  it("imports nothing from z402, only the stock x402 fetch wrapper and the local loop helpers", () => {
+    const from = [...source.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1]);
+    expect(from).toEqual(["node:timers/promises", "@x402/fetch", "./flags.js", "./log.js"]);
+  });
+
+  it("registers the Zcash scheme on a stock client with one line", () => {
+    expect(source.match(/new x402Client\(\)/g)).toHaveLength(1);
+    expect(source.match(/\.register\(/g)).toHaveLength(1);
+    expect(source).toContain("client.register(flags.network, zcashClientScheme);");
+    expect(source).toContain("wrapFetchWithPayment(fetch, client)");
+  });
+});
 
 describe("runAgent", () => {
   afterEach(() => {
@@ -227,12 +245,6 @@ describe("runAgent", () => {
     expect(end).toBe("stopped");
     expect(out).toHaveLength(3);
     expect(out[2]).toContain("#003 402  REFUSED z402_deposit_required at limit 125,000  c=125,000");
-  });
-
-  it("stopAtDepositRefusal is only true for that one code", () => {
-    expect(stopAtDepositRefusal({ error: REASON.depositRequired })).toBe(true);
-    expect(stopAtDepositRefusal({ error: REASON.awaitingConfirmation })).toBe(false);
-    expect(stopAtDepositRefusal({ snapshot: snapshot(500) })).toBe(false);
   });
 
   it("ends 'aborted' without another call once the signal fires", async () => {

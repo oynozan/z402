@@ -1,7 +1,7 @@
 import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
 import type { PaymentRequired, SettleResponse } from "@x402/core/types";
 import type { ClientEvent } from "@z402/client";
-import { NETWORK_REGTEST, SCHEME, type SessionSnapshot } from "@z402/protocol";
+import { NETWORK_REGTEST, REASON, SCHEME, type SessionSnapshot } from "@z402/protocol";
 import { describe, expect, it } from "vitest";
 import {
   formatCallFailure,
@@ -10,6 +10,7 @@ import {
   formatZat,
   outcomeOf,
   shortHex,
+  stopAtDepositRefusal,
 } from "../src/log.js";
 
 const TXID = `3f2a${"0".repeat(58)}c1`;
@@ -336,5 +337,13 @@ describe("outcomeOf", () => {
 
   it("ignores the headers of other statuses", () => {
     expect(outcomeOf(new Response("{}", { status: 500 }))).toEqual({});
+  });
+});
+
+describe("stopAtDepositRefusal", () => {
+  it("is only true for that one code", () => {
+    expect(stopAtDepositRefusal({ error: REASON.depositRequired })).toBe(true);
+    expect(stopAtDepositRefusal({ error: REASON.awaitingConfirmation })).toBe(false);
+    expect(stopAtDepositRefusal({ snapshot: SNAP })).toBe(false);
   });
 });

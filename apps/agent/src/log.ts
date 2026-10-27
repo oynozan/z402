@@ -2,7 +2,7 @@ import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { SettleResponse } from "@x402/core/types";
 import { decodePaymentResponseHeader } from "@x402/fetch";
 import type { ClientEvent } from "@z402/client";
-import { parseSessionSnapshot, type SessionSnapshot } from "@z402/protocol";
+import { parseSessionSnapshot, REASON, type SessionSnapshot } from "@z402/protocol";
 
 export function formatZat(zat: string | bigint): string {
   return zat.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -93,6 +93,9 @@ export interface CallOutcome {
   snapshot?: SessionSnapshot;
   error?: string;
 }
+
+/** The cheat agent cannot pay a second deposit, so this refusal ends the run */
+export const stopAtDepositRefusal = (outcome: CallOutcome): boolean => outcome.error === REASON.depositRequired;
 
 function sessionOf(extra: unknown): SessionSnapshot | undefined {
   if (typeof extra !== "object" || extra === null) return undefined;

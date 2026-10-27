@@ -1,6 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { wrapFetchWithPayment, x402Client, type SchemeNetworkClient } from "@x402/fetch";
-import { REASON } from "@z402/protocol";
 import type { Flags } from "./flags.js";
 import { formatCallFailure, formatCallLine, outcomeOf, type CallOutcome } from "./log.js";
 
@@ -14,9 +13,6 @@ export interface AgentOptions {
   signal?: AbortSignal;
   shouldStop?: (outcome: CallOutcome) => boolean;
 }
-
-/** The cheat agent cannot pay a second deposit, so this refusal ends the run */
-export const stopAtDepositRefusal = (outcome: CallOutcome): boolean => outcome.error === REASON.depositRequired;
 
 export async function runAgent({ flags, zcashClientScheme, print = console.log, signal, shouldStop }: AgentOptions): Promise<RunEnd> {
   const client = new x402Client();

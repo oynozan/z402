@@ -1,6 +1,7 @@
 import { constants } from "node:os";
-import { runAgent, stopAtDepositRefusal, type RunEnd } from "./agent.js";
+import { runAgent, type RunEnd } from "./agent.js";
 import { FlagError, parseFlags, USAGE, type Flags } from "./flags.js";
+import { stopAtDepositRefusal } from "./log.js";
 import { createZcashClient, PreflightError, type ZcashClient } from "./zcash.js";
 
 const print = (line: string): void => console.log(line);
