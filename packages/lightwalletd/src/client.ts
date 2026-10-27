@@ -5,6 +5,7 @@ import {
   status,
   type CallOptions,
   type ChannelCredentials,
+  type ChannelOptions,
   type Client,
   type ServiceError,
 } from "@grpc/grpc-js";
@@ -54,7 +55,7 @@ interface Stub extends Client {
   GetLightdInfo(req: object, options: CallOptions, done: UnaryCallback<LightdInfoMsg>): void;
 }
 
-type StubConstructor = new (address: string, creds: ChannelCredentials) => Stub;
+type StubConstructor = new (address: string, creds: ChannelCredentials, options?: ChannelOptions) => Stub;
 
 const PROTO = fileURLToPath(new URL("../proto/service.proto", import.meta.url));
 
@@ -66,12 +67,15 @@ const { CompactTxStreamer } = (
 ).cash.z.wallet.sdk.rpc;
 
 const DEFAULT_RPC_DEADLINE_MS = 5000;
+// grpc-js defaults to a reconnect backoff of up to 120 s, which keeps a restarted server out of reach for minutes
+const MAX_RECONNECT_BACKOFF_MS = 5000;
 const MEMPOOL_HEIGHT = "0";
 // 2^64 - 1 marks a transaction mined on a fork that is not the main chain
 const FORK_HEIGHT = "18446744073709551615";
 
 const LIGHTWALLETD_NOT_FOUND = "-5: Transaction not found in mempool or best chain";
 const ZAINO_NOT_FOUND = 'LegacyRpcError { code: -5, message: "No such mempool or main chain transaction" }';
+// The loosest of the three, accepted because Zebra 6.4+ built-in gRPC sends this bare text with no RPC code to anchor on
 const ZEBRA_NOT_FOUND = "transaction not found";
 
 // lightwalletd answers NOT_FOUND for every getrawtransaction failure so only the message tells them apart
@@ -121,7 +125,11 @@ function located(raw: Uint8Array, height: string): RawTx {
 export function createLightwalletdClient(o: { url: string; rpcDeadlineMs?: number }): LightwalletdClient {
   const { target, creds } = connectionFor(o.url);
   const deadlineMs = o.rpcDeadlineMs ?? DEFAULT_RPC_DEADLINE_MS;
-  const stub = new CompactTxStreamer(target, creds);
+  // Under 1 ms no call can finish in time, and Infinity would remove the deadline
+  if (!Number.isFinite(deadlineMs) || deadlineMs < 1) {
+    throw new TypeError("rpcDeadlineMs must be a finite number of milliseconds, at least 1");
+  }
+  const stub = new CompactTxStreamer(target, creds, { "grpc.max_reconnect_backoff_ms": MAX_RECONNECT_BACKOFF_MS });
 
   const call = <T>(invoke: (options: CallOptions, done: UnaryCallback<T>) => void): Promise<T> =>
     new Promise<T>((resolve, reject) => {

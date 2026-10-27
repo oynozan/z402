@@ -1,6 +1,6 @@
-import { status } from "@grpc/grpc-js";
+import { status, type ServiceClientConstructor } from "@grpc/grpc-js";
 import { ChainUnavailableError } from "@z402/protocol";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   createLightwalletdClient,
   isDefinitiveNotFound,
@@ -8,6 +8,31 @@ import {
   type LightwalletdClient,
 } from "../src/index.js";
 import { startFakeLwd, type FakeLwd, type FakeLwdScript } from "./support/fakeLwd.js";
+
+interface LoadedProtos {
+  cash: { z: { wallet: { sdk: { rpc: { CompactTxStreamer: ServiceClientConstructor } } } } };
+}
+
+const stubs = vi.hoisted(() => ({ constructed: [] as unknown[][] }));
+
+// The real grpc-js, except that every CompactTxStreamer stub records the arguments it was built with
+vi.mock("@grpc/grpc-js", async (importOriginal) => {
+  const grpc = await importOriginal<typeof import("@grpc/grpc-js")>();
+  return {
+    ...grpc,
+    loadPackageDefinition(definition: Parameters<typeof grpc.loadPackageDefinition>[0]) {
+      const loaded = grpc.loadPackageDefinition(definition);
+      const rpc = (loaded as unknown as LoadedProtos).cash.z.wallet.sdk.rpc;
+      rpc.CompactTxStreamer = new Proxy(rpc.CompactTxStreamer, {
+        construct(target, args, newTarget) {
+          stubs.constructed.push(args);
+          return Reflect.construct(target, args, newTarget) as object;
+        },
+      });
+      return loaded;
+    },
+  };
+});
 
 const txid = (tag: number): string =>
   Buffer.from([tag, ...Array.from({ length: 31 }, (_, i) => i + 1)]).toString("hex");
@@ -24,6 +49,7 @@ const TX_INTERNAL_OTHER = txid(0x08);
 const TX_UNAVAILABLE = txid(0x09);
 const TX_SLOW = txid(0x0a);
 const TX_EMPTY = txid(0x0b);
+const TX_BELOW_FORK = txid(0x0c);
 
 const RAW = Uint8Array.from([0x06, 0x00, 0x00, 0x80, 0x98, 0xb6, 0x84, 0xd8, 0x00, 0x01, 0x02, 0x03]);
 
@@ -70,6 +96,7 @@ const SCRIPT: FakeLwdScript = {
     [TX_UNAVAILABLE]: { fail: { code: status.UNAVAILABLE, details: "upstream connect error" } },
     [TX_SLOW]: { tx: { data: RAW, height: "4521112" }, delayMs: 300 },
     [TX_EMPTY]: { tx: { data: new Uint8Array(), height: "4521112" } },
+    [TX_BELOW_FORK]: { tx: { data: RAW, height: "18446744073709551614" } },
   },
   latestBlock: { height: "4547207" },
   lightdInfo: INFO,
@@ -133,6 +160,57 @@ describe("createLightwalletdClient url", () => {
   });
 });
 
+describe("createLightwalletdClient channel", () => {
+  const URL_NEVER_DIALED = "http://127.0.0.1:28137";
+  const opened: LightwalletdClient[] = [];
+
+  beforeEach(() => {
+    stubs.constructed.length = 0;
+  });
+
+  afterEach(() => {
+    for (const client of opened.splice(0)) client.close();
+  });
+
+  const open = (url: string, rpcDeadlineMs?: number): LightwalletdClient => {
+    const client = createLightwalletdClient({ url, rpcDeadlineMs });
+    opened.push(client);
+    return client;
+  };
+
+  test.each([
+    ["plaintext", URL_NEVER_DIALED, "127.0.0.1:28137"],
+    ["TLS", "https://lwd.example.com", "lwd.example.com:443"],
+  ])("a %s stub caps the reconnect backoff at 5 s", (_name, url, target) => {
+    open(url);
+    expect(stubs.constructed).toHaveLength(1);
+    const [address, , options] = stubs.constructed[0] ?? [];
+    expect(address).toBe(target);
+    expect(options).toMatchObject({ "grpc.max_reconnect_backoff_ms": 5000 });
+  });
+
+  describe("rpcDeadlineMs", () => {
+    test.each([
+      ["zero", 0],
+      ["negative", -5],
+      ["NaN", Number.NaN],
+      ["Infinity", Number.POSITIVE_INFINITY],
+      ["-Infinity", Number.NEGATIVE_INFINITY],
+      ["below one millisecond", 0.4],
+      ["a numeric string", "5000" as unknown as number],
+    ])("rejects %s with a TypeError that names it, before any channel exists", (_name, rpcDeadlineMs) => {
+      const make = () => open(URL_NEVER_DIALED, rpcDeadlineMs);
+      expect(make).toThrow(TypeError);
+      expect(make).toThrow(/rpcDeadlineMs/);
+      expect(stubs.constructed).toEqual([]);
+    });
+
+    test("accepts one millisecond, the shortest deadline that can be set", () => {
+      expect(() => open(URL_NEVER_DIALED, 1)).not.toThrow();
+    });
+  });
+});
+
 describe("against a gRPC server speaking the lightwalletd protos", () => {
   let fake: FakeLwd;
   let c: LightwalletdClient;
@@ -171,6 +249,14 @@ describe("against a gRPC server speaking the lightwalletd protos", () => {
       raw: RAW,
       location: "orphaned",
       height: null,
+    }));
+
+  // Number() maps this height and the sentinel to the same double, so only the string compare tells them apart
+  test("the height just below the fork sentinel is mined", async () =>
+    expect(await c.getTransaction(TX_BELOW_FORK)).toMatchObject({
+      found: true,
+      location: "mined",
+      height: expect.any(Number),
     }));
 
   test("raw is an exact-size Uint8Array, not a view into the gRPC receive buffer", async () => {
@@ -227,6 +313,15 @@ describe("against a gRPC server speaking the lightwalletd protos", () => {
       expect(remainingMs).toBeGreaterThan(4000);
       expect(remainingMs).toBeLessThanOrEqual(5000);
     }
+  });
+
+  test("an omitted rpcDeadlineMs means the default of 5 s", async () => {
+    const plain = createLightwalletdClient({ url: fake.url });
+    clients.push(plain);
+    await plain.getTip();
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]?.remainingMs).toBeGreaterThan(4000);
+    expect(fake.calls[0]?.remainingMs).toBeLessThanOrEqual(5000);
   });
 
   test("server receives reversed hash", async () => {
