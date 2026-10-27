@@ -11,10 +11,10 @@
 #
 # The clock, facilitator and API run detached in their own session. Each has a pidfile and a log
 # in .data/demo/ (gitignored), and the pid doubles as its process group id, so down can SIGINT the
-# whole pnpm chain. The pidfile also records the process start time and the command marker, so a
-# recycled pid is never taken for ours. The script never touches Docker except through
-# infra/z3/up.sh, and it never prints the merchant viewing key (UIVK) or the facilitator token.
-# Runbook: docs/demo.md.
+# whole pnpm chain. The pidfile also records the process start time, and the leader and any
+# leaderless group must carry the command marker, so a recycled pid is very unlikely to pass for
+# ours. The script never touches Docker except through infra/z3/up.sh, and it never prints the
+# merchant viewing key (UIVK) or the facilitator token. Runbook: docs/demo.md.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -115,7 +115,14 @@ started_of() { sed -n 2p "$DATA/$1.pid" 2>/dev/null || true; }
 
 pgid_of() { ps -o pgid= -p "$1" 2>/dev/null | tr -d ' ' || true; }
 
-lstart_of() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//' || true; }
+lstart_of() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//' || true; }
+
+proc_exists() { [ -n "$(ps -p "$1" -o pid= 2>/dev/null | tr -d ' ')" ]; }
+
+# True when some process of process group $1 has $2 in its command line
+group_has_marker() {
+  ps -A -ww -o pgid=,command= 2>/dev/null | awk -v g="$1" -v m="$2" '$1 == g && index($0, m) { found = 1 } END { exit !found }'
+}
 
 command_of() { ps -ww -o command= -p "$1" 2>/dev/null || true; }
 
@@ -148,13 +155,13 @@ is_alive() {
   return 1
 }
 
-# The leader is gone but its process group still has members, which can only be the ones spawn started
+# The leader no longer exists and a member of its process group still carries our marker, so the group is ours
 is_orphaned() {
   local pid
   pid_ok "$1" || return 1
   pid="$(pid_of "$1")"
-  if kill -0 "$pid" 2>/dev/null; then return 1; fi
-  kill -0 -- "-$pid" 2>/dev/null
+  if proc_exists "$pid"; then return 1; fi
+  group_has_marker "$pid" "$(marker_of "$1")"
 }
 
 # Returns 0 when it runs already, dies when only orphaned members are left, returns 1 when it is safe to spawn
@@ -169,7 +176,10 @@ already_running() {
   return 1
 }
 
-docker_answers() { { perl -e 'alarm 10; exec @ARGV or exit 127' -- docker info >/dev/null; } 2>/dev/null; }
+# Bounds a command to 10 s by killing the child, since a Go binary such as docker ignores SIGALRM
+BOUND='my $p = fork // exit 127; unless ($p) { exec @ARGV or exit 127 } $SIG{ALRM} = sub { kill "TERM", $p; sleep 1; kill "KILL", $p; waitpid $p, 0; exit 142 }; alarm 10; waitpid $p, 0; exit($? & 127 ? 1 : $? >> 8)'
+
+docker_answers() { { perl -e "$BOUND" -- docker info >/dev/null; } 2>/dev/null; }
 
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
@@ -354,13 +364,22 @@ cmd_cheat() {
   exec pnpm --filter @z402/agent demo --cheat --interval-ms 0 --calls 400
 }
 
-# The newest transaction in the agent wallet that carries a z402 deposit memo, <sessionKey>:<index>
+# Deposit memo transactions of the agent wallet, newest first, without expired or zero-value ones
+DEPOSIT_TXIDS='[.[] | select(.expired_unmined != true) | select(any(.outputs[]?; ((.memo // "") | test("^[0-9a-f]{64}:[0-9]+$")) and ((.value // 0) > 0)))] | sort_by(.mined_height // 1e12) | reverse | .[].txid'
+
+# The newest deposit transaction that Zebra knows, so an unbroadcast one cannot shadow a mined one
 newest_deposit_txid() {
-  local account rows
+  local account rows txid
   account="$(zrpc zallet z_listaccounts | jq -r '.[0].account_uuid // empty')" || return 1
   [ -n "$account" ] || return 1
   rows="$(zrpc zallet z_listtransactions "\"$account\"")" || return 1
-  jq -r '[.[] | select(any(.outputs[]?; (.memo // "") | test("^[0-9a-f]{64}:[0-9]+$")))] | sort_by(.mined_height // 1e12) | last | .txid // empty' <<<"$rows"
+  for txid in $(jq -r "$DEPOSIT_TXIDS" <<<"$rows" | head -n 10); do
+    if zrpc zebra getrawtransaction "\"$txid\"" 0 >/dev/null 2>&1; then
+      printf '%s' "$txid"
+      return 0
+    fi
+  done
+  return 0
 }
 
 cmd_show() {
@@ -486,36 +505,61 @@ cmd_status() {
   fi
 }
 
+# Prints the pids of every descendant of $1 by walking the ppid tree, since pnpm 12 can start the server in its own group
+descendants_of() {
+  ps -A -o pid=,ppid= 2>/dev/null | awk -v root="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END {
+      n = split(kids[root], queue, " ")
+      for (i = 1; i <= n; i++) {
+        print queue[i]
+        m = split(kids[queue[i]], more, " ")
+        for (j = 1; j <= m; j++) queue[++n] = more[j]
+      }
+    }' || true
+}
+
+# wait_gone <pgid> <seconds> <descendant pids> returns 0 once the group and every listed pid have exited
 wait_gone() {
-  local pid="$1" i=0 max=$(($2 * 5))
-  while kill -0 -- "-$pid" 2>/dev/null; do
+  local pid="$1" i=0 max=$(($2 * 5)) extra="$3" d busy
+  while :; do
+    busy=0
+    if kill -0 -- "-$pid" 2>/dev/null; then busy=1; fi
+    for d in $extra; do
+      if kill -0 "$d" 2>/dev/null; then busy=1; fi
+    done
+    if [ "$busy" -eq 0 ]; then return 0; fi
     i=$((i + 1))
     if [ "$i" -gt "$max" ]; then return 1; fi
     sleep 0.2
   done
-  return 0
 }
 
 stop_proc() {
-  local name="$1" pid
+  local name="$1" pid desc="" d
   if [ ! -f "$DATA/$name.pid" ]; then
     info "$name: no pidfile, nothing to stop"
     return 0
   fi
-  if ! is_alive "$name" && ! is_orphaned "$name"; then
-    info "$name: not running, removing its stale pidfile"
+  if is_alive "$name"; then
+    pid="$(pid_of "$name")"
+    desc="$(descendants_of "$pid" | tr '\n' ' ')"
+  elif is_orphaned "$name"; then
+    pid="$(pid_of "$name")"
+    info "$name: its leader exited, signalling the members of its process group"
+  else
+    info "$name: not running, removing its stale pidfile (nothing was signalled)"
     rm -f "$DATA/$name.pid"
     return 0
   fi
-  pid="$(pid_of "$name")"
-  if ! is_alive "$name"; then info "$name: its leader exited, signalling the members of its process group"; fi
   info "$name: SIGINT to pid $pid and its process group"
   kill -s INT -- "-$pid" 2>/dev/null || true
-  if ! wait_gone "$pid" 20; then
+  if ! wait_gone "$pid" 20 "$desc"; then
     warn "$name ignored SIGINT for 20s, sending SIGTERM"
     kill -s TERM -- "-$pid" 2>/dev/null || true
-    if ! wait_gone "$pid" 10; then
-      warn "$name is still running, force it with: kill -9 -- -$pid"
+    for d in $desc; do kill -s TERM "$d" 2>/dev/null || true; done
+    if ! wait_gone "$pid" 10 "$desc"; then
+      warn "$name is still running, force it with: kill -9 -- -$pid $desc"
       return 1
     fi
   fi

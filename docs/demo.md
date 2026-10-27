@@ -64,7 +64,7 @@ The agent prints one line per paid call:
 
 The honest run takes about 160 s to finish. For a 3-minute video, let it run through beat 5 (about call 90, when D2 confirms), then press Ctrl-C once and wait for the agent to print `interrupted`.
 
-Beat 2 as it looks, with the three event lines that come with D1:
+Beat 2 as it looks, with the event lines that come with D1:
 
 ```
   * session abab…ab on zcash:regtest
@@ -95,10 +95,17 @@ Beat 5 as it looks. D2 goes out at call 51 but shows as pending only once it is 
 
 The cheating agent makes one deposit and then refuses to make another. It runs with no pause between calls. It is a new session, so it makes its own D1.
 
-Start it right after a new block line appears in `clock.log` (terminal 2). D1 is broadcast about 5 to 10 s later and the next block is 25 s after the last one, so D1 stays at `conf=0` for the whole fast phase of 200 calls. Start it just before a block and D1 confirms too early to show the zero-conf exposure.
+Start it right after a new block line appears in `clock.log` (terminal 2). D1 is broadcast about 5 to 10 s later and the next block is 25 s after the last one, so D1 stays at `conf=0` for roughly 15 s, which is longer than the fast phase of 200 calls needs. Do not start it 10 to 18 s after a block. D1 is then broadcast just before the next tick and confirms almost at once, so there is no zero-conf phase to show.
 
 1. About 200 calls fly by in seconds on D1 while it is still unconfirmed, ending at `c=100,000  limit=100,000`. Point at `conf=0  pend=100,000`: that is the merchant's zero-conf exposure, capped at one window.
-2. The agent stops and prints `  * waiting for deposit 3f2a…c1 to confirm`. It waits for a block, then prints `  * deposit D1 3f2a…c1 confirmed at height N`.
+2. The merchant refuses the next voucher and the agent waits for the block instead of paying again. It prints these lines, and the first one is worth pointing at:
+
+   ```
+     * refused z402_awaiting_confirmation, recovering
+     * waiting for deposit 3f2a…c1 to confirm
+     * deposit D1 3f2a…c1 confirmed at height N
+   ```
+
 3. The block lands and the credit line opens (`limit=125,000`, `credit=25,000`). About 50 more calls run on credit, up to `c=125,000`.
 4. The merchant refuses, and the run ends:
 
@@ -113,7 +120,7 @@ Point at `REFUSED … at limit 125,000`. The most a cheater ever gets is one unc
 
 `scripts/demo.sh show` with no argument takes the newest deposit the agent wallet has sent. It finds it by the deposit memo (`<sessionKey>:<index>`) in Zallet's transaction list. Run right after the cheat run, that is the cheat run's D1. This is the easy path and needs no prep.
 
-To show a specific deposit, pass its full 64-character txid. The agent log only shows the short form, and the txid does not exist before the take, so grab it in terminal 2 while the deposit is on screen (during beat 5, once D1 is in the log):
+To show a specific deposit, pass its full 64-character txid. The agent log only shows the short form, and the txid does not exist before the take, so grab it any time before beat 7. Do it after Ctrl-C in terminal 1, where the short form is still in the scrollback, or in a third terminal while the run is going. Terminal 2 stays on the clock tail that beat 6 needs.
 
 ```bash
 # 3f2a and c1 are placeholders, use the first 4 and last 2 characters of D1 in your own log
@@ -159,7 +166,7 @@ At p = 500 zat and one call per second (`docs/spec/protocol.md` section 12). The
 - **`up` says Docker did not answer within 10 s.** Start Docker Desktop and wait until it reports running, then retry.
 - **`honest` or `cheat` says nothing listens on 4021 or 4022.** Run `scripts/demo.sh up`.
 - **After `bash infra/z3/down.sh --wipe`.** The chain restarts from height 0, so the old ledger no longer matches. Run `scripts/demo.sh down --wipe-ledger`, then `scripts/demo.sh up`, then `bash infra/z3/fund-agent.sh`. The script never touches Docker, so it does not wipe the volumes itself.
-- **`down` warns that a process ignored SIGINT.** It escalates to SIGTERM by itself. If it still cannot stop the process, it prints the `kill -9` command for the process group.
+- **`down` warns that a process ignored SIGINT.** It escalates to SIGTERM by itself. If it still cannot stop the process, it prints a `kill -9` command that names the process group and the pids of the leader's descendants. Run that whole command. pnpm 12 starts the package script in its own process group, so the group alone would leave the server running on its port.
 
 ## Reset between takes
 
@@ -173,7 +180,7 @@ Nothing needs resetting. Each agent run is a new session with a new session key,
 | Path | What |
 |---|---|
 | `.data/demo/facilitator.log`, `api.log`, `clock.log` | Process output. A start moves the previous log to `<name>.log.prev`, so the log of a crashed run survives the restart. |
-| `.data/demo/*.pid` | Pidfiles. Line 1 is the pid, which is also the process group id. Line 2 is the process start time, so the script never mistakes a recycled pid for its own process. |
+| `.data/demo/*.pid` | Pidfiles. Line 1 is the pid, which is also the process group id. Line 2 is the process start time. Together with a check of the command line, it keeps the script from signalling an unrelated process that reused the pid. |
 | `.data/demo/token` | The facilitator token, mode 600, generated once. |
 | `.data/facilitator-ledger.regtest.jsonl` | The facilitator ledger. |
 | `.secrets/merchant-regtest.json` | The merchant keys. The script never prints the viewing key. |
