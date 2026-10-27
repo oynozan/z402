@@ -21,6 +21,7 @@ import {
 import { FakeChain, MockWallet } from "@z402/testkit";
 import { describe, expect, it } from "vitest";
 import {
+  DepositStatusUnknownError,
   DepositUncertainError,
   PrepaidVoucherScheme,
   type ClientEvent,
@@ -805,6 +806,69 @@ describe("halt after a deposit rejection", () => {
     const r = await pay(makeReq({ payTo: other }));
     expect(voucher(r).depositTxid).toBeDefined();
     expect(wallet.sent.map((d) => d.to)).toEqual([PAY_TO, other]);
+  });
+});
+
+describe("halt after an unknown deposit status", () => {
+  const MEMO_1 = depositMemo(SESSION_KEY, 1);
+
+  it("the next payload rejects, naming the code and no txid, without paying or calling the wallet again", async () => {
+    const gated = new GatedWallet(new MockWallet(new FakeChain()));
+    gated.inner.failNextWith(new DepositStatusUnknownError(MEMO_1));
+    const { clock, events, scheme, pay } = setup({ wallet: gated });
+
+    await expect(pay(makeReq())).rejects.toBeInstanceOf(DepositStatusUnknownError);
+    expect(ofType(events, "fatal")).toHaveLength(1);
+    expect(ofType(events, "fatal")[0]!.code).toBe("deposit_status_unknown");
+    const seen = events.length;
+
+    const next = pay(makeReq());
+    await expect(next).rejects.toThrow("deposit_status_unknown");
+    await expect(next).rejects.toThrow("(unknown)");
+    expect(gated.calls).toBe(1);
+    expect(gated.inner.sent).toHaveLength(0);
+    expect(clock.pendingTimers).toBe(0);
+    expect(events).toHaveLength(seen);
+    expect(scheme.session(PAY_TO)?.deposits).toEqual([{ index: 1, memo: MEMO_1, state: "uncertain" }]);
+    expect(scheme.session(PAY_TO)?.depositsMade).toBe(0);
+  });
+
+  it("a later deposit that comes back unknown halts a session that had paid before", async () => {
+    const { wallet, hook, pay } = setup();
+    const R1 = makeReq();
+    const r1 = await pay(R1);
+    await hook(paid(R1, r1, { transaction: voucher(r1).depositTxid as string, session: snap(500n, 500n) }));
+    wallet.failNextWith(new DepositStatusUnknownError(depositMemo(SESSION_KEY, 2)));
+
+    await expect(pay(makeReq())).rejects.toBeInstanceOf(DepositStatusUnknownError);
+    await expect(pay(makeReq())).rejects.toThrow("deposit_status_unknown");
+    expect(wallet.sent).toHaveLength(1);
+  });
+
+  it("other sessions are unaffected", async () => {
+    const { wallet, pay } = setup();
+    wallet.failNextWith(new DepositStatusUnknownError(MEMO_1));
+    await expect(pay(makeReq())).rejects.toBeInstanceOf(DepositStatusUnknownError);
+
+    const other = "uregtest1" + "p".repeat(60);
+    const r = await pay(makeReq({ payTo: other }));
+    expect(voucher(r).depositTxid).toBeDefined();
+    expect(wallet.sent.map((d) => d.to)).toEqual([other]);
+  });
+
+  it("a background deposit that comes back unknown halts the session too", async () => {
+    const { wallet, events, hook, pay } = setup();
+    const R = makeReq();
+    const r1 = await pay(R);
+    const t1 = voucher(r1).depositTxid as string;
+    wallet.failNextWith(new DepositStatusUnknownError(depositMemo(SESSION_KEY, 2)));
+
+    await hook(paid(R, r1, { transaction: t1, session: snap(500n, 60_500n, [dep(t1, "confirmed")]) }));
+    await flush();
+
+    expect(ofType(events, "deposit_failed")).toHaveLength(1);
+    await expect(pay(makeReq())).rejects.toThrow("deposit_status_unknown");
+    expect(wallet.sent).toHaveLength(1);
   });
 });
 

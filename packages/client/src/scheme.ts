@@ -36,6 +36,7 @@ import { Mutex } from "./mutex.js";
 import { respond, type Attempt, type Recovery, type SchemeCore, type SessionState } from "./respond.js";
 import { Session, type LocalDeposit } from "./session.js";
 import { TxWatch, type Observation } from "./wait.js";
+import { DepositStatusUnknownError } from "./wallet/zallet-rpc.js";
 
 export interface PrepaidVoucherSchemeOptions {
   wallet: ZcashWallet;
@@ -75,6 +76,7 @@ export interface SessionView {
 
 /** Minimum gap between checks of one uncertain txid, counted from when the wallet reported it */
 const UNCERTAIN_RECHECK_MS = 10_000;
+const DEPOSIT_STATUS_UNKNOWN = "deposit_status_unknown";
 const ZAT_AMOUNT_RE = /^(0|[1-9][0-9]*)$/;
 
 function asError(e: unknown): Error {
@@ -366,10 +368,17 @@ export class PrepaidVoucherScheme implements SchemeNetworkClient {
           nextCheckAt: clock.now() + UNCERTAIN_RECHECK_MS,
           watch: new TxWatch(this.#core.chain, error.txid, clock),
         });
+      } else if (error instanceof DepositStatusUnknownError) {
+        // It may be on the chain with no txid to watch, so another deposit could pay twice
+        local.state = "uncertain";
+        state.halted = { code: DEPOSIT_STATUS_UNKNOWN, txid: "(unknown)" };
       } else {
         local.state = "failed";
       }
       emit({ type: "deposit_failed", index, error });
+      if (error instanceof DepositStatusUnknownError) {
+        emit({ type: "fatal", code: DEPOSIT_STATUS_UNKNOWN, message: error.message });
+      }
       throw error;
     }
   }

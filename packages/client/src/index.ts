@@ -7,6 +7,7 @@ export { PrepaidVoucherScheme, type PrepaidVoucherSchemeOptions, type SessionVie
 export { Session, type LocalDeposit } from "./session.js";
 export { waitForConfirmation, type WaitOptions } from "./wait.js";
 export {
+  DepositStatusUnknownError,
   InsufficientFundsError,
   ZalletRpcError,
   ZalletRpcWallet,
