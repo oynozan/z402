@@ -1,6 +1,6 @@
 # z402 wire contract
 
-**Version: v1** (frozen 2026-10-27; ACKed by both agents) · drafted by the client agent, reviewed by the facilitator agent. Code may rely on every value here; changes need a message, both ACKs, and a version bump.
+**Version: v1.1** (2026-10-27; ACKed by both agents. v1.1 clarifies §7.3: only a successful settle acknowledges a deposit; refusal snapshots are projected and informational) · drafted by the client agent, reviewed by the facilitator agent. Code may rely on every value here; changes need a message, both ACKs, and a version bump.
 
 This is the one contract the client library (`@z402/client`) and the merchant side (`@z402/facilitator`, `@z402/server`, `apps/api`) both build against. It refines [mvp-build-doc.md](mvp-build-doc.md) with what research found; where they disagree, this file wins.
 
@@ -199,7 +199,9 @@ Reference values (W = 100,000, 2500 bps, cap 200,000):
 
 ### 7.3 Deposit acknowledgement
 - `SettleResponse.transaction = depositTxid` whenever the payload's `depositTxid` is credited to this session. That covers a new credit and a re-presentation, so a lost ack can be re-acked. Otherwise `""`.
-- The client resends `depositTxid` until it sees `transaction === depositTxid` or the txid listed in `session.deposits`.
+- **A deposit is acknowledged ONLY by a successful settle** (`success: true`): `settle.transaction === depositTxid`, or the txid is listed in `session.deposits` of that successful `SettleResponse`. Until then the client resends the txid.
+- Snapshots carried by refusals (corrective 402s, and settle `success: false`) are **projected and informational**. The facilitator may list a presented, not-yet-credited txid in them "as if credited". The client resyncs `cumulative` and copies `dead` statuses from them, but never treats a listing there as an acknowledgement. Re-presenting an already-credited txid is an idempotent no-op ack on the facilitator.
+- The facilitator never answers `z402_deposit_required` while a presented deposit's lookup is in flight, or while its cached result is a live pending deposit; that case is `z402_awaiting_confirmation`. A client that receives `z402_deposit_required` for an attempt that presented an unaccounted txid treats it as a facilitator fault and halts, rather than paying again.
 
 ## 8. Reason codes and client actions
 
