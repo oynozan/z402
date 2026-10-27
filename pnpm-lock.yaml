@@ -67,6 +67,9 @@ importers:
 
   packages/facilitator:
     dependencies:
+      '@x402/core':
+        specifier: 2.28.0
+        version: 2.28.0
       '@z402/lightwalletd':
         specifier: workspace:*
         version: link:../lightwalletd

@@ -12,6 +12,7 @@
     "build:native": "cargo build --release --locked --manifest-path ../../crates/zdecrypt/Cargo.toml"
   },
   "dependencies": {
+    "@x402/core": "2.28.0",
     "@z402/lightwalletd": "workspace:*",
     "@z402/protocol": "workspace:*"
   },
