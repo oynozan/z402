@@ -186,6 +186,14 @@ test("compose: Zallet's sync logs warnings only, which at info is thousands of l
   assert.ok(directives.includes("zallet_core::components::sync=warn"), `RUST_LOG is ${directives.join(",")}`);
 });
 
+test("compose: the facilitator is never published, and the website and discover read its catalog", { skip }, () => {
+  const { facilitator, web, discover, ...rest } = services();
+  assert.deepEqual(facilitator.ports ?? [], [], "the facilitator's port is published");
+  assert.equal(rest.discovery, undefined, "the discovery container is back");
+  assert.equal(web.environment.DISCOVERY_URL, "http://facilitator:4022");
+  assert.equal(flag(discover.entrypoint, "--discovery"), "http://facilitator:4022");
+});
+
 test("wait-facilitator: waits for a facilitator that is not up yet, sends its token, prints nothing", async () => {
   const work = mkdtempSync(join(tmpdir(), "z402-wait-"));
   const listen = (server, port) => new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));

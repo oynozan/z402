@@ -1,6 +1,6 @@
-# One image for every Node process of compose.yaml (chain jobs, keygen, facilitator, API, services, discovery,
-# agent, smoke test): the pnpm workspace without the website, run from source with tsx, plus the zdecrypt binary that
-# the facilitator and the keygen job call. Build context: the repository root.
+# One image for every Node process of compose.yaml (chain jobs, keygen, facilitator, API, services, agent, smoke
+# test): the pnpm workspace without the website, run from source with tsx, plus the zdecrypt binary that the
+# facilitator and the keygen job call. Build context: the repository root.
 
 ARG NODE_IMAGE=node:26.12.1-bookworm-slim
 ARG RUST_IMAGE=rust:1.98.1-slim-bookworm

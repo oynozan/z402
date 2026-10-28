@@ -1,9 +1,9 @@
 # z402 in one command: docker compose up -d
 #
 # A private Zcash regtest chain (Zebra, Zallet holding the funded agent wallet, Zaino, a block clock), the merchant
-# keys, the facilitator, the paid API, the four starter services with a local llama.cpp model runtime, discovery and
-# the website. Runbook and ports: docs/deploy.md. Compose settings: .env.example. Each service's own settings and
-# API keys: services/<name>/.env.
+# keys, the facilitator with its service catalog, the paid API, the four starter services with a local llama.cpp model
+# runtime, and the website. Runbook and ports: docs/deploy.md. Compose settings: .env.example. Each service's own
+# settings and API keys: services/<name>/.env.
 
 name: z402
 
@@ -470,25 +470,7 @@ services:
       - "1"
     mem_limit: 512m
 
-  # Discovery and the website ---------------------------------------------------
-
-  discovery:
-    <<: *node
-    command: ["node", "--import", "tsx", "apps/discovery/src/main.ts"]
-    environment:
-      HOST: 0.0.0.0
-      PORT: "4030"
-      DISCOVERY_SERVICES: http://llm:4031,http://markdown:4032,http://embeddings:4033,http://dropbox:4034
-    depends_on:
-      llm:
-        condition: service_started
-      markdown:
-        condition: service_started
-      embeddings:
-        condition: service_started
-      dropbox:
-        condition: service_started
-    healthcheck: *service-health
+  # The website, which serves the facilitator's catalog at /discovery/* -------
 
   web:
     <<: *hardened
@@ -500,14 +482,15 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      DISCOVERY_URL: http://discovery:4030
+      # The facilitator's public catalog routes; its port is never published
+      DISCOVERY_URL: http://facilitator:4022
       HOSTNAME: 0.0.0.0
       PORT: "3000"
     ports:
       - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_WEB_PORT:-3000}:3000"
     mem_limit: 512m
     depends_on:
-      discovery:
+      facilitator:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "docker/healthcheck.mjs", "http://127.0.0.1:3000/"]
@@ -539,10 +522,10 @@ services:
     <<: *job
     profiles: [agent]
     # Reads the list only, so it needs no wallet and pays nothing; flags after the service name are added to these
-    entrypoint: ["node", "--import", "tsx", "apps/agent/src/main.ts", "discover", "--discovery", "http://discovery:4030"]
+    entrypoint: ["node", "--import", "tsx", "apps/agent/src/main.ts", "discover", "--discovery", "http://facilitator:4022"]
     mem_limit: 256m
     depends_on:
-      discovery:
+      facilitator:
         condition: service_healthy
 
   # Paid calls on every starter service, run on demand: docker compose run --rm smoke ------------------------------
