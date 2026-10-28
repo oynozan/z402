@@ -351,10 +351,21 @@ describe("against a gRPC server speaking the lightwalletd protos", () => {
     expect(await c.getTip()).toBe(4547207);
     expect(await c.getLightdInfo()).toEqual({
       chainName: "test",
+      saplingActivationHeight: 280000,
       consensusBranchId: "77190ad9",
       blockHeight: 4547207,
       version: "v0.5.4",
     });
+  });
+
+  test("getLightdInfo reads the Sapling activation height as a number", async () => {
+    const info = { ...INFO, chainName: "main", saplingActivationHeight: "419200" };
+    const mainnet = await startFakeLwd({ lightdInfo: info });
+    try {
+      expect((await connect(mainnet.url).getLightdInfo()).saplingActivationHeight).toBe(419200);
+    } finally {
+      mainnet.close();
+    }
   });
 
   test("getTip and getLightdInfo failures are ChainUnavailableError even for a not-found answer", async () => {

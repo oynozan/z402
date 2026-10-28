@@ -20,6 +20,8 @@ export type RawTx =
 
 export interface LightdInfo {
   chainName: string;
+  /** Tells the networks apart, 419200 on mainnet and 280000 on testnet, while a regtest picks its own */
+  saplingActivationHeight: number;
   consensusBranchId: string;
   blockHeight: number;
   version: string;
@@ -42,6 +44,7 @@ interface BlockIdMsg {
 }
 interface LightdInfoMsg {
   chainName: string;
+  saplingActivationHeight: string;
   consensusBranchId: string;
   blockHeight: string;
   version: string;
@@ -169,6 +172,7 @@ export function createLightwalletdClient(o: { url: string; rpcDeadlineMs?: numbe
         const info = await call<LightdInfoMsg>((options, done) => stub.GetLightdInfo({}, options, done));
         return {
           chainName: info.chainName,
+          saplingActivationHeight: Number(info.saplingActivationHeight),
           consensusBranchId: info.consensusBranchId,
           blockHeight: Number(info.blockHeight),
           version: info.version,
