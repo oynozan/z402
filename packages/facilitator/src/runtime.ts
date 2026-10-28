@@ -120,7 +120,8 @@ function assemble(o: RuntimeOptions, { ledger, state, release }: OpenLedger): Pr
     id: providerId(o.network, o.payTo),
     network: o.network,
     payTo: o.payTo,
-    facilitator: new x402Facilitator().register(o.network, scheme),
+    // The facilitator hosts the Bazaar, so /supported lists the extension
+    facilitator: new x402Facilitator().register(o.network, scheme).registerExtension({ key: "bazaar" }),
     pollNow: () => (closed ? Promise.resolve() : watcher.pollNow()),
     start: () => {
       if (!closed) watcher.start();

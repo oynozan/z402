@@ -233,7 +233,13 @@ async function serve(app: ReturnType<typeof createFacilitatorApp>) {
 
 /** createFacilitatorApp over one provider, the operator, who answers to TOKEN and to nobody else */
 function appOver(facilitator: x402Facilitator, over: Partial<AppOptions> = {}) {
-  const operator: Tenant = { id: providerId(NETWORK, PAY_TO), network: NETWORK, payTo: PAY_TO, facilitator };
+  const operator: Tenant = {
+    id: providerId(NETWORK, PAY_TO),
+    network: NETWORK,
+    payTo: PAY_TO,
+    facilitator,
+    extra: () => ({}),
+  };
   return createFacilitatorApp({
     operator,
     tenantOf: (authorization) => (authorization === `Bearer ${TOKEN}` ? operator : undefined),
@@ -262,7 +268,7 @@ describe("GET /supported", () => {
           },
         },
       ],
-      extensions: [],
+      extensions: ["bazaar"],
       signers: { "zcash:*": [] },
     });
   });
@@ -349,6 +355,7 @@ describe("GET /providers/me", () => {
       network: "zcash:testnet",
       payTo: testnetPayTo,
       facilitator: new x402Facilitator(),
+      extra: () => ({}),
     };
     const url = await serve(createFacilitatorApp({ operator: tenant, tenantOf: () => tenant }));
     const res = await call(url, "/providers/me");
