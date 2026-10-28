@@ -71,7 +71,7 @@ cp .env.example .env   # fill in Z402_PAY_TO and Z402_FACILITATOR_TOKEN
 pnpm exec tsx --env-file=.env src/main.ts
 ```
 
-Under `docker compose up` the service is configured by `docker/env/dropbox.env` and then this directory's `.env`, which wins. Compose sets the facilitator, the payTo, the port and the price itself, and puts `DROPBOX_DIR` on the `dropbox-data` volume and `DROPBOX_LWD_URL` at Zaino, so leave those two commented out in `.env` there.
+Under `docker compose up` the service is configured by `docker/env/dropbox.env` and then this directory's `.env`, which wins. Compose sets the facilitator, the payTo and the port itself, and puts `DROPBOX_DIR` on the `dropbox-data` volume and `DROPBOX_LWD_URL` at Zaino, so leave those two commented out in `.env` there.
 
 The ready line goes to stdout, the logs to stderr:
 

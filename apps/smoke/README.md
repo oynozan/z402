@@ -47,19 +47,19 @@ The synthetic file is the header of one X25519 recipient (`age-encryption.org/v1
 A failing run, shortened:
 
 ```
-llm start 200 31842 ms chunk 0 "Once upon a time, there lived a lighthouse keeper named Elias." (500 zat)
-llm continue 200 1910 ms chunk 1 " Every night he climbed the stairs to light the lamp" (500 zat)
-markdown get 200 412 ms "Example Domain" 1256 chars (500 zat)
+llm start 200 31842 ms chunk 0 "Once upon a time, there lived a lighthouse keeper named Elias." (200 zat)
+llm continue 200 1910 ms chunk 1 " Every night he climbed the stairs to light the lamp" (200 zat)
+markdown get 502 15012 ms FAIL expected 200, got 502: fetch_failed (not charged)
 embeddings embed 413 12 ms FAIL expected 200, got 413: too_many_tokens (not charged)
 dropbox upload 201 40 ms id q3Zs0mYbT7cWpAxK1nGhUw, 1192 bytes, held until block 1052 (500 zat)
-dropbox hold 502 75 ms FAIL expected 200, got 502: provider_failed (charged 500 zat)
-dropbox fetch 200 5 ms 1192 bytes identical, expires at block 1052
+dropbox hold 200 31 ms held until block 1062 (500 zat)
+dropbox fetch 200 5 ms 1192 bytes identical, expires at block 1062
 dropbox delete 204 4 ms deleted, then 404
-session uregtest1etw…35axkz cumulative 3000 zat after 5 paid calls
-smoke FAILED: 2 of 8 steps failed (embeddings embed, dropbox hold)
+session uregtest1etw…35axkz cumulative 1400 zat after 4 paid calls
+smoke FAILED: 2 of 8 steps failed (markdown get, embeddings embed)
 ```
 
-`<service> <step> <status> <ms> ms <detail>`, where the status is the HTTP status (`ERR` when there was none) and `ms` the time of the whole step, a first deposit included. A paid step that passed ends with what that call cost, which is its service's price (the run above was under compose, at 500 zat a call). A failed step says `FAIL` and why. For a paid call it also says whether it was charged: a refusal before the voucher costs nothing, while a failure after it is counted by the stock client and paid for with its next voucher (spec section 3.4), so `charged` marks a service that should have refused earlier. The last lines give what each session vouchered in all, one line per merchant (services that share a merchant share its session and its deposit), and the verdict. These lines go to stdout. The payment client's progress (the wallet balance, the deposit and its confirmation, which can take a minute on regtest) goes to stderr, as do errors.
+`<service> <step> <status> <ms> ms <detail>`, where the status is the HTTP status (`ERR` when there was none) and `ms` the time of the whole step, a first deposit included. A paid step that passed ends with what that call cost, which is its service's price. A failed step says `FAIL` and why. For a paid call it also says whether it was charged: a refusal before the voucher costs nothing, while a failure after it is counted by the stock client and paid for with its next voucher (spec section 3.4), so `charged` marks a service that should have refused earlier. The last lines give what each session vouchered in all, one line per merchant (services that share a merchant share its session and its deposit), and the verdict. Here markdown refused before the voucher, so its merchant (provider 2) never got a session; with two merchants paid, the run's paid-call count comes once, on its own line under the sessions. These lines go to stdout. The payment client's progress (the wallet balance, the deposit and its confirmation, which can take a minute on regtest) goes to stderr, as do errors.
 
 Exit status: `0` every step passed, `1` a step failed or the wallet could not be used (unreadable, or under 125,000 zat for one deposit), `2` a flag error. Ctrl-C (exit 130) or SIGTERM (143) gives up on the call in flight, closes the wallet and ends the run; a second signal quits at once. An uploaded drop is then left to expire.
 

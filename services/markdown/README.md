@@ -31,10 +31,10 @@ its own API key, as an outside provider would, while the other starter services 
   `scripts/register-provider.mjs` registers the address's view-only keys with `POST /providers` and writes the key to
   a file without printing it.
 
-The facilitator takes registrations from its multi-provider release on
-([design](../../docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md), section 4.1). Until then, and in
-compose until provider 2 is wired there, the service runs on the operator's address and token like the others. Its
-routes are declared to the facilitator's catalog under whichever key it holds.
+In compose, the `markdown-register` job does this from provider 2's own keys and keeps the key while it works
+([docs/deploy.md](../../docs/deploy.md#providers)). The routes are declared to the facilitator's catalog under that key,
+so the catalog lists them at provider 2's address ([design](../../docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md),
+sections 4.1 and 4.4).
 
 ## Refused before payment
 
