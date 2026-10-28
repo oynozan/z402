@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /*
  * Renders public/coin.png, the picture under the hero's Dither Veil. A thick gold coin seen at a three-quarter angle,
- * with a reeded edge, a raised rim and a raised Z, lit like a studio product shot on the page ground (#161616), so the
- * veil reads the edge of the picture as a plain matte and the cursor reveals gold.
+ * with a reeded edge, a raised rim and the z402 mark raised on its face, a square cut in two by a Z, lit like a studio
+ * product shot on the page ground (#161616), so the veil reads the edge of the picture as a plain matte and the cursor
+ * reveals gold.
  *
  * Each pixel is supersampled. A ray is clipped to the coin's bounding slab and cylinder, then sphere traced through a
  * signed distance field in the coin's own frame. A hit is shaded as metal, Schlick Fresnel over a gold F0 times an
@@ -43,7 +44,8 @@ const REL_UP = 0.026;
 const REL_ROUND = 0.01;
 const REEDS = 132;
 const REED_DEPTH = 0.0055;
-const Z_SCALE = 1.16;
+/* Half the side of the mark's square, which keeps its corners well inside the rim */
+const MARK_HALF = 0.46;
 const BOUND_R = 1.01;
 const BOUND_Z = HALF_T + RIM_UP + REL_UP + 0.01;
 
@@ -63,7 +65,7 @@ const SHIFT_Y = 0.02;
 /* Linear #F4B728, so mid tones land on that gold and Fresnel pales it only at grazing angles */
 const F0 = [1.0, 0.523, 0.0234];
 const EXPOSURE = 1.0;
-/* A near-mirror field keeps the softbox gradient, a frosted Z averages it, which is what sets the Z apart */
+/* A near-mirror field keeps the softbox gradient and the frosted mark averages it, so the Z reads as a cut through it */
 const ROUGH = [0.07, 0.06, 0.14, 0.5];
 
 /* Rotation from the coin frame to the world, columns are the coin axes */
@@ -84,26 +86,34 @@ const M = rotation(YAW, PITCH, ROLL);
 
 /* Signed distance field, in the coin frame */
 
-function sdBox2(px, py, bx, by) {
-  const dx = Math.abs(px) - bx;
-  const dy = Math.abs(py) - by;
-  return Math.hypot(Math.max(dx, 0), Math.max(dy, 0)) + Math.min(Math.max(dx, dy), 0);
+/* The mark's two pieces on its 16 unit grid, y down, as src/lib/mark.ts draws them */
+const MARK_PIECES = [
+  [[0, 0], [16, 0], [16, 10], [7.5, 10], [13.5, 4], [0, 4]],
+  [[0, 6], [8.5, 6], [2.5, 12], [16, 12], [16, 16], [0, 16]],
+].map((piece) => piece.map(([x, y]) => [((x - 8) / 8) * MARK_HALF, ((8 - y) / 8) * MARK_HALF]));
+
+/** Signed distance to a simple polygon, negative inside */
+function sdPolygon(px, py, v) {
+  let d = (px - v[0][0]) ** 2 + (py - v[0][1]) ** 2;
+  let sign = 1;
+  for (let i = 0, j = v.length - 1; i < v.length; j = i, i++) {
+    const ex = v[j][0] - v[i][0];
+    const ey = v[j][1] - v[i][1];
+    const wx = px - v[i][0];
+    const wy = py - v[i][1];
+    const t = Math.min(Math.max((wx * ex + wy * ey) / (ex * ex + ey * ey), 0), 1);
+    d = Math.min(d, (wx - ex * t) ** 2 + (wy - ey * t) ** 2);
+    const above = py >= v[i][1];
+    const below = py < v[j][1];
+    const left = ex * wy > ey * wx;
+    if ((above && below && left) || (!above && !below && !left)) sign = -sign;
+  }
+  return sign * Math.sqrt(d);
 }
 
-const DIAG_LEN = Math.hypot(0.72, 0.5);
-const DIAG_NX = -0.5 / DIAG_LEN;
-const DIAG_NY = 0.72 / DIAG_LEN;
-
-/** The Z with a short stroke above and below, in face coordinates */
+/** The mark, in face coordinates */
 function sdGlyph(x, y) {
-  const px = x / Z_SCALE;
-  const py = y / Z_SCALE;
-  const top = sdBox2(px, py - 0.31, 0.36, 0.07);
-  const bottom = sdBox2(px, py + 0.31, 0.36, 0.07);
-  const diag = Math.max(Math.abs(DIAG_NX * px + DIAG_NY * py) - 0.082, Math.abs(py) - 0.31, Math.abs(px) - 0.36);
-  const tickTop = sdBox2(px, py - 0.445, 0.042, 0.066);
-  const tickBottom = sdBox2(px, py + 0.445, 0.042, 0.066);
-  return Math.min(top, bottom, diag, tickTop, tickBottom) * Z_SCALE;
+  return Math.min(sdPolygon(x, y, MARK_PIECES[0]), sdPolygon(x, y, MARK_PIECES[1]));
 }
 
 function roundedProfile(qx, qz, round) {

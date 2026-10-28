@@ -74,6 +74,7 @@ of time and any other path under `/docs` is a 404.
 |---|---|---|
 | `DISCOVERY_URL` | `http://127.0.0.1:4022` | at request time, by the pages and the proxy: the facilitator, which hosts the Bazaar |
 | `NEXT_PUBLIC_REPO_URL` | unset | at build time; when set, the header and footer link to it as GitHub, and the docs' `<Source>` links files under its `/blob/main/` |
+| `NEXT_PUBLIC_SITE_URL` | unset | at build time; the public origin, such as `https://z402.example`, that the share image's URL is made absolute against. Unset, Next.js uses `http://localhost:3000` and warns |
 | `PORT`, `HOSTNAME` | `3000`, `0.0.0.0` | by the standalone server |
 
 ## Build and check
@@ -94,6 +95,9 @@ its references so a clean checkout type-checks without it.
 
 ## Files worth knowing
 
+- `src/lib/mark.ts` is the z402 mark, a gold square cut in two by a Z, which the header, `src/app/icon.svg`,
+  `src/app/apple-icon.tsx`, `src/app/opengraph-image.tsx` and the coin draw. The share image is set in Manrope from
+  `src/app/fonts`, cut to Basic Latin, under the SIL Open Font License (`OFL.txt` there).
 - `public/coin.png` is drawn by `scripts/render-coin.mjs` (no dependencies, about 20 s), rerun it after changing it.
 - `src/components/dither-veil/` is React Bits' Dither Veil, vendored under its own license (`LICENSE.md` there).
 - `src/components/live/catalog.tsx` is the services catalog the landing and `/services` share; `src/lib/catalog.ts`

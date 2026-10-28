@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { CSSProperties } from "react";
 import { textOf } from "@/lib/format";
+import { MARK_PATH_15 } from "@/lib/mark";
 import { MenuToggle, NavLink, type NavItem } from "./nav";
 
 const HOW: NavItem = { href: "/#how", label: "How it works" };
@@ -16,6 +17,15 @@ function repoItem(): NavItem | null {
 
 export function Wordmark() {
   return <span className="wordmark">z402</span>;
+}
+
+/** The z402 mark at the wordmark's size, in the text color it is given */
+export function Mark() {
+  return (
+    <svg className="mark" viewBox="0 0 15 15" aria-hidden="true" focusable="false">
+      <path d={MARK_PATH_15} fill="currentColor" />
+    </svg>
+  );
 }
 
 /** pay.sh's section badge, the number, a tick, then the name */
@@ -43,6 +53,7 @@ export function Header() {
     <header className="section nav">
       <div className="frame nav-bar">
         <Link className="nav-brand" href="/" aria-label="z402 home">
+          <Mark />
           <Wordmark />
         </Link>
         <nav className="nav-links" aria-label="Main" style={{ "--links": links.length } as CSSProperties}>

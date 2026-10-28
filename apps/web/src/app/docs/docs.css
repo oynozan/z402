@@ -1,7 +1,7 @@
 /*
  * The docs, in the site's grid: a 240px sidebar and a 240px "On this page" rail on the frame's quarter lines, so the
  * rail's edge meets the header's GET STARTED cell, and a 720px prose column centred between them. Hairlines, radius 0,
- * the site's uppercase labels, and lime only where the site uses it: the current page, a pointer, a copied state.
+ * the site's uppercase labels, and gold only where the site uses it: the current page, a pointer, a copied state.
  */
 
 :root {
@@ -125,7 +125,7 @@
     color var(--t);
 }
 .side-link[aria-current="page"] {
-  background: var(--lime);
+  background: var(--accent);
   color: var(--inverse);
   font-weight: 500;
 }
@@ -211,7 +211,7 @@
   color: var(--text);
 }
 .toc-link[aria-current="location"]::before {
-  background: var(--lime);
+  background: var(--accent);
 }
 .toc-fold {
   display: none;
@@ -545,7 +545,7 @@
     color var(--t);
 }
 .code-tab[aria-selected="true"] {
-  background: var(--lime);
+  background: var(--accent);
   color: var(--inverse);
 }
 .code-tab[aria-selected="true"]:focus-visible {
@@ -1222,7 +1222,7 @@ html:has(.search-dialog[open]) {
   font-weight: 600;
 }
 .search-row[aria-selected="true"] {
-  background: var(--lime);
+  background: var(--accent);
 }
 .search-row[aria-selected="true"] :is(.search-row-path, .search-row-title, .search-row-text, mark) {
   color: var(--inverse);
@@ -1265,23 +1265,23 @@ html:has(.search-dialog[open]) {
   .crumb-link:hover,
   .search-esc:hover,
   .docs-mobile-search:hover {
-    background: var(--lime);
+    background: var(--accent);
     color: var(--inverse);
   }
   .md-link:hover,
   .source:hover .md-code {
-    color: var(--lime-hover);
-    text-decoration-color: var(--lime);
+    color: var(--accent-hover);
+    text-decoration-color: var(--accent);
   }
   .md-link-out:hover .glyph-out,
   .source:hover .glyph-out {
-    color: var(--lime-hover);
+    color: var(--accent-hover);
   }
   .source:hover .md-code {
-    border-color: var(--lime);
+    border-color: var(--accent);
   }
   :is(a.card, .pager-link):hover {
-    background: var(--lime);
+    background: var(--accent);
   }
   :is(a.card, .pager-link):hover :is(.card-head, .card-head .glyph, .card-text, .pager-label, .pager-title) {
     color: var(--inverse);
@@ -1299,7 +1299,7 @@ html:has(.search-dialog[open]) {
     color: var(--text);
   }
   :is(a.card, .pager-link):active {
-    background: var(--lime);
+    background: var(--accent);
   }
   :is(a.card, .pager-link):active :is(.card-head, .card-head .glyph, .card-text, .pager-label, .pager-title) {
     color: var(--inverse);

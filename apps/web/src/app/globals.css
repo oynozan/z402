@@ -1,8 +1,8 @@
 /*
  * pay.sh's dark grid. One 1440px column between two hairline rails, sections stacked with no gap, every boundary a single
  * 1px hairline of 8% white, content inset 24px from each cell (20px on a phone). The first column is 480px everywhere, so
- * its line runs from the header to the footer. Radius 0, no shadow but the tooltip's, and one lime accent that only
- * answers a pointer, marks the active filter or the copied state, and draws the caret and the focus ring.
+ * its line runs from the header to the footer. Radius 0, no shadow but the tooltip's, and one accent, Zcash's gold, that
+ * only answers a pointer, marks the active filter or the copied state, and draws the caret, the focus ring and the mark.
  */
 
 @import "tailwindcss";
@@ -24,10 +24,12 @@
   --line: #ffffff14;
   --grid-line: #ffffff29;
   --hatch: repeating-linear-gradient(-45deg, #262626 0 1px, #0000 1px 7px);
-  --lime: #a2ef5c;
-  --lime-hover: #b9f385;
+  /* Black on the gold is 11.7:1, the gold on the page 11.7:1 and on --alt 10.7:1 */
+  --accent: #f4b728;
+  --accent-hover: #f8c356;
   --up: #69d691;
-  --starting: #f1d357;
+  /* A lemon yellow, so a stale service still reads as a warning and never as the gold beside it */
+  --starting: #e4e660;
   --down: #fd7c48;
   --orange: #ff7651;
   --green: #4bef79;
@@ -84,15 +86,15 @@ button {
   touch-action: manipulation;
 }
 :focus-visible {
-  outline: 1px solid var(--lime);
+  outline: 1px solid var(--accent);
   outline-offset: -2px;
 }
-/* A ring inside a lime fill turns black so it still shows */
+/* A ring inside a gold fill turns black so it still shows */
 :is(.filter[aria-pressed="true"], .copy-cell[data-copied], .copy-btn[data-copied], .nav-toggle[data-open]):focus-visible {
   outline-color: var(--inverse);
 }
 ::selection {
-  background: var(--lime);
+  background: var(--accent);
   color: var(--inverse);
 }
 code,
@@ -174,9 +176,21 @@ pre {
   display: flex;
   flex: none;
   align-items: center;
+  gap: 8px;
   width: var(--col);
   padding: 0 var(--inset);
   border-right: 1px solid var(--line);
+}
+/*
+ * As tall as the wordmark's figures. Centred a pixel low, it runs from 17px to 32px in the 48px bar, the figures' top
+ * and baseline, so its rows land on whole pixels
+ */
+.mark {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  color: var(--accent);
 }
 .wordmark {
   font: 600 20px/20px var(--sans);
@@ -235,7 +249,7 @@ pre {
     linear-gradient(currentColor 0 0) 0 5px / 100% 2px no-repeat, linear-gradient(currentColor 0 0) 0 10px / 100% 2px no-repeat;
 }
 .nav-toggle[data-open] {
-  background: var(--lime);
+  background: var(--accent);
   color: var(--inverse);
 }
 .nav-drop {
@@ -465,7 +479,7 @@ pre {
     color var(--t);
 }
 .copy-cell[data-copied] {
-  background: var(--lime);
+  background: var(--accent);
   color: var(--inverse);
 }
 .copy-btn {
@@ -485,7 +499,7 @@ pre {
     color var(--t);
 }
 .copy-btn[data-copied] {
-  background: var(--lime);
+  background: var(--accent);
   color: var(--inverse);
 }
 
@@ -518,10 +532,10 @@ pre {
   inset: -6px;
 }
 .tip-q[data-open] {
-  background: var(--lime);
+  background: var(--accent);
   color: var(--inverse);
 }
-/* Outside the cell, where a lime ring shows on the page even while the cell is lime */
+/* Outside the cell, where a gold ring shows on the page even while the cell is gold */
 .tip-q:focus-visible {
   outline-offset: 2px;
 }
@@ -722,13 +736,13 @@ pre {
   left: var(--at);
   width: 2px;
   margin-left: -1px;
-  background: var(--lime-hover);
+  background: var(--accent-hover);
 }
 .bar-c span {
   position: absolute;
   bottom: calc(100% + 4px);
   left: 50%;
-  color: var(--lime-hover);
+  color: var(--accent-hover);
   font: 400 12px/16px var(--mono);
   white-space: nowrap;
   transform: translateX(-50%);
@@ -751,7 +765,7 @@ pre {
   .replay[data-step="2"] .step:nth-child(2) .ptag-key,
   .replay[data-step="3"] .step:nth-child(3) .ptag-key,
   .replay[data-step="4"] .step:nth-child(4) .ptag-key {
-    background: var(--lime-hover);
+    background: var(--accent-hover);
     color: var(--inverse);
   }
   .replay[data-step="1"] .step:nth-child(1) .ln {
@@ -867,7 +881,7 @@ pre {
   border: 0;
   background: none;
   color: var(--text);
-  caret-color: var(--lime);
+  caret-color: var(--accent);
   font-weight: 400;
   text-transform: none;
 }
@@ -916,7 +930,7 @@ pre {
   font-variant-numeric: tabular-nums;
 }
 .filter[aria-pressed="true"] {
-  background: var(--lime);
+  background: var(--accent);
   color: var(--inverse);
 }
 .filter-fill {
@@ -1057,7 +1071,7 @@ pre {
   transform: rotateX(-90deg);
   transform-origin: 50% 50% calc(var(--row-h) / -2);
   opacity: 0;
-  color: var(--lime-hover);
+  color: var(--accent-hover);
   font: 300 14px/20px var(--sans);
   letter-spacing: 1px;
 }
@@ -1069,7 +1083,7 @@ pre {
   left: 12px;
   width: 2px;
   height: 12px;
-  background: var(--lime-hover);
+  background: var(--accent-hover);
   transform: translateY(-50%);
   animation: caret 1s step-end infinite;
 }
@@ -1152,12 +1166,12 @@ pre {
 }
 @keyframes flash-a {
   from {
-    color: var(--lime-hover);
+    color: var(--accent-hover);
   }
 }
 @keyframes flash-b {
   from {
-    color: var(--lime-hover);
+    color: var(--accent-hover);
   }
 }
 
@@ -1483,7 +1497,7 @@ pre {
   .copy-cell:hover,
   .tip-q:hover,
   .foot-link:hover {
-    background: var(--lime);
+    background: var(--accent);
     color: var(--inverse);
   }
   .nav-cta:hover,
@@ -1526,7 +1540,7 @@ pre {
   .copy-cell:active,
   .tip-q:active,
   .foot-link:active {
-    background: var(--lime);
+    background: var(--accent);
     color: var(--inverse);
   }
   .nav-cta:active {
@@ -1617,20 +1631,20 @@ pre {
   /* On the cells, since the 3D name cell paints over anything the row draws */
   .svc-row:has(.svc-toggle:focus-visible) > td {
     box-shadow:
-      inset 0 1px var(--lime),
-      inset 0 -1px var(--lime);
+      inset 0 1px var(--accent),
+      inset 0 -1px var(--accent);
   }
   .svc-row:has(.svc-toggle:focus-visible) > td:first-child {
     box-shadow:
-      inset 1px 0 var(--lime),
-      inset 0 1px var(--lime),
-      inset 0 -1px var(--lime);
+      inset 1px 0 var(--accent),
+      inset 0 1px var(--accent),
+      inset 0 -1px var(--accent);
   }
   .svc-row:has(.svc-toggle:focus-visible) > td:last-child {
     box-shadow:
-      inset -1px 0 var(--lime),
-      inset 0 1px var(--lime),
-      inset 0 -1px var(--lime);
+      inset -1px 0 var(--accent),
+      inset 0 1px var(--accent),
+      inset 0 -1px var(--accent);
   }
 }
 
@@ -1692,8 +1706,9 @@ pre {
   .frame {
     border-inline: 0;
   }
+  /* The mark, its gap and the wordmark, 67px, between the cell's 16px insets */
   .nav-brand {
-    width: 88px;
+    width: 100px;
     padding: 0 16px;
   }
   .nav-links {
@@ -1806,7 +1821,7 @@ pre {
     background: var(--alt);
   }
   .svc .svc-row:has(.svc-toggle:focus-visible) {
-    outline: 1px solid var(--lime);
+    outline: 1px solid var(--accent);
     outline-offset: -1px;
   }
   .svc .svc-row > td[data-label]::before {
@@ -1940,5 +1955,11 @@ pre {
   }
   .step-text {
     padding: 24px var(--inset) 32px;
+  }
+}
+/* Under 360px GET STARTED gives up its 176px, so the brand, the link and the menu still fit a 320px phone */
+@media (max-width: 359px) {
+  .nav-cta {
+    min-width: 0;
   }
 }
