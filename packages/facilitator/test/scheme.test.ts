@@ -926,6 +926,25 @@ describe("a cached unmined deposit once the tip reaches its expiry", () => {
     expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({ invalidReason: REASON.depositDead });
   });
 
+  test("a fresh read that finds it gone is dead only once a tip read before that read reached the expiry", async () => {
+    let lagging = false;
+    const r = rig((view) => ({
+      // The read is answered by a backend two blocks behind the one the watcher asked
+      tip: async () => (lagging ? (await view.tip()) - 2 : view.tip()),
+      inspect: (txid) => view.inspect(txid),
+    }));
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+    expect(r.watcher.lastTip()).toBe(1041);
+    lagging = true;
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.depositNotFound,
+    });
+  });
+
   test("a fresh read that fails answers chain_unavailable, never dead", async () => {
     const r = rig();
     const d = await cachedNearExpiry(r);
@@ -937,6 +956,38 @@ describe("a cached unmined deposit once the tip reaches its expiry", () => {
       isValid: false,
       invalidReason: REASON.chainUnavailable,
     });
+  });
+});
+
+describe("a deposit mined in its expiry block just after a read saw it in the mempool", () => {
+  test("counts, since the read took the tip before the inspect", async () => {
+    let d = "";
+    let mineAfterInspect = false;
+    const r = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => {
+        const answer = await view.inspect(txid);
+        // Block 1041, the deposit's expiry, arrives with it right after this inspect saw it unmined
+        if (txid === d && mineAfterInspect) {
+          mineAfterInspect = false;
+          r.chain.mine(1);
+        }
+        return answer;
+      },
+    }));
+    d = send(r.chain);
+    r.chain.hold(d);
+    r.chain.mine(40);
+    r.chain.unhold(d);
+    mineAfterInspect = true;
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.awaitingConfirmation,
+    });
+    expect(r.chain.height).toBe(1041);
+    expect((await r.s.verify(pay(500n, { txid: d }), req())).isValid).toBe(true);
+    expect(await r.s.settle(pay(500n, { txid: d }), req())).toMatchObject({ success: true, transaction: d });
   });
 });
 

@@ -1,8 +1,9 @@
 import { ChainUnavailableError, type ChainView, type FoundInspection } from "@z402/protocol";
 
+/** `tip` was read before the inspect, so an unmined or missing answer speaks for a chain at least that high */
 export type Lookup =
   | { kind: "found"; inspection: FoundInspection; tip: number }
-  | { kind: "not_found" }
+  | { kind: "not_found"; tip: number }
   | { kind: "unavailable"; error: unknown };
 
 /** Looks deposits up on the chain within a time budget, sharing and limiting the work */
@@ -94,6 +95,7 @@ export class DepositResolver {
       return { kind: "unavailable", error: new ChainUnavailableError("deposit lookups are saturated") };
     }
     let outage: ChainUnavailableError | undefined;
+    let missed: Extract<Lookup, { kind: "not_found" }> | undefined;
     let reads = 0;
     for (;;) {
       // A slot is held only around a read, so lookups sleeping between polls leave it to the others
@@ -106,11 +108,12 @@ export class DepositResolver {
           return this.peek(txid) ?? { kind: "unavailable", error };
         }
         reads++;
-        const found = await this.#read(txid);
-        if (found !== undefined) {
-          this.#remember(txid, found);
-          return found;
+        const read = await this.#read(txid);
+        if (read.kind === "found") {
+          this.#remember(txid, read);
+          return read;
         }
+        missed = read;
       } catch (e) {
         if (!(e instanceof ChainUnavailableError)) throw e;
         outage = e;
@@ -121,15 +124,18 @@ export class DepositResolver {
       if (!(this.#now() - startedAt + this.#pollMs <= budgetMs)) break;
       await this.#sleep(this.#pollMs);
     }
-    const lookup: Lookup = outage === undefined ? { kind: "not_found" } : { kind: "unavailable", error: outage };
+    // A read that failed may have been the one to find it, so any outage leaves the lookup unavailable
+    const lookup: Lookup =
+      outage === undefined && missed !== undefined ? missed : { kind: "unavailable", error: outage };
     this.#remember(txid, lookup);
     return lookup;
   }
 
-  /** One inspect, and the tip once the deposit is found, undefined while the chain shows nothing */
-  async #read(txid: string): Promise<Lookup | undefined> {
+  /** The tip, then one inspect, so a block mined in between can only make the answer look older than it is */
+  async #read(txid: string): Promise<Extract<Lookup, { kind: "found" | "not_found" }>> {
+    const tip = await this.#chain.tip();
     const inspection = await this.#chain.inspect(txid);
-    return inspection.found ? { kind: "found", inspection, tip: await this.#chain.tip() } : undefined;
+    return inspection.found ? { kind: "found", inspection, tip } : { kind: "not_found", tip };
   }
 
   #recentlyMissed(txid: string): boolean {

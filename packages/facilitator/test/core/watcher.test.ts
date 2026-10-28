@@ -215,6 +215,35 @@ describe("a deposit that expires or disappears", () => {
     ]);
   });
 
+  test("a deposit mined in its expiry block just after a pass saw it in the mempool is not called dead", async () => {
+    let mineAfter = "";
+    const { fake, batches, watcher, credit } = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => {
+        const answer = await view.inspect(txid);
+        // Block 1041, its expiry, arrives with it right after this inspect, which a tip read first leaves out
+        if (txid === mineAfter) {
+          mineAfter = "";
+          fake.mine();
+        }
+        return answer;
+      },
+    }));
+    const txid = await credit();
+    fake.hold(txid);
+    fake.mine(40);
+    fake.unhold(txid);
+    mineAfter = txid;
+
+    await watcher.pollNow();
+    expect(batches).toEqual([]);
+    await watcher.pollNow();
+
+    expect(batches).toEqual([
+      [{ t: "status", txid, status: "confirmed", minedHeight: 1041, confirmations: 1, deadAtTip: null }],
+    ]);
+  });
+
   test("a dead deposit is re-inspected for 20 blocks and not after", async () => {
     const { fake, view, watcher, credit } = rig();
     const txid = await credit();

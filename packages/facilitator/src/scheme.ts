@@ -310,7 +310,8 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     const cLast = this.#state.session(v.sessionKey)?.cLast ?? 0n;
     const known = v.depositTxid === undefined ? undefined : (fresh ?? this.#resolver.peek(v.depositTxid));
     // The newest tip any read has seen, so an older lookup cannot keep a deposit alive past its expiry
-    const tip = Math.max(this.#watcher.lastTip() ?? 0, known?.kind === "found" ? known.tip : 0);
+    const read = known === undefined || known.kind === "unavailable" ? 0 : known.tip;
+    const tip = Math.max(this.#watcher.lastTip() ?? 0, read);
     // A pending deposit whose lookups keep failing stops counting at its expiry, and only the watcher records it
     const credited = this.#state.depositsOf(v.sessionKey).map((d) => asOfTip(d, tip));
     const presented = this.#presented(v, known, tip, earlier);
@@ -388,8 +389,8 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     }
     if (this.#resolver.inFlight(txid)) return { kind: "in_flight" };
     if (known?.kind === "not_found") {
-      // Gone once the tip passed the expiry an earlier read saw, as the watcher would call it
-      if (expiredUnmined(earlier, tip)) return unusable(REASON.depositDead, CANNOT_CREDIT.message, false);
+      // Gone once a tip read before this read had reached the expiry an earlier read saw, as the watcher would call it
+      if (expiredUnmined(earlier, known.tip)) return unusable(REASON.depositDead, CANNOT_CREDIT.message, false);
       return unusable(REASON.depositNotFound, "the chain has no such tx", true);
     }
     // A lookup that rejected unexpectedly or aged out leaves no result, which is as retryable as an outage

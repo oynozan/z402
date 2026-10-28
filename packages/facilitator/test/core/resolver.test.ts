@@ -71,24 +71,43 @@ describe("DepositResolver.lookup", () => {
     expect(chain.calls.get(T)).toBe(3);
   });
 
-  test("reads the tip once, after the inspection that found the deposit", async () => {
+  /** A chain that gains a block right after every inspect, so a tip read after one is newer than what it saw */
+  function growing(answers: TxInspection[]) {
     const calls: string[] = [];
-    const answers = [NOT_FOUND, NOT_FOUND, found(T)];
+    let height = 1000;
     const chain: ChainView = {
       inspect: async () => {
         calls.push("inspect");
+        height++;
         return answers.shift() ?? NOT_FOUND;
       },
       tip: async () => {
         calls.push("tip");
-        return 1234;
+        return height;
       },
     };
+    return { chain, calls };
+  }
+
+  test("reads the tip before every inspect, and a found answer carries the tip read before it", async () => {
+    const { chain, calls } = growing([NOT_FOUND, NOT_FOUND, found(T)]);
     const clock = fakeClock();
 
-    await new DepositResolver({ chain, now: clock.now, sleep: clock.sleep }).lookup(T, 15000);
+    const lookup = await new DepositResolver({ chain, now: clock.now, sleep: clock.sleep }).lookup(T, 15000);
 
-    expect(calls).toEqual(["inspect", "inspect", "inspect", "tip"]);
+    expect(calls).toEqual(["tip", "inspect", "tip", "inspect", "tip", "inspect"]);
+    expect(lookup).toMatchObject({ kind: "found", tip: 1002 });
+  });
+
+  test("a not-found answer carries the tip read before its last inspect", async () => {
+    const { chain, calls } = growing([NOT_FOUND, NOT_FOUND]);
+    const clock = fakeClock();
+
+    const resolver = new DepositResolver({ chain, now: clock.now, sleep: clock.sleep, pollMs: 1000 });
+    const lookup = await resolver.lookup(T, 1000);
+
+    expect(calls).toEqual(["tip", "inspect", "tip", "inspect"]);
+    expect(lookup).toEqual({ kind: "not_found", tip: 1001 });
   });
 
   test.each([
@@ -99,14 +118,14 @@ describe("DepositResolver.lookup", () => {
   ])("a budget of %i ms ends not_found after %i inspect call(s)", async (budget, inspects) => {
     const { chain, resolver } = rig();
 
-    expect(await resolver.lookup(T, budget)).toEqual({ kind: "not_found" });
+    expect(await resolver.lookup(T, budget)).toEqual({ kind: "not_found", tip: 1000 });
     expect(chain.calls.get(T)).toBe(inspects);
   });
 
   test.each([0, -5, NaN])("a budget of %d makes exactly one inspect call", async (budget) => {
     const { chain, resolver } = rig();
 
-    expect(await resolver.lookup(T, budget)).toEqual({ kind: "not_found" });
+    expect(await resolver.lookup(T, budget)).toEqual({ kind: "not_found", tip: 1000 });
     expect(chain.calls.get(T)).toBe(1);
   });
 
@@ -137,14 +156,15 @@ describe("DepositResolver.lookup", () => {
     expect(chain.calls.get(T)).toBe(3);
   });
 
-  test("a found deposit whose tip cannot be read is unavailable, never found without a tip", async () => {
+  test("a read whose tip cannot be read makes no inspect, so a deposit is never found without a tip", async () => {
     const { chain, resolver } = rig();
     const error = outage();
     chain.script(T, [found(T)]);
-    vi.spyOn(chain, "tip").mockRejectedValue(error);
+    const tip = vi.spyOn(chain, "tip").mockRejectedValue(error);
 
     expect(errorOf(await resolver.lookup(T, 2000))).toBe(error);
-    expect(chain.calls.get(T)).toBe(3);
+    expect(tip).toHaveBeenCalledTimes(3);
+    expect(chain.calls.get(T)).toBeUndefined();
   });
 
   test("an error that is not a ChainUnavailableError rejects the lookup without retrying", async () => {
@@ -185,7 +205,7 @@ describe("single-flight", () => {
     const failing = resolver.lookup(T, 0);
     const queued = resolver.lookup(txidOf(2), QUEUED_BUDGET_MS);
     await expect(failing).rejects.toThrow("boom");
-    expect(await queued).toEqual({ kind: "not_found" });
+    expect(await queued).toEqual({ kind: "not_found", tip: 1000 });
 
     chain.script(T, [found(T)]);
     expect(await resolver.lookup(T, 0)).toMatchObject({ kind: "found" });
@@ -205,9 +225,9 @@ describe("concurrency limit", () => {
     const resolver = new DepositResolver({ chain, maxConcurrent: limit });
 
     const lookups = [1, 2, 3, 4, 5, 6].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
 
-    expect(await Promise.all(lookups)).toEqual(lookups.map(() => ({ kind: "not_found" })));
+    expect(await Promise.all(lookups)).toEqual(lookups.map(() => ({ kind: "not_found", tip: 1000 })));
     expect(chain.maxInFlight).toBe(peak);
   });
 
@@ -218,9 +238,9 @@ describe("concurrency limit", () => {
     const resolver = new DepositResolver({ chain, maxConcurrent: 2 });
 
     const early = [1, 2, 3, 4].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
-    await vi.advanceTimersByTimeAsync(150);
-    const late = [5, 6].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
     await vi.advanceTimersByTimeAsync(300);
+    const late = [5, 6].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
+    await vi.advanceTimersByTimeAsync(600);
     await Promise.all([...early, ...late]);
 
     expect(chain.maxInFlight).toBe(2);
@@ -233,7 +253,7 @@ describe("concurrency limit", () => {
     const resolver = new DepositResolver({ chain, maxConcurrent: 2 });
 
     const lookups = [1, 2, 3, 4, 5].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
     await Promise.all(lookups);
 
     expect([...chain.calls.keys()]).toEqual([1, 2, 3, 4, 5].map(txidOf));
@@ -303,7 +323,7 @@ describe("concurrency limit", () => {
     void resolver.lookup(txidOf(1), 0);
     await vi.advanceTimersByTimeAsync(8000);
 
-    expect(await second).toEqual({ kind: "not_found" });
+    expect(await second).toEqual({ kind: "not_found", tip: 1000 });
     expect(chain.calls.get(txidOf(2))).toBe(1);
   });
 });
@@ -386,7 +406,7 @@ describe("negative cache", () => {
 
     clock.advance(gap);
 
-    expect(await resolver.lookup(T, 15000)).toEqual({ kind: "not_found" });
+    expect(await resolver.lookup(T, 15000)).toEqual({ kind: "not_found", tip: 1000 });
     expect((chain.calls.get(T) ?? 0) - before).toBe(inspects);
   });
 
@@ -453,7 +473,7 @@ describe("startBackground and peek", () => {
 
     await resolver.lookup(T, 0);
 
-    expect(resolver.peek(T)).toEqual({ kind: "not_found" });
+    expect(resolver.peek(T)).toEqual({ kind: "not_found", tip: 1000 });
   });
 
   test("peek reports an unavailable result with its error", async () => {
@@ -463,7 +483,7 @@ describe("startBackground and peek", () => {
 
     await resolver.lookup(T, 0);
 
-    expect(errorOf(resolver.peek(T) ?? { kind: "not_found" })).toBe(error);
+    expect(errorOf(resolver.peek(T) ?? { kind: "not_found", tip: 0 })).toBe(error);
   });
 
   test("forget drops that txid's result and keeps the others", async () => {
@@ -551,7 +571,7 @@ describe("inFlight", () => {
 
     const lookup = resolver.lookup(T, 0);
     expect(resolver.inFlight(T)).toBe(true);
-    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(150);
     expect(resolver.inFlight(T)).toBe(true);
     expect(resolver.inFlight(txidOf(2))).toBe(false);
 
@@ -588,11 +608,11 @@ describe("inFlight", () => {
     expect(chain.calls.has(txidOf(2))).toBe(false);
     expect(resolver.inFlight(txidOf(2))).toBe(true);
 
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(200);
     expect(resolver.inFlight(txidOf(1))).toBe(false);
     expect(resolver.inFlight(txidOf(2))).toBe(true);
 
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(200);
     await Promise.all([running, queued]);
     expect(resolver.inFlight(txidOf(2))).toBe(false);
   });
@@ -626,7 +646,7 @@ describe("inFlight", () => {
 });
 
 describe("a slow chain", () => {
-  test("lookup(t, 30000) with 4 s per call settles within 30000 + 5000 ms", async () => {
+  test("lookup(t, 30000) with 4 s per call settles within the budget and one read of two calls", async () => {
     vi.useFakeTimers();
     const chain = new ScriptedChain();
     chain.delayMs = 4000;
@@ -638,23 +658,23 @@ describe("a slow chain", () => {
 
     await vi.advanceTimersByTimeAsync(35000);
 
-    expect(settled).toEqual({ kind: "not_found" });
-    expect(chain.calls.get(T)).toBe(7);
+    expect(settled).toEqual({ kind: "not_found", tip: 1000 });
+    expect(chain.calls.get(T)).toBe(4);
   });
 });
 
 describe("the bound when the deposit appears on the last poll", () => {
-  test("a lookup settles within the budget plus one inspect and one tip", async () => {
+  test("a lookup settles within the budget plus one read, its tip and its inspect", async () => {
     vi.useFakeTimers();
     const delay = 4000;
     const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     let inspects = 0;
-    // An inspect costs two RPCs (GetTransaction, then the tip for zdecrypt) and the tip after it one
+    // An inspect costs two RPCs (GetTransaction, then the tip for zdecrypt) and the tip before it one
     const chain: ChainView = {
       inspect: async (txid) => {
         await wait(2 * delay);
         inspects += 1;
-        return inspects === 4 ? found(txid) : NOT_FOUND;
+        return inspects === 3 ? found(txid) : NOT_FOUND;
       },
       tip: async () => {
         await wait(delay);
@@ -672,8 +692,8 @@ describe("the bound when the deposit appears on the last poll", () => {
     await vi.advanceTimersByTimeAsync(budget + 3 * delay);
 
     expect(settled?.lookup).toMatchObject({ kind: "found", tip: 1234 });
-    expect(inspects).toBe(4);
-    expect(settled?.at).toBeLessThanOrEqual(budget + 2 * delay + delay);
+    expect(inspects).toBe(3);
+    expect(settled?.at).toBeLessThanOrEqual(budget + delay + 2 * delay);
   });
 });
 
@@ -711,7 +731,7 @@ describe("against a FakeChain", () => {
     const fake = new FakeChain();
     const resolver = new DepositResolver({ chain: fake.viewFor(PAY_TO) });
 
-    expect(await resolver.lookup(T, 0)).toEqual({ kind: "not_found" });
+    expect(await resolver.lookup(T, 0)).toEqual({ kind: "not_found", tip: 1000 });
 
     fake.setUnavailable(true);
     expect(await resolver.lookup(txidOf(2), 0)).toEqual({
