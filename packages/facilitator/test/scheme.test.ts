@@ -106,7 +106,7 @@ class CheckedScheme extends PrepaidVoucherFacilitatorScheme {
 }
 
 /** The scheme over a real resolver, watcher, ledger and state that all read `view` */
-function wire(view: ChainView, o: { fakeTime?: boolean } = {}) {
+function wire(view: ChainView, o: { fakeTime?: boolean; config?: Partial<SchemeConfig> } = {}) {
   const clock = fakeClock();
   const fake = o.fakeTime ?? true;
   const ledger = new Ledger();
@@ -125,7 +125,7 @@ function wire(view: ChainView, o: { fakeTime?: boolean } = {}) {
   const onFatal = vi.fn<(err: unknown) => void>();
   const log = vi.fn<(msg: string, err?: unknown) => void>();
   const s = new CheckedScheme({
-    config: CONFIG,
+    config: { ...CONFIG, ...o.config },
     state,
     resolver,
     watcher,
@@ -137,9 +137,9 @@ function wire(view: ChainView, o: { fakeTime?: boolean } = {}) {
 }
 
 /** A FakeChain behind the scheme, its view optionally wrapped */
-function rig(wrap: (view: ChainView) => ChainView = (view) => view) {
+function rig(wrap: (view: ChainView) => ChainView = (view) => view, config: Partial<SchemeConfig> = {}) {
   const chain = new FakeChain({ expiryDelta: 40 });
-  return { chain, ...wire(wrap(chain.viewFor(PAY_TO))) };
+  return { chain, ...wire(wrap(chain.viewFor(PAY_TO)), { config }) };
 }
 
 type Rig = ReturnType<typeof rig>;
@@ -795,6 +795,64 @@ describe("a credited pending deposit past its expiry while its lookups fail", ()
   });
 });
 
+describe("the refresh before a refusal", () => {
+  test("waits at most refreshWaitMs, even behind a watcher pass that is held up", async () => {
+    const gate = gated();
+    const r = rig(gate.wrap, { refreshWaitMs: 50 });
+    await opened(r);
+    const theirs = send(r.chain, { memo: `${OTHER_SESSION_KEY}:1` });
+    expect((await r.s.verify(pay(500n, { txid: theirs, seed: OTHER_SEED }), req())).isValid).toBe(true);
+    expect(await r.s.settle(pay(500n, { txid: theirs, seed: OTHER_SEED }), req())).toMatchObject({ success: true });
+    gate.close(theirs);
+    const pass = r.watcher.pollNow();
+    const refresh = vi.spyOn(r.watcher, "refreshSession");
+
+    const slow = new Promise<"still waiting">((resolve) => setTimeout(() => resolve("still waiting"), 1000));
+    const answer = await Promise.race([r.s.verify(pay(100500n), req()), slow]);
+
+    expect(answer).toMatchObject({ isValid: false, invalidReason: REASON.awaitingConfirmation, payer: K });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    gate.open(theirs);
+    await pass;
+  });
+
+  test("is skipped when the session's only presented deposit is still being looked up", async () => {
+    const r = rig();
+    const txid = "ee".repeat(32);
+    const refresh = vi.spyOn(r.watcher, "refreshSession");
+    // A second lookup of the same txid starts the moment the first one ends, as a concurrent verify would start it
+    const first = r.resolver.lookup(txid, 0);
+    void first.then(() => r.resolver.startBackground(txid, WAIT_MS));
+
+    const verdict = await r.s.verify(pay(500n, { txid }), req());
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(verdict).toMatchObject({ isValid: false, invalidReason: REASON.awaitingConfirmation });
+  });
+
+  test("is skipped when the only pending deposit is the presented one, which is not credited yet", async () => {
+    const r = rig();
+    const short = send(r.chain, { expiryDelta: 10 });
+    const refresh = vi.spyOn(r.watcher, "refreshSession");
+
+    expect(await r.s.verify(pay(500n, { txid: short }), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.awaitingConfirmation,
+    });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  test("still runs for a credited pending deposit, which a block can confirm", async () => {
+    const r = rig();
+    await opened(r);
+    const refresh = vi.spyOn(r.watcher, "refreshSession");
+    r.chain.mine();
+
+    expect((await r.s.verify(pay(100500n), req())).isValid).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("a cached definitive failure", () => {
   test("is answered again by an over-limit verify with no new inspect", async () => {
     const r = rig();
@@ -1212,6 +1270,8 @@ describe("advertised terms and configuration", () => {
     ["a payTo of another network", { payTo: `utest1${"q".repeat(60)}` }, /payTo/],
     ["a network that is not Zcash", { network: "eip155:1" as ZcashNetwork }, /network/],
     ["terms the wire cannot carry", { terms: { ...DEMO_TERMS, creditRatioBps: 10001 } }, /terms/],
+    ["a refresh wait below zero", { refreshWaitMs: -1 }, /^refreshWaitMs:/],
+    ["a refresh wait past 60 s", { refreshWaitMs: 60_001 }, /^refreshWaitMs:/],
   ])("the constructor refuses %s", (_, over, field) => {
     const { state, resolver, watcher } = rig();
 

@@ -49,7 +49,7 @@ export interface ApiHandle {
 }
 
 const DEFAULT_HOST = "127.0.0.1";
-/** Covers the facilitator's 30 s wait for an unseen deposit, one 5 s chain deadline and the decryption */
+/** Covers verify's worst case, the 30 s deposit wait, the inspect and tip that end it, and the 5 s refresh bound */
 const FACILITATOR_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_SECONDS = 60;
 const X402_VERSION = 2;

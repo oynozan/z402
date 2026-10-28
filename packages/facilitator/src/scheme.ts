@@ -51,6 +51,8 @@ export interface SchemeConfig {
   terms: Terms;
   /** How long verify waits for the lookup of a deposit the voucher needs */
   depositWaitMs: number;
+  /** How long verify waits for a refresh of the session before refusing, default 5000 (one RPC deadline, §10) */
+  refreshWaitMs?: number;
 }
 
 export interface SchemeDeps {
@@ -105,6 +107,9 @@ type Verdict =
 type Authenticated = { ok: true; voucher: Voucher } | { ok: false; refusal: Refusal };
 
 const FATAL_LOG = "ledger write failed — facilitator must restart";
+const DEFAULT_REFRESH_WAIT_MS = 5000;
+/** The API gives the facilitator 60 s, so no wait of verify may be longer */
+const MAX_WAIT_MS = 60_000;
 const UNEXPECTED_VERIFY: Refusal = { code: REASON.unexpectedVerifyError, message: "the facilitator failed to verify" };
 const UNEXPECTED_SETTLE: Refusal = { code: REASON.unexpectedSettleError, message: "the facilitator failed to settle" };
 const POISONED_VERIFY: Refusal = { code: REASON.unexpectedVerifyError, message: "the facilitator must restart" };
@@ -114,7 +119,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
   readonly scheme = SCHEME;
   readonly caipFamily = "zcash:*";
 
-  readonly #config: SchemeConfig;
+  readonly #config: Required<SchemeConfig>;
   readonly #state: FacilitatorState;
   readonly #resolver: DepositResolver;
   readonly #watcher: ChainWatcher;
@@ -211,10 +216,24 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       verdict = this.#decide(v, lookup);
     }
     if (!verdict.ok && verdict.refresh) {
-      await this.#watcher.refreshSession(v.sessionKey);
+      await this.#refreshed(v.sessionKey);
       verdict = this.#decide(v, lookup);
     }
     return verdict;
+  }
+
+  /** One refresh of the session, given up on after refreshWaitMs since it can queue behind a whole watcher pass */
+  async #refreshed(sessionKey: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const given = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.#config.refreshWaitMs);
+    });
+    try {
+      // refreshSession never rejects, so the race ends with whichever comes first
+      await Promise.race([this.#watcher.refreshSession(sessionKey), given]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Every check up to the signature, after which the caller is known and may see its session */
@@ -298,7 +317,8 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       presented.kind === "usable" || presented.kind === "in_flight" || credited.some((d) => d.status === "pending");
     // A failure the chain has answered for good is not looked up again
     const definitive = presented.kind === "unusable" && !presented.retry;
-    const next = { needsLookup: isNew && !definitive, refresh: live };
+    // A refresh reads only credited deposits, so only a credited pending one can raise the limit after it
+    const next = { needsLookup: isNew && !definitive, refresh: credited.some((d) => d.status === "pending") };
     if (presented.kind === "unusable") return refused(presented.refusal, snapshot, next);
     const over = `cumulativeZat ${v.cNew} is over the limit ${limit}`;
     return live
@@ -425,7 +445,7 @@ function networkOf(requirements: unknown, fallback: Network): Network {
 }
 
 /** Refuses a configuration under which the scheme would misjudge every voucher, naming the field */
-function checkedConfig(c: SchemeConfig): SchemeConfig {
+function checkedConfig(c: SchemeConfig): Required<SchemeConfig> {
   if (!isZcashNetwork(c.network)) throw new Error(`network: expected one of ${ZCASH_NETWORKS.join(", ")}`);
   if (!isValidPayTo(c.payTo, c.network)) throw new Error(`payTo: not a shielded-only unified address for ${c.network}`);
   // A price of 0 would let a replayed voucher pass the increment check
@@ -435,5 +455,12 @@ function checkedConfig(c: SchemeConfig): SchemeConfig {
   } catch (e) {
     throw new Error(`terms: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return { ...c, terms: { ...c.terms } };
+  if (c.refreshWaitMs !== undefined) waitOf("refreshWaitMs", c.refreshWaitMs);
+  return { ...c, terms: { ...c.terms }, refreshWaitMs: c.refreshWaitMs ?? DEFAULT_REFRESH_WAIT_MS };
+}
+
+function waitOf(name: string, ms: number): void {
+  if (!Number.isInteger(ms) || ms < 0 || ms > MAX_WAIT_MS) {
+    throw new Error(`${name}: expected a whole number from 0 to ${MAX_WAIT_MS}`);
+  }
 }
