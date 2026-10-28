@@ -23,6 +23,8 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
+import { Catalog } from "./discovery/catalog.js";
+import { mountBazaar } from "./discovery/routes.js";
 import { keyDigest } from "./providers/apiKey.js";
 import { providerId } from "./providers/id.js";
 import { createRegistrar, RegistrationRefused, type Registrar } from "./providers/register.js";
@@ -81,7 +83,7 @@ export interface FacilitatorHandle {
 }
 
 /** What a route needs of the provider whose key it was given */
-export type Tenant = Pick<ProviderRuntime, "id" | "network" | "payTo" | "facilitator">;
+export type Tenant = Pick<ProviderRuntime, "id" | "network" | "payTo" | "facilitator" | "extra">;
 
 export interface AppOptions {
   /** The operator's provider, whose facilitator answers GET /supported */
@@ -92,6 +94,8 @@ export interface AppOptions {
   register?: Registrar;
   /** Bearer token that POST /providers requires, and left out means anyone may call it */
   registrationToken?: string;
+  /** The Bazaar's catalog, and without one there are no discovery routes */
+  catalog?: Catalog;
   log?: Log;
 }
 
@@ -348,6 +352,20 @@ export function createFacilitatorApp(o: AppOptions): Express {
     res.json({ providerId: id, network, payTo });
   });
 
+  /* The Bazaar, whose routes are in discovery/routes.ts behind the same keys */
+
+  const { catalog } = o;
+  const bazaar =
+    catalog &&
+    mountBazaar(app, {
+      catalog,
+      authenticated,
+      open: noStrangers(tenantOf),
+      jsonBody: jsonBody(),
+      providerOf,
+      log: diagnose,
+    });
+
   app.post("/verify", authenticated, jsonBody(), async (req: Request, res: Response) => {
     const result = await verify(providerOf(res), readRequest(req.body, res.locals.unreadable));
     res.locals.reason = result.invalidReason;
@@ -358,6 +376,8 @@ export function createFacilitatorApp(o: AppOptions): Express {
     const tenant = providerOf(res);
     const result = await settle(tenant, readRequest(req.body, res.locals.unreadable), networkOf(req.body, tenant));
     res.locals.reason = result.errorReason;
+    // The catalog hears of a payment that settled, before the answer goes and without changing it
+    if (result.success) bazaar?.settled(tenant, req.body);
     res.json(result);
   });
 
@@ -529,6 +549,7 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
   let operator: ProviderRuntime;
   let server: Server;
   let register: Registrar | undefined;
+  let catalog: Catalog;
   try {
     operator = await open(o.payTo, o.chain, o.ledgerPath);
     runtimes.push(operator);
@@ -579,6 +600,8 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
     }
 
     await Promise.all(runtimes.map((runtime) => runtime.pollNow()));
+    // Its file is in the providers directory under the registry lock, and without one it is memory only
+    catalog = Catalog.load({ file: registry?.catalogPath(), log: diagnose });
     const tenantOf = (authorization: string | undefined): Tenant | undefined => {
       // Without a token the operator serves a request that carries no header, and never one that carries a bad key
       if (authorization === undefined) return o.authToken === undefined ? operator : undefined;
@@ -590,6 +613,7 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
       tenantOf,
       register,
       registrationToken: providers?.registrationToken,
+      catalog,
       log: o.log,
     });
     server = await listen(app, host, o.port ?? 0, diagnose);
@@ -613,7 +637,14 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
       return (closing ??= new Promise<void>((resolve, reject) => {
         server.close((err) => (err === undefined ? resolve() : reject(err)));
         server.closeIdleConnections();
-      }).finally(releaseAll));
+      }).finally(async () => {
+        // The catalog is written last of all, while the registry lock that covers its file is still held
+        try {
+          await catalog.close();
+        } finally {
+          releaseAll();
+        }
+      }));
     },
   };
 }
