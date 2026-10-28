@@ -4,7 +4,10 @@ import { SNAPSHOT_FINAL_KEEP, type DepositRecord } from "./types.js";
 export function buildSnapshot(a: {
   sessionKey: string;
   cumulativeZat: bigint;
+  /** What the limit counts, each deposit as judged at the tip */
   deposits: DepositRecord[];
+  /** What the snapshot lists, `deposits` unless given */
+  shown?: DepositRecord[];
   terms: Terms;
   tip: number;
 }): SessionSnapshot {
@@ -22,7 +25,7 @@ export function buildSnapshot(a: {
     pendingZat: ramp.pendingZat.toString(),
     creditZat: ramp.creditZat.toString(),
     tip: a.tip,
-    deposits: listed(a.deposits).map(snapshotDeposit),
+    deposits: listed(a.shown ?? a.deposits).map(snapshotDeposit),
   };
 }
 

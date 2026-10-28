@@ -1012,9 +1012,10 @@ describe("a credited pending deposit past its expiry while its lookups fail", ()
 
     const over = await r.s.verify(pay(100500n), req());
     expect(over).toMatchObject({ isValid: false, invalidReason: REASON.depositRequired });
+    // Left out of the limit, and listed as the pending the watcher last recorded (R49)
     expect(sessionOf(over)).toMatchObject({
       limitZat: "0",
-      deposits: [expect.objectContaining({ txid: d1, status: "dead" })],
+      deposits: [expect.objectContaining({ txid: d1, status: "pending" })],
     });
     expect(await r.s.settle(pay(1000n), req())).toMatchObject({ success: false, errorReason: REASON.depositRequired });
     expect(await r.s.verify(pay(1000n, { txid: d1 }), req())).toMatchObject({ invalidReason: REASON.chainUnavailable });
@@ -1028,7 +1029,7 @@ describe("a credited pending deposit past its expiry while its lookups fail", ()
     expect(sessionOf(counted)).toMatchObject({ confirmedZat: "100000", limitZat: "125000" });
   });
 
-  test("is listed dead in the snapshot of a settle that succeeds on another deposit", async () => {
+  test("is left out of the limit of a settle that succeeds on another, and listed as last recorded", async () => {
     let d1 = "";
     let failing = false;
     const r = rig((view) => ({
@@ -1057,7 +1058,7 @@ describe("a credited pending deposit past its expiry while its lookups fail", ()
     expect(snapshot.limitZat).toBe("125000");
     expect(snapshot.deposits).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ txid: d1, status: "dead" }),
+        expect.objectContaining({ txid: d1, status: "pending" }),
         expect.objectContaining({ txid: d2, status: "final" }),
       ]),
     );
@@ -1136,6 +1137,18 @@ describe("a presented own deposit past its expiry, which only a fresh read may c
     expect(sessionOf(verified)).toMatchObject({ confirmedZat: "100000", limitZat: "125000" });
     expect(r.state.deposit(d1)).toMatchObject({ status: "confirmed", minedHeight, confirmations });
     expect(await r.s.settle(pay(1000n, { txid: d1 }), req())).toMatchObject({ success: true, transaction: d1 });
+  });
+
+  test("is listed as the pending last recorded, so no snapshot reports a death no read has shown", async () => {
+    const { r, d1 } = await pastExpiry();
+    const listing = expect.objectContaining({ txid: d1, status: "pending", confirmations: 0 });
+
+    const over = await r.s.verify(pay(100500n), req());
+    expect(over).toMatchObject({ isValid: false, invalidReason: REASON.depositRequired });
+    expect(sessionOf(over)).toMatchObject({ limitZat: "0", pendingZat: "0", deposits: [listing] });
+    const presented = await r.s.verify(pay(1000n, { txid: d1 }), req());
+    expect(presented).toMatchObject({ invalidReason: REASON.chainUnavailable });
+    expect(sessionOf(presented)).toMatchObject({ limitZat: "0", pendingZat: "0", deposits: [listing] });
   });
 
   test.each<[string, Answer]>([

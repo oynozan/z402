@@ -410,7 +410,9 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
   }
 
   #snapshot(sessionKey: string, cumulativeZat: bigint, deposits: DepositRecord[], tip: number): SessionSnapshot {
-    return buildSnapshot({ sessionKey, cumulativeZat, deposits, terms: this.#config.terms, tip });
+    // A client copies a listed dead status, so a death judged only at the tip is listed as the watcher last recorded it
+    const shown = deposits.map((d) => (d.status === "dead" ? (this.#state.deposit(d.txid) ?? d) : d));
+    return buildSnapshot({ sessionKey, cumulativeZat, deposits, shown, terms: this.#config.terms, tip });
   }
 
   /** A failed write may have left part of the batch in the file, so nothing is trusted until a restart */
