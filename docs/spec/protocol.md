@@ -1,6 +1,13 @@
 # z402 wire contract
 
-**Version: v1.2.1** (2026-10-28; ACKed by both agents). v1.1 clarified §7.3: only a successful settle acknowledges a deposit, and refusal snapshots are projected and informational. v1.2 does three things:
+**Version: v2.0** (2026-10-28; ACKed by both agents). v2.0 turns the facilitator into a hosted rail for many providers, each with its own `payTo` and its own price per route, and hosts the Bazaar. Nothing the client sends or signs changes: the §3 payload, the §4 voucher, the §5.1 memo, the §7 answers and snapshot, and the §8 codes are kept byte for byte. It is a major version because `/supported` no longer carries `payTo`, and the facilitator accepts any per-route amount, which an API built against v1 refuses at startup. The changes:
+- **Per-route price.** `amount` is set per route by the provider, any canonical zat from 1 to `windowZat` (§2, §6, §10). 500 zat is the demo API's price, not a protocol value (§12).
+- **Providers.** A resource server authenticates with its provider's API key, and `payTo` must be that provider's (§2, §10, §16). Credit is kept per provider (§5.2).
+- **`termsVersion` and `/supported`.** `termsVersion` hashes the rail's terms only, and `/supported` drops `extra.payTo` (§2).
+- **Seams.** `FacilitatorOptions.priceZat` is ignored, `providers` is new, and the API's startup check is `checkProvider` (§15).
+- **Bazaar.** The facilitator serves `GET /discovery/resources` and `GET /discovery/search` (§17), and `apps/discovery` is retired (§14).
+
+Earlier versions. v1.1 clarified §7.3: only a successful settle acknowledges a deposit, and refusal snapshots are projected and informational. v1.2 does three things:
 - **One refusal code.** Every found but unusable txid answers `z402_deposit_memo_mismatch` (§5.2), so a refusal is no oracle on the merchant's viewing key.
 - **Corrections.** §2, §6, §8 and §10.
 - **New facilitator and API rules.** §15: the ledger lock, `onFatal`/`log`, `close()`, token and URL checks, and 405 on paid non-GET requests.
@@ -15,7 +22,7 @@ Drafted by the client agent and reviewed by the facilitator agent. Code may rely
 
 This is the one contract the client library (`@z402/client`) and the merchant side (`@z402/facilitator`, `@z402/server`, `apps/api`) both build against. It refines [mvp-build-doc.md](mvp-build-doc.md) with what research found; where they disagree, this file wins.
 
-**Change process.** Propose the change by message, both agents ACK, then edit this file and bump the version line. `v0-*` drafts may change; `v1` is frozen, and code may rely on every value in it.
+**Change process.** Propose the change by message, both agents ACK, then edit this file and bump the version line. `v0-*` drafts may change; from `v1` on, code may rely on every value in the current version.
 
 **Evidence.** Facilitator track: `docs/research/*.md`. Client track: `docs/research/client/*.md`. The SDK facts were re-read from the `@x402/core` and `@x402/fetch` 2.28.0 sourcemaps.
 
@@ -52,16 +59,16 @@ This is the one contract the client library (`@z402/client`) and the merchant si
 
 | Field | Rule |
 |---|---|
-| `amount` | Price per call, zat, canonical decimal ≥ 1. Demo value pending the user's decision (§12). |
-| `payTo` | Merchant shielded-only unified address, validated **per network** with `isValidPayTo(ua, network)`. Allowed HRPs come from `zcash_address` 0.14.0 `src/constants.rs`, as R0 or R2 shielded-only: regtest `uregtest` / `zuregtest`; testnet `utest` / `zutest`; mainnet `u` / `zu`. The body is bech32 lowercase `[02-9ac-hj-np-z]+`. R2 transparent-including HRPs (`turegtest`, `tutest`, `tu`) are always rejected. |
+| `amount` | Price of this call, zat, canonical, `1 ≤ amount ≤ extra.windowZat`, set per route by the provider. The facilitator accepts any such amount (v2.0). |
+| `payTo` | Merchant shielded-only unified address, validated **per network** with `isValidPayTo(ua, network)`. Allowed HRPs come from `zcash_address` 0.14.0 `src/constants.rs`, as R0 or R2 shielded-only: regtest `uregtest` / `zuregtest`; testnet `utest` / `zutest`; mainnet `u` / `zu`. The body is bech32 lowercase `[02-9ac-hj-np-z]+`. R2 transparent-including HRPs (`turegtest`, `tutest`, `tu`) are always rejected. It must be the `payTo` registered to the API key the resource server presents (§16). |
 | `extra.windowZat` | One deposit, zat, decimal string. |
 | `extra.creditRatioBps` | Integer basis points, 0–10000 (2500 = 25 %). Replaces the doc's float `creditRatio: 0.25`. |
 | `extra.creditCapZat` | Credit cap, zat, decimal string. |
 | `extra.zeroConfMinExpiryBlocks` | Integer. A pending deposit earns zero-conf credit only with at least this many blocks before expiry (§5.3). |
-| `extra.termsVersion` | Opaque 16-hex string owned by the facilitator. The server scheme copies it into requirements. The API reads its terms from the facilitator's `/supported`. Its startup check validates only the format of `termsVersion` and does not compare terms between the two sides. Open item: move `termsVersion()` into `@z402/protocol` so it can. The client ignores it (`parseTerms` drops unknown keys) but echoes `extra` unchanged, as the stock client does. |
+| `extra.termsVersion` | The first 16 hex of sha256(JSON `["z402-terms-v2", encodeTerms(terms)]`): the rail's terms only, so it moves with neither `payTo` nor price (v2.0). The facilitator owns it. The server scheme copies it into requirements. The API reads its terms from the facilitator's `/supported`, and its startup check validates only the format of `termsVersion`. The client ignores it (`parseTerms` drops unknown keys) but echoes `extra` unchanged, as the stock client does. |
 
 - `extra` is **static per route**. Per-session values must never appear in requirements: the server matches the client's echo of `extra`, so a changing value breaks matching.
-- The facilitator owns these terms. It advertises them through `getExtra()` → `/supported`, and the server scheme copies them in `enhancePaymentRequirements`.
+- The facilitator owns these terms, which are rail-wide: every provider gets the same. It advertises them through `getExtra()` → `/supported`, and the server scheme copies them in `enhancePaymentRequirements`. From v2.0, `/supported`'s `extra` carries the terms and `termsVersion`, never `payTo`.
 - `extra` must not contain `paymentFlow` or `assetTransferMethod`. The flow is the default `authorization`: verify → handler → settle.
 - The facilitator reads terms from the API's `paymentRequirements`, never from `paymentPayload.accepted`, which the client could pad with extra keys.
 
@@ -109,7 +116,10 @@ sig     = Ed25519 (RFC 8032, pure) over message, 64 bytes, lowercase hex
 - The client always deposits exactly `windowZat` in one output.
 
 ### 5.2 Crediting
-- The credit unit is the lowercase txid. It is consumed once, globally, under the key `<network>:<txid>` (e.g. `zcash:regtest:<txid>`). The facilitator ledger file is per network (`.data/facilitator-ledger.<network>.jsonl`). Delete the regtest ledger after `docker compose down -v`, because regtest heights restart. **One transaction funds one session.**
+- The credit unit is the lowercase txid. It is consumed once **per provider**, under the key `<network>:<payTo>:<txid>` (v2.0).
+  - Each provider has its own ledger file. The operator's stays at `Z402_LEDGER` (default `.data/facilitator-ledger.<network>.jsonl`). A registered provider's is `ledgers/<providerId>.jsonl` under `Z402_PROVIDERS_DIR` (default `.data/providers.<network>`).
+  - Delete the regtest ledgers after `docker compose down -v`, because regtest heights restart.
+  - **A transaction funds at most one session per `payTo`**, and credits each `payTo` with its own outputs only, so nothing is counted twice. The client's deposits have one output, so they fund one session.
 - Credited value = the sum of outputs to `payTo` whose memo matches this session's pattern. Outputs with other memos are ignored.
 - Rejections:
 
@@ -153,10 +163,11 @@ D_conf  = Σ valueZat of deposits with status confirmed | final
 D_pend  = min(windowZat, Σ valueZat of deposits with status pending ∧ zeroConf)
 credit  = min(creditCapZat, ⌊ D_conf × creditRatioBps / 10000 ⌋)
 limit   = D_conf + D_pend + credit                         (BigInt, zatoshi)
-accept  ⇔ c_new − c_last ≥ amount  ∧  c_new ≤ limit           (c_last = last SETTLED voucher)
+accept  ⇔ c_new − c_last ≥ amount  ∧  c_new ≤ limit           (c_last = last SETTLED voucher; amount = this call's requirements.amount)
 ```
 
 - The limit is inclusive.
+- `amount` is the price of the call being paid (v2.0). Routes of one provider with different prices share one session, and each voucher must advance by its own call's price.
 - The increment rule is lenient (`≥`): a client that overshoots by one price is still accepted, which absorbs lost responses.
 - A new session has `c_last = 0` and limit 0, so its first voucher must carry a deposit.
 - One implementation, `computeLimit()` in `@z402/protocol`, is imported by both sides.
@@ -257,12 +268,12 @@ A facilitator timeout reaches the client as HTTP 502 with **neither** header, wh
 
 ## 10. Facilitator rules (summary; detail in the facilitator's own spec)
 
-- Bind to `127.0.0.1`. Start before the API (the API exits if `/supported` lacks the route's scheme and network).
+- Bind to `127.0.0.1`. Start before the API (the API exits if `checkProvider` fails, §16, or if `/supported` lacks the route's scheme and network).
 - `/verify` is read-only; `/settle` re-checks and commits synchronously, with no `await` between check and write.
 - Tip-driven poller: `GetLatestBlock` every 5 s, re-checking deposits on each tip change.
 - Refresh-before-refuse: before refusing a session that has a pending deposit, re-query it. Bounded by one RPC deadline (5 s), at most once per 5 s per session.
 - 5 s deadline per RPC. Transport errors map to `z402_chain_unavailable`. Only the three definitive not-found rows of the §15 `getTransaction` table (`isDefinitiveNotFound()`) mean not-found.
-- Check `payTo`, `amount` and the terms against its own config: `invalid_payment_requirements` on mismatch.
+- The bearer API key picks the provider. `payTo` must be that provider's; `amount` a canonical zat in [1, `windowZat`]; the terms equal to the rail's. Anything else answers `invalid_payment_requirements` (v2.0).
 
 ## 11. Chain access facts
 
@@ -282,7 +293,7 @@ A facilitator timeout reaches the client as HTTP 502 with **neither** header, wh
 
 - NU6.3 (Ironwood) is active, branch `0x37a5165b`. NU7 activates at 3,543,405 (branch `0x77190ad9`), about 2026-11-05/06, after the deadline.
 - Endpoint: `zec.rocks:443` (TLS) or a regional `na|eu|ap|sa.zec.rocks:443`. Use one host for both wallet and facilitator. Blocks average about 75 s.
-- For real money, the facilitator needs a lightwalletd the merchant operates, not the public zec.rocks. It trusts the endpoint on whether a deposit exists and how deep it is mined. A mainnet facilitator warns at startup when `Z402_LWD_URL` is not a loopback host.
+- For real money, the facilitator needs a lightwalletd its operator runs, not the public zec.rocks. It trusts the endpoint on whether a deposit exists and how deep it is mined, for every provider it serves. A mainnet facilitator warns at startup when `Z402_LWD_URL` is not a loopback host.
 
 ### 11.2 Public testnet (research record, live-verified 2026-10-27; unusable for funding)
 
@@ -299,6 +310,8 @@ A facilitator timeout reaches the client as HTTP 502 with **neither** header, wh
 - **Crates.** Only crates on the `zcash_protocol 0.11` / `zcash_primitives 0.31` / `orchard 0.16` line parse NU7 transactions; `zcash_protocol ≤ 0.10.6` fails on every transaction.
 
 ## 12. Demo terms (option A chosen by the user, 2026-10-27)
+
+From v2.0 the price is per route (§2), and each service sets its own (the starter services charge 100 to 1,000 zat). 500 zat stays the demo API's `GET /chunk` price, which the table below chose; it is not a protocol value. The live two-provider check pays 500 at provider 1 and 800 at provider 2.
 
 | Option | Price `p` | Honest run | Cheat run | Simulated |
 |---|---|---|---|---|
@@ -399,9 +412,11 @@ pnpm workspace, ESM (`"type": "module"`), TypeScript strict with `NodeNext` (rel
 | `crates/zdecrypt` | Rust decryptor | facilitator agent |
 | `.tools/bin/` (gitignored) | locally built binaries (`zingo-cli`, `zdecrypt`) | whoever builds them |
 
-Neither agent edits the other's paths; requests go by message.
+The services agent owns `services/*`, `packages/service-kit`, `apps/web`, `apps/smoke`, `docker/` and `compose.yaml`. From v2.0 `apps/discovery` is retired: the Bazaar is the facilitator's (§17).
 
-## 15. Integration seams (owned by the facilitator agent; consumed by the client agent's e2e harness and status check)
+No agent edits another's paths; requests go by message.
+
+## 15. Integration seams (owned by the facilitator agent; consumed by the client agent's e2e harness and status check, and by the services agent's kit)
 
 ```ts
 // @z402/lightwalletd
@@ -431,7 +446,12 @@ createLightwalletdClient(opts: { url: string /* http:// = plaintext, https:// = 
 ```ts
 // @z402/facilitator
 interface FacilitatorOptions {
-  network: ZcashNetwork; chain: ChainView; payTo: string; priceZat: bigint; terms: Terms;
+  network: ZcashNetwork; chain: ChainView /* the operator's */; payTo: string /* the operator's */; terms: Terms;
+  priceZat?: bigint /* ignored from v2.0: each provider prices its own routes */;
+  providers?: {   /* registered providers (§16); without it, POST /providers answers 403 registration_disabled */
+    dir: string; chainFor(p: { payTo: string; uivk: string }): ChainView; owns(p: { payTo: string; uivk: string }): Promise<boolean>;
+    max?: number /* 32, the operator not counted; 0 disables registration */; registrationToken?: string;
+  };
   authToken?: string; ledgerPath?: string; host?: string /* 127.0.0.1 */; port?: number /* 0 */;
   pollIntervalMs?: number /* 5000 */; depositWaitMs?: number /* 30000: cross-backend first-sight skew reaches ~16 s */;
   onFatal?: (err: unknown) => void /* once, on the first failed ledger write; the host should exit and restart to replay the file */;
@@ -443,7 +463,23 @@ startFacilitator(o: FacilitatorOptions): Promise<{ url: string; pollNow(): Promi
 interface ApiOptions { network: ZcashNetwork; facilitatorUrl: string /* "" throws */; facilitatorToken?: string; payTo: string; priceZat: bigint; host?: string; port?: number }
 startApi(o: ApiOptions): Promise<{ url: string; close(): Promise<void> }>
 // both throw unless isValidPayTo(payTo, network); apps/e2e passes NETWORK_REGTEST
+
+// @z402/server
+checkProvider(o: { facilitatorUrl: string; token?: string /* the API key, sent as a bearer */; payTo: string; network: string;
+  fetch?: typeof fetch; timeoutMs?: number /* 5000 */ }): Promise<void>   // calls GET /providers/me (§16)
+class ProviderCheckError extends Error { readonly field: "facilitatorToken" | "payTo" | "facilitatorUrl"; readonly retryable: boolean }
 ```
+
+`checkProvider` outcomes. Callers branch on `field` and `retryable`, never on the message, which never echoes the token:
+
+| Outcome | `field` | `retryable` |
+|---|---|---|
+| connection error, timeout, a body that breaks off, 5xx, 408 or 429 | `facilitatorUrl` | true |
+| 404 (a facilitator without the route), any other status, or an unreadable 200 | `facilitatorUrl` | false |
+| 401 or 403 | `facilitatorToken` | false |
+| 200, but another `payTo` or network | `payTo` | false |
+| before any request: a `facilitatorUrl` that is not http(s) or carries credentials | `facilitatorUrl` | false |
+| before any request: a `token` that is not a b64token | `facilitatorToken` | false |
 
 - The paid route is `GET /chunk`. Its body is `{ chunk: number, cumulativeZat: string, data: string }` with `chunk = cumulativeZat / price`, so it never moves on refused calls.
 - Other methods:
@@ -459,7 +495,45 @@ startApi(o: ApiOptions): Promise<{ url: string; close(): Promise<void> }>
 - **Plaintext URLs.** Off regtest, `http://` is allowed only to a loopback host, both for the facilitator's `Z402_LWD_URL` and for the API's `facilitatorUrl`; use `https://` otherwise. Regtest keeps plaintext to any host, for compose networks.
 - **The keys file.** Startup refuses a `Z402_MERCHANT_KEYS_FILE` on mainnet when it holds the spending seed (`seedHex`) or the full viewing key (`ufvk`). On other networks it warns once instead. Give the facilitator only `uivk` and `orchardOnlyAddress`, or set `Z402_UIVK` and `Z402_PAY_TO`. A non-loopback `Z402_FACILITATOR_HOST` also warns.
 - **`close()`** closes idle connections at once and resolves once in-flight requests have finished. A connection that was busy when `close()` ran can hold it for up to the 5 s keep-alive timeout after its response (about 3.3 s with undici). After it resolves, nothing writes the ledger. A settle that is already being served while `close()` runs is still recorded.
-- **The token.** `authToken`, and the API's `facilitatorToken`, must be an RFC 6750 b64token: letters, digits and `-._~+/`, optionally followed by `=` padding. Any other value makes startup refuse it.
+- **The token.** `authToken`, the API's `facilitatorToken`, every API key and the registration token must be an RFC 6750 b64token: letters, digits and `-._~+/`, optionally followed by `=` padding. Any other value makes startup refuse it. The operator's API key is `authToken` (`Z402_FACILITATOR_TOKEN`).
 - **The facilitator URL.** `startApi` refuses a `facilitatorUrl` that carries credentials; pass `facilitatorToken` instead.
-- The API reads its terms from the facilitator's `/supported`.
+- The API calls `checkProvider` at startup, before it reads its terms from the facilitator's `/supported`, and refuses to start on any `ProviderCheckError`. A kit service retries while `retryable`.
 - Start order: `await startFacilitator(...)`, then `startApi(...)`.
+
+## 16. Providers and API keys (v2.0)
+
+A provider is one `payTo` with its own view-only key (UIVK), API key, runtime and ledger. Each provider, the operator included, prices its own routes and never runs a facilitator.
+
+- **The operator** is the provider configured at startup: `Z402_MERCHANT_KEYS_FILE`, or `Z402_PAY_TO` + `Z402_UIVK`. Its API key is `Z402_FACILITATOR_TOKEN`, and its ledger stays at `Z402_LEDGER`. A facilitator started without `authToken` (embedded tests) treats a request with no `Authorization` header as the operator's. Registered providers always need their key.
+- **Provider id.** The first 16 hex of sha256(`"z402-provider-v1\n" + network + "\n" + payTo`). It is fixed by `payTo`, so a key rotation keeps the provider's ledger and catalog entries.
+- **API key.** `z402_` followed by 43 base64url characters (32 random bytes), a valid b64token. It is shown once, stored only as its sha256, never logged (access-log lines name the `providerId`), and sent as `Authorization: Bearer <apiKey>` on `/verify`, `/settle`, `GET /providers/me` and `POST /discovery/resources`. A request to these routes without a valid key gets `401` with `WWW-Authenticate: Bearer`.
+- **`POST /providers`.** Public unless `Z402_REGISTRATION_TOKEN` is set, in which case `Authorization: Bearer <registration token>` is required.
+  - Body: `{"payTo": "<UA>", "uivk": "<UIVK>", "network"?: "<network>"}`. `payTo` must pass `isValidPayTo`, `uivk` must match the network's UIVK pattern, and `network`, if given, must be the facilitator's.
+  - The UIVK must own `payTo` (zdecrypt `owns`: `ownedByKey: true`, `hasTransparent: false`).
+  - Registrations run one at a time. A new provider's runtime (ledger lock, header, replay, first poll, watcher) opens before the registry is written, and only then is the key issued.
+  - Answer: `201 {"providerId","network","payTo","apiKey"}`. The UIVK is never echoed.
+  - **Rotation.** Registering a registered `payTo` again, with a key that owns it, answers `200` with the same shape and a new key. The old key stops working at once, on every route. This is also how a lost key is recovered.
+  - **Refusals**, with body `{"error": "<code>", "message": "<text>"}`: `400 invalid_request` (the message names the field), `401 unauthorized` (registration token missing), `403 not_owner` (the UIVK does not own `payTo`, or `payTo` has a transparent receiver), `403 provider_limit` (`Z402_MAX_PROVIDERS`, default 32, operator not counted, `0` disables registration), `403 registration_disabled` (no providers directory), and `409 operator` (`payTo` is the operator's).
+  - `scripts/register-provider.mjs --keys <view-only keys file> --facilitator <url> --out <key file>` does this from a merchant-keygen file and saves the key with mode 0600. It never prints the key, the UIVK or the registration token.
+- **`GET /providers/me`.** Authenticated with the API key. Answers `200 {"providerId","network","payTo"}`, or `401 {"error":"unauthorized"}` for an unknown key and for a rotated-out key from the moment it is rotated. `checkProvider` (§15) calls it.
+- **Isolation.** The key picks the provider's runtime, and a `paymentRequirements.payTo` other than that provider's answers `invalid_payment_requirements` (§10). Deposits decrypt only with that provider's UIVK, and credits live in that provider's ledger.
+- **On disk** (`Z402_PROVIDERS_DIR`, mode 0700): `registry.json` (0600; written atomically, under the same heartbeat lock as ledgers), `ledgers/<providerId>.jsonl` with their locks, and `discovery.json` (§17). A malformed registry, one for another network, or an entry whose UIVK no longer owns its `payTo` refuses startup.
+- **Failure scope.** `onFatal` is process-wide: a failed ledger write or a lost lock in any runtime exits the process, and the restart replays every ledger.
+
+## 17. Discovery, the Bazaar (v2.0)
+
+The facilitator hosts the x402 Bazaar with the exact `@x402/extensions` 2.28.0 shapes: what `withBazaar(client).extensions.bazaar.listResources()` and `search()` call. `/supported` lists `"bazaar"` in `extensions`.
+
+- **`GET /discovery/resources`** (public). Query: `type`, `payTo`, `scheme`, `network`, `extensions` (one key name the item must carry), `limit` (default 20, clamped to 1–100) and `offset` (default 0); `limit` and `offset` must be non-negative decimal integers, else `400`. Answer: `{"x402Version":2,"items":[…],"pagination":{"limit","offset","total"}}`, ordered by resource, then method, then provider id.
+- **`GET /discovery/search`** (public). `query` (required, 1–256 characters) is a case-insensitive substring of `resource`, `description`, `serviceName` or any tag; the same filters and `limit` apply; `cursor` is an opaque decimal offset. Answer: `{"x402Version":2,"resources":[…],"partialResults":false,"pagination":{"limit","cursor": <next or null>}}`.
+- **`POST /discovery/resources`** (API key). Body `{"items":[…]}`, 1–32 standard `DiscoveryResource` entries without `lastUpdated`. One bad item refuses the whole call with `400 {"error":"invalid_request","index":i,"message":…}`. A valid item is upserted, its `lastSeen` set to now, and the answer is the items as served. The kit re-declares every 30 s, which is the liveness signal. The facilitator never fetches a provider URL.
+- **Served item.** The standard `DiscoveryResource` (`resource`, `type: "http"`, `x402Version: 2`, `accepts`, `lastUpdated`, and the optional `description`, `mimeType`, `serviceName`, `tags`, `iconUrl`, `extensions`), plus two fields beyond the standard:
+  - `lastSeen` (ISO 8601): the provider's latest declaration of the item, absent for items listed only from payments. Readers derive up (under 90 s), stale (under 10 min) and down (older).
+  - `paidCallsToday`: the successful settles for the item since 00:00 UTC. It is an aggregate only; no session, key or amount per call is ever exposed.
+- **Sources.**
+  1. **Declarations** by the provider, as above.
+  2. **Settled payments.** Each successful settle bumps `lastUpdated` and `paidCallsToday` on the provider's item whose canonical resource and method match: the resource from `paymentPayload.resource.url` and `extensions.bazaar.routeTemplate`, the method from `extensions.bazaar.info.input.method`. The stock client copies the 402's `extensions` into the payment. A provider that has never declared anything is listed from its payments, as standard Bazaar facilitators do. Once a provider has declared anything, its payments only update matching declared items and never create one, and client-echoed data never overwrites a declared item.
+- **Keying.** The catalog is keyed by (`providerId`, canonical resource, HTTP method). The canonical resource is the URL's origin plus the bazaar `routeTemplate` when it is valid, else the URL's path; query and fragment are dropped. Two providers listing the same URL get two items, each with its own `payTo`. The resource's own 402 stays authoritative: clients pay what it says, not what the catalog says.
+- **Validation.** `resource` is an absolute http(s) URL of at most 2048 characters with no userinfo. Each of 1–4 `accepts` entries must be `prepaid-voucher` on the facilitator's network, asset `ZEC`, the provider's `payTo`, an `amount` as in §2, and the rail's terms and `termsVersion`, so the catalog never advertises a payment the facilitator would refuse. Metadata sizes are capped (`description` 512, `mimeType` 128, `serviceName` 1–32 printable ASCII, at most 5 tags of 1–32, `extensions` at most 8 KB), and so are counts: 128 items per provider and 4096 in all.
+- **Privacy.** The access log records the path only, never a query string, so what agents search for stays private.
+- **Persistence.** In memory, written to `discovery.json` at most every 2 s; items neither declared nor paid for 7 days are dropped at load. A corrupt file is set aside and the catalog starts empty.
