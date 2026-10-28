@@ -553,9 +553,13 @@ describe("prices", () => {
     routes: DEFINITION.routes.map((r) => (r.method === "GET" ? { ...r, priceZat } : r)),
   });
 
-  test("each route charges its own price, or else the service's, in its 402 and in /health", async () => {
+  test("each route charges its own price, or else the service's, in its 402, /health and declaration", async () => {
     const stack = await startTestStack({
-      build: async (env) => (await createPaidService({ env, service: priced(700n) })).app,
+      catalog: true,
+      build: async (env) => {
+        const paid = await createPaidService({ env, service: priced(700n) });
+        return { app: paid.app, close: paid.close };
+      },
     });
     running.push(stack);
     const echo = await paymentRequiredOf(`${stack.url}/v1/echo`, "POST");
@@ -568,6 +572,9 @@ describe("prices", () => {
         { method: "GET", path: "/v1/items/:id", probePath: "/v1/items/example", priceZat: "700" },
       ],
     });
+    const catalog = catalogOf(stack);
+    await vi.waitFor(() => expect(catalog.declarations).toHaveLength(1));
+    expect(itemsOf(catalog.declarations[0]).map((i) => i.accepts[0]?.amount)).toEqual(["500", "700"]);
   });
 
   test("a price outside 1 to the facilitator's windowZat stops the start, naming Z402_PRICE_ZAT", async () => {
@@ -601,6 +608,7 @@ interface Bazaar {
 /** A declared item as the stub catalog received it */
 interface Item {
   resource: string;
+  accepts: { amount: string }[];
   extensions: { bazaar: Bazaar };
 }
 
