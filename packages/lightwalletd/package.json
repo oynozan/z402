@@ -16,7 +16,7 @@
     "url": "git+https://github.com/oynozan/z402.git",
     "directory": "packages/lightwalletd"
   },
-  "homepage": "https://z402.net",
+  "homepage": "https://z402.net/docs/guides/pay-from-an-agent",
   "bugs": "https://github.com/oynozan/z402/issues",
   "type": "module",
   "engines": {

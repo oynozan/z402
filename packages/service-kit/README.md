@@ -1,5 +1,7 @@
 # @z402/service-kit
 
+Documentation: https://z402.net/docs/reference/service-kit (all z402 docs: https://z402.net/docs)
+
 Builds a paid HTTP service from a list of routes. It wires the stock x402 Express middleware to the z402 `prepaid-voucher` scheme, checks the provider's API key and the facilitator's terms at start-up, lists the routes in the facilitator's Bazaar, and serves `GET /health`.
 
 ```bash
@@ -21,7 +23,6 @@ await serve(service.app, env);
 
 TypeScript users also need `@types/express` for the `Express` type in the declarations. `@z402/service-kit/testing` (`startTestStack`) is available only inside the z402 repository, because it runs the real facilitator, which needs the `zdecrypt` binary.
 
-- Documentation: https://z402.net/docs (guide: https://z402.net/docs/guides/service-kit, reference: https://z402.net/docs/reference/service-kit)
-- Source and issues: https://github.com/oynozan/z402
+Source and issues: https://github.com/oynozan/z402
 
 MIT licensed.

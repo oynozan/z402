@@ -226,13 +226,13 @@ importers:
 
   packages/client:
     dependencies:
-      '@x402/core':
-        specifier: 2.28.0
-        version: 2.28.0
       '@z402/protocol':
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
+      '@x402/core':
+        specifier: 2.28.0
+        version: 2.28.0
       '@x402/fetch':
         specifier: 2.28.0
         version: 2.28.0
@@ -282,12 +282,13 @@ importers:
 
   packages/server:
     dependencies:
-      '@x402/core':
-        specifier: 2.28.0
-        version: 2.28.0
       '@z402/protocol':
         specifier: workspace:*
         version: link:../protocol
+    devDependencies:
+      '@x402/core':
+        specifier: 2.28.0
+        version: 2.28.0
 
   packages/service-kit:
     dependencies:

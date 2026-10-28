@@ -15,7 +15,7 @@
     "url": "git+https://github.com/oynozan/z402.git",
     "directory": "packages/server"
   },
-  "homepage": "https://z402.net",
+  "homepage": "https://z402.net/docs/reference/server",
   "bugs": "https://github.com/oynozan/z402/issues",
   "type": "module",
   "sideEffects": false,
@@ -45,7 +45,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@x402/core": "2.28.0",
     "@z402/protocol": "workspace:*"
+  },
+  "peerDependencies": {
+    "@x402/core": "2.28.0"
+  },
+  "devDependencies": {
+    "@x402/core": "2.28.0"
   }
 }

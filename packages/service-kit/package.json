@@ -15,7 +15,7 @@
     "url": "git+https://github.com/oynozan/z402.git",
     "directory": "packages/service-kit"
   },
-  "homepage": "https://z402.net",
+  "homepage": "https://z402.net/docs/reference/service-kit",
   "bugs": "https://github.com/oynozan/z402/issues",
   "type": "module",
   "sideEffects": false,

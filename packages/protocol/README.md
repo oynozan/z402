@@ -1,5 +1,7 @@
 # @z402/protocol
 
+Documentation: https://z402.net/docs/reference/protocol (all z402 docs: https://z402.net/docs)
+
 The wire contract of z402's `prepaid-voucher` scheme for [x402](https://github.com/x402-foundation/x402) on Zcash: identifiers, payment terms, Ed25519 voucher signing and checking, deposit memos, the trust ramp, session snapshots and reason codes. Pure TypeScript with no network access; Ed25519 uses `node:crypto`. The z402 client, server scheme and facilitator all build on it.
 
 ```bash
@@ -21,7 +23,6 @@ export function signAndCheck(payTo: string): boolean {
 }
 ```
 
-- Documentation: https://z402.net/docs (reference: https://z402.net/docs/reference/protocol)
-- Source and issues: https://github.com/oynozan/z402
+Source and issues: https://github.com/oynozan/z402
 
 MIT licensed.
