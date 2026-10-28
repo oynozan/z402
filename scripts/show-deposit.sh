@@ -69,6 +69,7 @@ need() {
 # Text safe to print, with tab, CR and LF as spaces, no control, format or separator characters and at most 200 characters
 plain() {
   # PERL5OPT, PERL_UNICODE and PERL5LIB change how perl reads, writes and loads, so they are unset and -C0 is given
+  # shellcheck disable=SC2016 # the perl program is single-quoted on purpose: its $ are perl's, not the shell's
   env -u PERL5OPT -u PERL_UNICODE -u PERL5LIB -u PERLLIB -u PERLIO perl -C0 -e '
     use Encode ();
     binmode STDIN, ":raw";
