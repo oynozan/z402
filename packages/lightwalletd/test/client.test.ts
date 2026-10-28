@@ -198,6 +198,7 @@ describe("createLightwalletdClient channel", () => {
       ["-Infinity", Number.NEGATIVE_INFINITY],
       ["below one millisecond", 0.4],
       ["a numeric string", "5000" as unknown as number],
+      ["2^31 ms, past which grpc-js drops the deadline", 2 ** 31],
     ])("rejects %s with a TypeError that names it, before any channel exists", (_name, rpcDeadlineMs) => {
       const make = () => open(URL_NEVER_DIALED, rpcDeadlineMs);
       expect(make).toThrow(TypeError);
@@ -207,6 +208,16 @@ describe("createLightwalletdClient channel", () => {
 
     test("accepts one millisecond, the shortest deadline that can be set", () => {
       expect(() => open(URL_NEVER_DIALED, 1)).not.toThrow();
+    });
+
+    test("accepts 2^31 - 1 ms, the longest deadline grpc-js keeps", () => {
+      expect(() => open(URL_NEVER_DIALED, 2 ** 31 - 1)).not.toThrow();
+    });
+
+    test("names the range it accepts", () => {
+      expect(() => open(URL_NEVER_DIALED, 2 ** 31)).toThrow(
+        "rpcDeadlineMs must be a finite number of milliseconds, from 1 to 2147483647",
+      );
     });
   });
 });

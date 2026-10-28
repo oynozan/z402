@@ -67,6 +67,7 @@ const { CompactTxStreamer } = (
 ).cash.z.wallet.sdk.rpc;
 
 const DEFAULT_RPC_DEADLINE_MS = 5000;
+const MAX_RPC_DEADLINE_MS = 2_147_483_647;
 // grpc-js defaults to a reconnect backoff of up to 120 s, which keeps a restarted server out of reach for minutes
 const MAX_RECONNECT_BACKOFF_MS = 5000;
 const MEMPOOL_HEIGHT = "0";
@@ -125,9 +126,9 @@ function located(raw: Uint8Array, height: string): RawTx {
 export function createLightwalletdClient(o: { url: string; rpcDeadlineMs?: number }): LightwalletdClient {
   const { target, creds } = connectionFor(o.url);
   const deadlineMs = o.rpcDeadlineMs ?? DEFAULT_RPC_DEADLINE_MS;
-  // Under 1 ms no call can finish in time, and Infinity would remove the deadline
-  if (!Number.isFinite(deadlineMs) || deadlineMs < 1) {
-    throw new TypeError("rpcDeadlineMs must be a finite number of milliseconds, at least 1");
+  // Under 1 ms no call can finish in time, and past 2^31 - 1 ms grpc-js drops the deadline, so a call can hang
+  if (!Number.isFinite(deadlineMs) || deadlineMs < 1 || deadlineMs > MAX_RPC_DEADLINE_MS) {
+    throw new TypeError("rpcDeadlineMs must be a finite number of milliseconds, from 1 to 2147483647");
   }
   const stub = new CompactTxStreamer(target, creds, { "grpc.max_reconnect_backoff_ms": MAX_RECONNECT_BACKOFF_MS });
 
