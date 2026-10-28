@@ -442,9 +442,9 @@ startApi(o: ApiOptions): Promise<{ url: string; close(): Promise<void> }>
 - Other methods:
   - An unpaid request gets 402, whatever the method.
   - A paid request with any method other than GET, `HEAD` and `OPTIONS` included, gets 405 with `Allow: GET` after verification. It is never settled, so the same voucher still buys a GET.
-- **The ledger lock.** `startFacilitator` takes `<ledger>.lock`. A second start on a ledger another live facilitator holds rejects with an error whose message starts with `ledgerPath:`. A lock whose pid is dead, or is pid 1, is taken over.
-- **`close()`** resolves once in-flight requests have finished. An idle keep-alive connection can hold it for about 3 to 5 s. After it resolves, nothing writes the ledger. A settle that is already being served while `close()` runs is still recorded.
-- **The token.** `authToken` must be one token of letters, digits and `-._~+/`; any other value makes startup refuse it.
+- **The ledger lock.** `startFacilitator` takes `<ledger>.lock`. A second start on a ledger another live facilitator holds rejects with an error whose message starts with `ledgerPath:`. A lock left on this host is taken over when its pid is dead, or is this process's own pid, as pid 1 is after a container restart (so compose sets a fixed hostname). A lock from another host never is.
+- **`close()`** closes idle connections at once and resolves once in-flight requests have finished. A connection that was busy when `close()` ran can hold it for up to the 5 s keep-alive timeout after its response (about 3.3 s with undici). After it resolves, nothing writes the ledger. A settle that is already being served while `close()` runs is still recorded.
+- **The token.** `authToken`, and the API's `facilitatorToken`, must be an RFC 6750 b64token: letters, digits and `-._~+/`, optionally followed by `=` padding. Any other value makes startup refuse it.
 - **The facilitator URL.** `startApi` refuses a `facilitatorUrl` that carries credentials; pass `facilitatorToken` instead.
 - The API reads its terms from the facilitator's `/supported`.
 - Start order: `await startFacilitator(...)`, then `startApi(...)`.
