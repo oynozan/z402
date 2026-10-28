@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -548,6 +548,7 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
     expect((await verify(url, pay(r, 500n, d1), r)).json.isValid).toBe(true);
 
     // A directory where the file belongs makes the next append fail with EISDIR
+    rmSync(ledgerPath);
     mkdirSync(ledgerPath);
     const res = await settle(url, pay(r, 500n, d1), r);
     expect(res.status).toBe(200);
@@ -865,6 +866,57 @@ describe("startFacilitator", () => {
     const { handle } = await boot();
     const port = Number(new URL(handle.url).port);
     await expect(boot({ port })).rejects.toThrow(/^port:/);
+  });
+
+  test("a second facilitator on a ledger that another one holds is refused, and the ledger is untouched", async () => {
+    const ledgerPath = join(scratch, "one-writer.jsonl");
+    const first = await boot({ ledgerPath });
+    const r = await requirementsOf(first.url);
+    const d1 = deposit(first.chain);
+    await verify(first.url, pay(r, 500n, d1), r);
+    await settle(first.url, pay(r, 500n, d1), r);
+    const before = readFileSync(ledgerPath);
+
+    // A start that got past the lock would write the confirmation in its first poll
+    first.chain.mine(1);
+    await expect(boot({ ledgerPath }, first.chain)).rejects.toThrow(/^ledgerPath: .*already open/);
+
+    expect(readFileSync(ledgerPath)).toEqual(before);
+  });
+
+  test("a closed facilitator frees its ledger, and no lock file is left behind", async () => {
+    const ledgerPath = join(scratch, "reopened.jsonl");
+    const first = await boot({ ledgerPath });
+    expect(existsSync(`${ledgerPath}.lock`)).toBe(true);
+    await first.handle.close();
+    expect(existsSync(`${ledgerPath}.lock`)).toBe(false);
+
+    const second = await boot({ ledgerPath }, first.chain);
+    await second.handle.close();
+    expect(existsSync(`${ledgerPath}.lock`)).toBe(false);
+  });
+
+  test("a start that cannot listen leaves the ledger free for the next one", async () => {
+    const ledgerPath = join(scratch, "busy-port.jsonl");
+    const { handle } = await boot();
+    const port = Number(new URL(handle.url).port);
+
+    await expect(boot({ ledgerPath, port })).rejects.toThrow(/^port:/);
+    expect(existsSync(`${ledgerPath}.lock`)).toBe(false);
+    await expect(boot({ ledgerPath })).resolves.toMatchObject({ url: expect.any(String) });
+  });
+
+  test.skipIf(process.getuid?.() === 0)("a ledger that cannot be written is refused before the first poll", async () => {
+    const ledgerPath = join(scratch, "read-only.jsonl");
+    writeFileSync(ledgerPath, "");
+    chmodSync(ledgerPath, 0o444);
+    const view = new FakeChain().viewFor(PAY_TO);
+    const reads = { tip: 0 };
+    const counting: ChainView = { tip: () => (reads.tip++, view.tip()), inspect: (txid) => view.inspect(txid) };
+
+    await expect(boot({ ledgerPath, chain: counting })).rejects.toThrow(/^ledgerPath: .*is not writable \(EACCES\)$/);
+    expect(reads.tip).toBe(0);
+    expect(existsSync(`${ledgerPath}.lock`)).toBe(false);
   });
 
   test("a deposit, a voucher and a restart: the ledger is written and replayed", async () => {

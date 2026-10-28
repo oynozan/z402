@@ -5,6 +5,7 @@
  * 4xx has no place in the schema. Only a missing or wrong token (401) and an unknown route (404) are not 200.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
+import { closeSync, openSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { x402Facilitator } from "@x402/core/facilitator";
@@ -24,6 +25,7 @@ import {
 } from "@z402/protocol";
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { Ledger, LedgerRefusal, type LedgerEvent } from "./core/ledger.js";
+import { lockLedger } from "./core/ledgerLock.js";
 import { DepositResolver } from "./core/resolver.js";
 import { commit, FacilitatorState } from "./core/state.js";
 import { ChainWatcher } from "./core/watcher.js";
@@ -300,7 +302,39 @@ function checkOptions(o: FacilitatorOptions): void {
   wholeNumber("depositWaitMs", o.depositWaitMs, 0);
 }
 
-function openLedger(path: string | undefined): { ledger: Ledger; state: FacilitatorState } {
+interface OpenLedger {
+  ledger: Ledger;
+  state: FacilitatorState;
+  /** Frees the ledger file for the next facilitator, and does nothing the second time */
+  release: () => void;
+}
+
+/** Locks the file, proves it can be written, then replays it, so a facilitator that says ready can record a settle */
+function openLedger(path: string | undefined): OpenLedger {
+  if (path === undefined) return { ledger: new Ledger(), state: new FacilitatorState(), release: () => undefined };
+  const release = lockLedger(path);
+  try {
+    writable(path);
+    return { ...replayed(path), release };
+  } catch (e) {
+    release();
+    throw e;
+  }
+}
+
+function writable(path: string): void {
+  try {
+    closeSync(openSync(path, "a", 0o600));
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EISDIR" || code === "EROFS") {
+      throw new Error(`ledgerPath: ${path} is not writable (${code})`, { cause: e });
+    }
+    throw new Error(`ledgerPath: cannot open ${path} (${code ?? text(e)})`, { cause: e });
+  }
+}
+
+function replayed(path: string): { ledger: Ledger; state: FacilitatorState } {
   try {
     const ledger = new Ledger(path);
     const state = new FacilitatorState();
@@ -326,11 +360,20 @@ function listen(app: Express, host: string, port: number, log: Log): Promise<Ser
   });
 }
 
-/** Replays the ledger, polls the chain once, then listens, and a failed poll does not stop the start */
+/** Opens the ledger, polls the chain once, then listens, and a failed poll does not stop the start */
 export async function startFacilitator(o: FacilitatorOptions): Promise<FacilitatorHandle> {
   checkOptions(o);
+  const opened = openLedger(o.ledgerPath);
+  try {
+    return await serve(o, opened);
+  } catch (e) {
+    opened.release();
+    throw e;
+  }
+}
+
+async function serve(o: FacilitatorOptions, { ledger, state, release }: OpenLedger): Promise<FacilitatorHandle> {
   const host = o.host ?? DEFAULT_HOST;
-  const { ledger, state } = openLedger(o.ledgerPath);
   const { onFatal } = o;
 
   // The first failed write is the only one reported, since the host exits on it
@@ -395,11 +438,12 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
     pollNow: () => (closed ? Promise.resolve() : watcher.pollNow()),
     close: () => {
       closed = true;
+      // The ledger is freed only once the requests in flight have ended, since a settle among them still writes
       return (closing ??= new Promise<void>((resolve, reject) => {
         watcher.stop();
         server.close((err) => (err === undefined ? resolve() : reject(err)));
         server.closeIdleConnections();
-      }));
+      }).finally(release));
     },
   };
 }
