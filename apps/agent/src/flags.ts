@@ -122,3 +122,63 @@ export function parseFlags(argv: readonly string[]): Flags {
     lightwalletd: values.lightwalletd ?? d.lightwalletd,
   };
 }
+
+export interface DiscoverFlags {
+  /** A Bazaar endpoint without a trailing slash, the discovery service or the website that proxies it */
+  discovery: string;
+  /** Free text to rank the list against, which never leaves the process */
+  intent: string | undefined;
+  /** Print the list as the service sent it */
+  json: boolean;
+}
+
+export const DISCOVER_USAGE = `usage: pnpm --filter @z402/agent discover [flags]
+
+  --discovery <url>        discovery service, or the website that proxies it     (http://127.0.0.1:4030)
+  --intent <text>          rank the list by word overlap with this text, matched here and never sent
+  --json                   print the list as JSON, as the service sent it
+  --help                   print this text`;
+
+const DISCOVER_DEFAULTS: DiscoverFlags = Object.freeze({
+  discovery: "http://127.0.0.1:4030",
+  intent: undefined,
+  json: false,
+});
+
+export function parseDiscoverFlags(argv: readonly string[]): DiscoverFlags {
+  // pnpm forwards the -- of pnpm discover -- --json
+  const args = argv[0] === "--" ? argv.slice(1) : argv;
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: [...args],
+      options: {
+        discovery: { type: "string" },
+        intent: { type: "string" },
+        json: { type: "boolean" },
+      },
+      strict: true,
+      allowPositionals: false,
+    }));
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    throw new FlagError(message.replace(/\. To specify.*$/s, ""));
+  }
+
+  const d = DISCOVER_DEFAULTS;
+  const { intent } = values;
+  if (intent !== undefined && intent.trim() === "") throw new FlagError("--intent: expected some text");
+  if (intent !== undefined && values.json === true) {
+    throw new FlagError("--intent: cannot be combined with --json, which prints the list as the service sent it");
+  }
+  const discovery = httpUrl("--discovery", values.discovery ?? d.discovery);
+  const { username, password, search, hash } = new URL(discovery);
+  if (username !== "" || password !== "" || search !== "" || hash !== "") {
+    throw new FlagError("--discovery: expected a URL without credentials, a query or a fragment");
+  }
+  return {
+    discovery: discovery.replace(/\/+$/, ""),
+    intent,
+    json: values.json ?? d.json,
+  };
+}

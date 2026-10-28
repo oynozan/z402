@@ -56,6 +56,11 @@ async function run(flags: Flags): Promise<number> {
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
+  if (argv[0] === "discover") {
+    // Loaded only here, so the demo never depends on the Bazaar client
+    const { discoverMain } = await import("./discover.js");
+    return discoverMain(argv.slice(1));
+  }
   if (argv.includes("--help") || argv.includes("-h")) {
     print(USAGE);
     return 0;
