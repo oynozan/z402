@@ -68,7 +68,7 @@ Z402_API_PORT=4023 \
 pnpm --filter @z402/api start
 ```
 
-Its 402 now asks 800 zat and names provider 2's address, and the facilitator credits deposits and vouchers to provider 2 alone. If the key and the address do not belong together the API exits 1 naming `payTo` or `facilitatorToken`. Registering the same address again issues a new key and ends the old one, which is how a lost key is recovered. The facilitator holds provider 2's viewing key from the registration on, and it can see that account's incoming payments and cannot spend them.
+Its 402 now asks 800 zat and names provider 2's address, and the facilitator credits deposits and vouchers to provider 2 alone. It sets no `Z402_API_PUBLIC_URL`, so it declares nothing and the catalog lists it from the payments it settles (see [The Bazaar extension](#the-bazaar-extension)). If the key and the address do not belong together the API exits 1 naming `payTo` or `facilitatorToken`. Registering the same address again issues a new key and ends the old one, which is how a lost key is recovered. The facilitator holds provider 2's viewing key from the registration on, and it can see that account's incoming payments and cannot spend them.
 
 ## Environment
 
@@ -84,6 +84,7 @@ An empty variable counts as unset. A path that is not absolute is relative to th
 | `Z402_PRICE_ZAT` | `500` | The price of one call in zatoshi, from 1 to the facilitator's window (`Z402_WINDOW_ZAT`, 100000 by default). The price is this API's own: the facilitator reads it from the requirements of each call and takes any amount in that range, so it does not have to match anything there. Nothing checks the window at start, and a price above it makes the facilitator refuse every paid call with `invalid_payment_requirements`. |
 | `Z402_API_HOST` | `127.0.0.1` | The address to listen on. |
 | `Z402_API_PORT` | `4021` | 0 to 65535, where 0 picks a free port. |
+| `Z402_API_PUBLIC_URL` | none | Where this API is reached, such as `https://api.example.com`. It lists the demo route `GET /chunk` in the facilitator's Bazaar: the 402 then names `<this URL>/chunk` as its `resource`, and the API declares that route to the facilitator as soon as it listens and every 30 s after (see [The Bazaar extension](#the-bazaar-extension)). An absolute `http://` or `https://` URL with no username or password, no query and no fragment. A trailing `/` is dropped and a path is kept, for an API that a proxy serves under one. The facilitator never fetches it. Set it on an API whose provider also declares other routes (the operator's, beside the starter services), because a provider that has declared anything is listed by its declarations alone. Leave it unset for a bare API, which is listed from its first paid call. |
 
 ## Check the 402
 
@@ -118,7 +119,7 @@ On regtest with the default terms that is:
 }
 ```
 
-`payTo` is the merchant's address, and `termsVersion` is an opaque id that the facilitator derives from the terms alone, so every provider of a facilitator reads the same one. A client whose authenticated voucher is refused gets a corrective 402, whose `accepts[0].extra.session` carries its session's limits. A request without a `PAYMENT-SIGNATURE` header gets the plain 402. Next to `accepts` the 402 has `extensions.bazaar` (the next section).
+`payTo` is the merchant's address, and `termsVersion` is an opaque id that the facilitator derives from the terms alone, so every provider of a facilitator reads the same one. The `resource.url` of the 402 is the URL the request came to, or `<Z402_API_PUBLIC_URL>/chunk` when that is set. A client whose authenticated voucher is refused gets a corrective 402, whose `accepts[0].extra.session` carries its session's limits. A request without a `PAYMENT-SIGNATURE` header gets the plain 402. Next to `accepts` the 402 has `extensions.bazaar` (the next section).
 
 To pay it, run the agent (`scripts/demo.sh honest`, see `docs/demo.md`).
 
@@ -134,7 +135,30 @@ curl -s -D - -o /dev/null http://127.0.0.1:4021/chunk | tr -d '\r' \
   | awk -F': ' 'tolower($1) == "payment-required" { print $2 }' | base64 -d | jq '.extensions.bazaar.info'
 ```
 
-A stock x402 client puts the `extensions` of the 402 it paid into its payment, and the facilitator lists a resource from the payments it settles. So the first paid call to this API makes `GET /discovery/resources` of the facilitator list `<this API>/chunk` with the provider's address, the price it was paid at and `paidCallsToday`, and nothing declares the route by hand. A payment without the extension lists nothing. The API does not declare its route to the facilitator, as the starter services do. This is also what makes provider 2 appear in the catalog.
+A stock x402 client puts the `extensions` of the 402 it paid into its payment, and the facilitator lists a resource from the payments it settles, as long as the provider that was paid has never declared anything. So a bare API, one that sets no `Z402_API_PUBLIC_URL` and whose provider declares nothing (provider 2 above is one), is listed from its first paid call: `GET /discovery/resources` of the facilitator then lists `<this API>/chunk` with the provider's address, the price it was paid at and `paidCallsToday`, and nothing declares the route by hand. A payment without the extension lists nothing.
+
+An API that runs as a provider that declares, such as the operator's next to the starter services, is not listed by its payments. They create no item for a provider that has declared (they only count on the items it declared), and the provider's first declaration removes the items they had made, except those it declares itself. That API is listed only through its own declaration, which `Z402_API_PUBLIC_URL` turns on (next section).
+
+### Declaring the route
+
+The operator's API is the same provider as the starter services, which declare their routes, so its paid calls never list `/chunk` (above), and the demo's paid route would be missing from the catalog. `Z402_API_PUBLIC_URL` opts the API in to declaring `/chunk` as they declare theirs.
+
+Once the API listens, it sends `POST /discovery/resources` to the facilitator, with its token as the bearer when it has one, at once and then every 30 s after each declaration ended. The one item is read from the 402 of an unpaid in-process request to `/chunk`, so the catalog offers what the route asks for: the 402's `accepts` as they are, its `extensions` (the bazaar extension above), `mimeType`, and `resource` set to `<Z402_API_PUBLIC_URL>/chunk`. That is also the `resource` that a stock client echoes in its payments, so a settled payment counts on the declared item (`paidCallsToday`) and creates no other. The facilitator sets `lastSeen` on the item at each declaration, which is how a reader of the catalog tells that the route is up. Stopping the API stops the beat.
+
+```bash
+curl -s http://127.0.0.1:4022/discovery/resources | jq '.items[] | {resource, lastSeen, paidCallsToday}'
+```
+
+A failed declaration never stops the API, and the next beat tries again. A line goes to stderr only when the outcome changes, so a facilitator that stays down is reported once and not every 30 s. No line shows the token, and the facilitator's own words are cut to one line.
+
+| Line (after `api: discovery: `) | Cause |
+| --- | --- |
+| `1 paid route listed by the facilitator at <origin>, declared again every 30 s` | the facilitator took the declaration. Printed at the first one and again after any failure |
+| `the facilitator at <origin> refused the declaration (400, item 0: ...); trying again every 30 s` | the catalog refused the item, in the words that follow. A `Z402_PRICE_ZAT` above the facilitator's window is one cause, since nothing else checks it at start |
+| `Z402_FACILITATOR_TOKEN: the facilitator at <origin> refused the declaration (401); ...` | the key was rotated out or is no longer taken. A 403 reads the same |
+| `the facilitator at <origin> has no Bazaar to declare to (404), so the route is not listed; ...` | a facilitator without the discovery routes |
+| `the facilitator at <origin> answered the declaration with 503; ...` | any other status, a redirect included |
+| `cannot reach the facilitator at <origin> (ECONNREFUSED); ...` | the facilitator is down or restarting. `no answer within 10 s` is one that takes the connection and never answers |
 
 ## Startup failures
 
@@ -147,6 +171,7 @@ Each one names the option to fix, and none quotes a token. The first three rows 
 | `api: facilitatorUrl: plaintext http:// is allowed only to a loopback host on zcash:testnet; use https://` | an `http://` URL to a host that is not loopback, on testnet or mainnet |
 | `api: Z402_MERCHANT_KEYS_FILE: <file> holds the spending seed; the API needs only Z402_PAY_TO` | a mainnet keys file with a `seedHex` key (set `Z402_PAY_TO` instead); `holds the full viewing key` for one with only a `ufvk` key |
 | `api: Z402_FACILITATOR_URL is required (...)` | no facilitator URL |
+| `api: Z402_API_PUBLIC_URL: expected an http:// or https:// URL` | the value is not an absolute `http(s)` URL, or has whitespace or a backslash in it. `must not carry credentials`, `must not have a query or a fragment` and `with /chunk it makes a resource URL over 2048 characters` are its other refusals, and none quotes the value. All of them come before the facilitator is contacted |
 | `api: facilitatorUrl: cannot reach the facilitator at <origin> (ECONNREFUSED)` | the facilitator is not running at that URL. `did not answer /providers/me within 5000 ms` is one that takes the connection and never answers, and `answered /providers/me with 503` one that is starting or failing (any 5xx, and 408 and 429) |
 | `api: facilitatorUrl: the facilitator at <origin> has no /providers/me (404), so it is not a facilitator of the multi-provider rail` | an older facilitator, or a URL that is not one. `answered /providers/me with a body that is not {providerId, network, payTo}` is a 200 from something else |
 | `api: facilitatorToken: the facilitator at <origin> refused the API key (401)` | the key is wrong, rotated out, or not one of this facilitator's. A 403 reads the same |
@@ -165,4 +190,4 @@ pnpm --filter @z402/api test
 pnpm --filter @z402/api typecheck
 ```
 
-Most tests start the real facilitator and the real API inside the test process, against a fake chain. `main.test.ts` runs `src/main.ts` as a child process, the way `pnpm --filter @z402/api start` does, against a facilitator in the test process. The live checks against the Z3 stack are recorded in `docs/research/live-run.md`.
+Most tests start the real facilitator and the real API inside the test process, against a fake chain. The declaration tests list through the real facilitator's catalog, and also use a stub facilitator that counts what it is sent and answers each declaration as told. `main.test.ts` runs `src/main.ts` as a child process, the way `pnpm --filter @z402/api start` does, against a facilitator in the test process. The live checks against the Z3 stack are recorded in `docs/research/live-run.md`.

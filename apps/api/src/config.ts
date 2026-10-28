@@ -16,6 +16,7 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import type { ApiOptions } from "./app.js";
+import { publicUrlProblem } from "./declare.js";
 
 /** The repository root, found from this file and never from the working directory, which `pnpm --filter` changes */
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -169,6 +170,15 @@ function portOf(env: Env): number {
   return port;
 }
 
+/** The URL this API is reached at, which opts it in to declaring its route to the Bazaar */
+function publicUrlOf(env: Env): string | undefined {
+  const url = read(env, "Z402_API_PUBLIC_URL");
+  if (url === undefined) return undefined;
+  const problem = publicUrlProblem(url);
+  if (problem !== undefined) throw new ConfigError(`Z402_API_PUBLIC_URL: ${problem}`);
+  return url.replace(/\/+$/, "");
+}
+
 /** Reads and checks the environment, throwing a ConfigError that names the variable, and passes each warning to warn */
 export function loadConfig(env: Env, warn = (message: string): void => console.error(message)): ApiOptions {
   const profile = profileOf(env);
@@ -180,5 +190,6 @@ export function loadConfig(env: Env, warn = (message: string): void => console.e
     priceZat: priceOf(env),
     host: hostOf(env),
     port: portOf(env),
+    publicUrl: publicUrlOf(env),
   };
 }
