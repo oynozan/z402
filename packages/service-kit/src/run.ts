@@ -8,10 +8,17 @@ export interface Listening {
   close(): Promise<void>;
 }
 
+const HEADERS_TIMEOUT_MS = 15_000;
+/** Time to receive a whole request, body included, which a 1 MiB upload on a slow link still fits */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 /** Listens on host:port (0 picks a free port) and rejects naming HOST or PORT */
 export function serve(app: Express, o: { host: string; port: number }): Promise<Listening> {
   return new Promise((resolve, reject) => {
     const server = createServer(app);
+    // Node's defaults let a client trickle one request for 5 minutes while its body is buffered before payment
+    server.headersTimeout = HEADERS_TIMEOUT_MS;
+    server.requestTimeout = REQUEST_TIMEOUT_MS;
     const refuse = (e: NodeJS.ErrnoException): void => {
       const field = e.code === "EADDRINUSE" || e.code === "EACCES" ? "PORT" : "HOST";
       reject(new Error(`${field}: cannot listen on ${o.host}:${o.port} (${e.code ?? e.message})`));
@@ -22,6 +29,12 @@ export function serve(app: Express, o: { host: string; port: number }): Promise<
       server.on("error", (e) => console.error("http server error", e));
       const { port } = server.address() as AddressInfo;
       let closing: Promise<void> | undefined;
+      // server.close() only closes the connections idle at that moment, so later ones are closed as their calls end
+      server.on("request", (_req, res) => {
+        res.once("finish", () => {
+          if (closing !== undefined) setImmediate(() => server.closeIdleConnections());
+        });
+      });
       resolve({
         url: `http://${o.host.includes(":") ? `[${o.host}]` : o.host}:${port}`,
         server,

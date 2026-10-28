@@ -17,15 +17,20 @@ export const TEST_PAY_TO = `uregtest1${"q".repeat(60)}`;
 export const TEST_TOKEN = "t-service-kit-4f1c";
 export const TEST_PUBLIC_URL = "http://service.test";
 
-export interface TestStack {
+export interface PayingClient {
+  /** Pays through the stock x402 fetch wrapper and the prepaid-voucher client scheme */
+  paidFetch: typeof fetch;
+  scheme: PrepaidVoucherScheme;
+}
+
+export interface TestStack extends PayingClient {
   chain: FakeChain;
   facilitator: FacilitatorHandle;
   /** The service's own base URL */
   url: string;
   env: ServiceEnv;
-  /** Pays through the stock x402 fetch wrapper and the prepaid-voucher client scheme */
-  paidFetch: typeof fetch;
-  scheme: PrepaidVoucherScheme;
+  /** Another paying client with its own session, since one client's paid calls take turns on its session lock */
+  client(): PayingClient;
   close(): Promise<void>;
 }
 
@@ -75,13 +80,18 @@ export async function startTestStack(o: TestStackOptions): Promise<TestStack> {
     extraClose = "app" in built && typeof built.app === "function" ? built.close : undefined;
     listening = await serve(app, { host: env.host, port: 0 });
 
-    const scheme = new PrepaidVoucherScheme({
-      wallet: new MockWallet(chain),
-      chain: chain.statusSource(),
-      pollIntervalMs: 20,
-      facilitatorLagMs: 100,
-    });
-    const paidFetch = wrapFetchWithPayment(fetch, new x402Client().register(TEST_NETWORK, scheme));
+    const schemes: PrepaidVoucherScheme[] = [];
+    const client = (): PayingClient => {
+      const scheme = new PrepaidVoucherScheme({
+        wallet: new MockWallet(chain),
+        chain: chain.statusSource(),
+        pollIntervalMs: 20,
+        facilitatorLagMs: 100,
+      });
+      schemes.push(scheme);
+      return { scheme, paidFetch: wrapFetchWithPayment(fetch, new x402Client().register(TEST_NETWORK, scheme)) };
+    };
+    const { scheme, paidFetch } = client();
     const running = listening;
     let closing: Promise<void> | undefined;
     return {
@@ -91,9 +101,10 @@ export async function startTestStack(o: TestStackOptions): Promise<TestStack> {
       env,
       paidFetch,
       scheme,
+      client,
       close: () =>
         (closing ??= (async () => {
-          await scheme.close().catch(() => undefined);
+          await Promise.all(schemes.map((s) => s.close().catch(() => undefined)));
           running.server.closeAllConnections();
           await running.close().catch(() => undefined);
           await extraClose?.().catch(() => undefined);

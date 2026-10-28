@@ -4,16 +4,20 @@
  * for the scheme and every route, the facilitator's terms loaded and checked before anything listens, and route keys
  * without a verb so that HEAD, which Express hands to the GET handler, must pay too.
  */
+import { decodePaymentSignatureHeader } from "@x402/core/http";
 import {
   FacilitatorCapabilityError,
+  FacilitatorResponseError,
+  FacilitatorTimeoutError,
   HTTPFacilitatorClient,
   RouteConfigurationError,
   x402HTTPResourceServer,
   x402ResourceServer,
+  type FacilitatorClient,
   type RouteConfig,
   type RoutesConfig,
 } from "@x402/core/server";
-import { paymentMiddlewareFromHTTPServer } from "@x402/express";
+import { ExpressAdapter, paymentMiddlewareFromHTTPServer } from "@x402/express";
 import {
   bazaarResourceServerExtension,
   declareDiscoveryExtension,
@@ -21,7 +25,7 @@ import {
   sanitizeTags,
   type DeclareDiscoveryExtensionInput,
 } from "@x402/extensions/bazaar";
-import { ASSET, SCHEME, ZCASH_NETWORKS } from "@z402/protocol";
+import { ASSET, parseVoucherPayload, SCHEME, ZCASH_NETWORKS } from "@z402/protocol";
 import { PrepaidVoucherServerScheme } from "@z402/server";
 import express, { type Express, type Request, type RequestHandler } from "express";
 import type { ServiceEnv } from "./env.js";
@@ -94,9 +98,48 @@ function isProbe(req: Request): boolean {
   );
 }
 
+/** The session and amount of the voucher a request pays with, or undefined when it carries none that can be read */
+function voucherOf(req: Request): string | undefined {
+  const header = req.get("payment-signature");
+  if (header === undefined || header === "") return undefined;
+  try {
+    const { sessionKey, cumulativeZat } = parseVoucherPayload(decodePaymentSignatureHeader(header).payload);
+    return `${sessionKey}:${cumulativeZat}`;
+  } catch {
+    // The payment middleware refuses it
+    return undefined;
+  }
+}
+
+/** The request as the payment middleware sees it when it decides whether a path is paid */
+function paymentContext(req: Request): Parameters<x402HTTPResourceServer["requiresPayment"]>[0] {
+  let decodedPath = req.path;
+  try {
+    decodedPath = decodeURIComponent(req.path);
+  } catch {
+    // The middleware keeps a path it cannot decode as it is
+  }
+  return { adapter: new ExpressAdapter(req), path: req.path, decodedPath, method: req.method };
+}
+
+/** The one spelling of a path that the routes match, while the payment middleware matches every spelling alike */
+function canonicalPath(path: string): string {
+  const segments = path.split("/").map((segment) => {
+    try {
+      return encodeURIComponent(decodeURIComponent(segment));
+    } catch {
+      return segment;
+    }
+  });
+  const folded = segments.join("/").replace(/\/{2,}/g, "/");
+  return folded.length > 1 ? folded.replace(/\/$/, "") : folded;
+}
+
 const MAX_TIMEOUT_SECONDS = 60;
 /** Covers the facilitator's 30 s wait for an unseen deposit, one 5 s chain deadline and the decryption */
 const FACILITATOR_TIMEOUT_MS = 60_000;
+/** A facilitator that is up answers /supported from memory, so one that takes longer counts as not up yet */
+const SUPPORTED_TIMEOUT_MS = 5_000;
 const READY_TIMEOUT_MS = 2_000;
 /** How long a readiness answer is reused by the gate in front of the paid routes */
 const READY_CACHE_MS = 5_000;
@@ -129,53 +172,84 @@ function checkDefinition(s: ServiceDefinition): void {
   }
 }
 
-function facilitatorClient(env: ServiceEnv): HTTPFacilitatorClient {
+/** Verify and settle may wait on the chain, while /supported is read only at start and gets a short timeout */
+function facilitatorClient(env: ServiceEnv): FacilitatorClient {
   const token = env.facilitatorToken;
-  return new HTTPFacilitatorClient({
-    url: env.facilitatorUrl,
-    timeoutMs: FACILITATOR_TIMEOUT_MS,
-    ...(token !== undefined && {
-      createAuthHeaders: async () => {
-        const headers = { Authorization: `Bearer ${token}` };
-        return { verify: headers, settle: headers, supported: headers };
-      },
-    }),
-  });
+  const client = (timeoutMs: number): HTTPFacilitatorClient =>
+    new HTTPFacilitatorClient({
+      url: env.facilitatorUrl,
+      timeoutMs,
+      ...(token !== undefined && {
+        createAuthHeaders: async () => {
+          const headers = { Authorization: `Bearer ${token}` };
+          return { verify: headers, settle: headers, supported: headers };
+        },
+      }),
+    });
+  const payments = client(FACILITATOR_TIMEOUT_MS);
+  const start = client(SUPPORTED_TIMEOUT_MS);
+  return {
+    verify: (payload, requirements) => payments.verify(payload, requirements),
+    settle: (payload, requirements) => payments.settle(payload, requirements),
+    getSupported: () => start.getSupported(),
+  };
 }
 
-/** The messages of the causes under the SDK's own wrapper, outermost first */
-function causes(e: unknown): string {
-  const parts: string[] = [];
+/** The errors under the SDK's own wrapper, outermost first */
+function causesOf(e: unknown): Error[] {
+  const chain: Error[] = [];
   let current = e instanceof Error ? e.cause : undefined;
-  while (current instanceof Error && parts.length < MAX_CAUSES) {
-    parts.push(current.message || ((current as NodeJS.ErrnoException).code ?? current.name));
+  while (current instanceof Error && chain.length < MAX_CAUSES) {
+    chain.push(current);
     current = current.cause;
   }
-  return parts.length > 0 ? parts.join(": ") : text(e);
+  return chain;
 }
 
-/** Names the variable an initialize() failure points at, keeping the SDK's error as the cause */
-function startupError(e: unknown, server: x402ResourceServer, env: ServiceEnv): Error {
+function causes(e: unknown): string {
+  const chain = causesOf(e);
+  if (chain.length === 0) return text(e);
+  return chain.map((c) => c.message || ((c as NodeJS.ErrnoException).code ?? c.name)).join(": ");
+}
+
+/** The HTTP status of the facilitator's answer to /supported, when it answered with an error */
+function supportedStatus(e: unknown): number | undefined {
+  for (const cause of causesOf(e)) {
+    const status = /getSupported failed \((\d{3})\)/.exec(cause.message)?.[1];
+    if (status !== undefined) return Number(status);
+  }
+  return undefined;
+}
+
+/** Names the variable an initialize() failure points at, and waits only for a facilitator that may still be starting */
+function startupError(e: unknown, server: x402ResourceServer, env: ServiceEnv): { error: Error; wait: boolean } {
   const at = `the facilitator at ${env.facilitatorUrl}`;
+  const fail = (message: string): { error: Error; wait: boolean } => ({
+    error: new Error(message, { cause: e }),
+    wait: false,
+  });
   if (e instanceof FacilitatorCapabilityError) {
     const advertised = server.getSupportedKind(X402_VERSION, env.network, SCHEME)?.extra?.payTo;
-    if (advertised !== env.payTo) {
-      return new Error(`Z402_PAY_TO: ${at} does not advertise ${env.payTo} as its payTo`, { cause: e });
-    }
-    return new Error(`Z402_FACILITATOR_URL: ${at} advertises terms this service cannot use (${e.problems.join("; ")})`, {
-      cause: e,
-    });
+    if (advertised !== env.payTo) return fail(`Z402_PAY_TO: ${at} does not advertise ${env.payTo} as its payTo`);
+    return fail(`Z402_FACILITATOR_URL: ${at} advertises terms this service cannot use (${e.problems.join("; ")})`);
   }
   if (e instanceof RouteConfigurationError) {
     const offered = ZCASH_NETWORKS.filter((n) => server.getSupportedKind(X402_VERSION, n, SCHEME) !== undefined);
     const where = offered.length > 0 ? offered.join(", ") : "no Zcash network";
-    return new Error(`Z402_NETWORK: ${at} offers ${SCHEME} on ${where}, not on ${env.network}`, { cause: e });
+    return fail(`Z402_NETWORK: ${at} offers ${SCHEME} on ${where}, not on ${env.network}`);
   }
   const reason = causes(e);
-  if (/\((401|403)\)/.test(reason)) {
-    return new Error(`Z402_FACILITATOR_TOKEN: ${at} refused the request (${reason})`, { cause: e });
+  const status = supportedStatus(e);
+  if (status === 401 || status === 403) return fail(`Z402_FACILITATOR_TOKEN: ${at} refused the request (${reason})`);
+  if (status !== undefined && status < 500 && status !== 408 && status !== 429) {
+    return fail(`Z402_FACILITATOR_URL: ${at} is not a facilitator, it answered /supported with ${status} (${reason})`);
   }
-  return new Error(`Z402_FACILITATOR_URL: cannot read /supported from ${at} (${reason})`, { cause: e });
+  const malformed = causesOf(e).some(
+    (c) => c instanceof FacilitatorResponseError && !(c instanceof FacilitatorTimeoutError),
+  );
+  if (malformed) return fail(`Z402_FACILITATOR_URL: ${at} is not a facilitator (${reason})`);
+  const unreachable = new Error(`Z402_FACILITATOR_URL: cannot read /supported from ${at} (${reason})`, { cause: e });
+  return { error: unreachable, wait: true };
 }
 
 function routeConfig(env: ServiceEnv, s: ServiceDefinition, r: PaidRoute, tags: string[] | undefined): RouteConfig {
@@ -235,9 +309,8 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
       await http.initialize();
       break;
     } catch (e) {
-      const error = startupError(e, server, env);
-      const unreachable = error.message.startsWith("Z402_FACILITATOR_URL: cannot read");
-      if (!unreachable || Date.now() + FACILITATOR_RETRY_MS > deadline) throw error;
+      const { error, wait } = startupError(e, server, env);
+      if (!wait || Date.now() + FACILITATOR_RETRY_MS > deadline) throw error;
       if (attempt === 1) log(`${error.message}; waiting for it`);
       await new Promise((resolve) => setTimeout(resolve, FACILITATOR_RETRY_MS));
     }
@@ -246,6 +319,16 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
   const stats = new CallStats();
   const app = express();
   app.disable("x-powered-by");
+
+  // Only the payment middleware folds other spellings of a paid path, so the routes get the one spelling they match
+  app.use((req, _res, next) => {
+    const path = canonicalPath(req.path);
+    if (path !== req.path && http.requiresPayment(paymentContext(req))) {
+      const query = req.url.indexOf("?");
+      req.url = query === -1 ? path : path + req.url.slice(query);
+    }
+    next();
+  });
 
   let cached: { at: number; ready: Promise<boolean> } | undefined;
   const readyNow = (): Promise<boolean> => {
@@ -284,6 +367,9 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
   });
   for (const handler of o.before ?? []) app.use(handler);
 
+  // Requests that passed a paid route's checks below
+  const routed = new WeakSet<Request>();
+
   // Everything that can refuse a paid route without a voucher runs here, so the unpaid first attempt gets the answer
   for (const r of service.routes) {
     app.all(r.path, async (req, res, next) => {
@@ -297,6 +383,7 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
         res.status(503).json({ error: "not_ready" });
         return;
       }
+      routed.add(req);
       next();
     });
     for (const handler of r.prepare ?? []) {
@@ -305,6 +392,37 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
   }
 
   // The support is loaded above, and false keeps the middleware from loading it again or exiting the process
-  app.use(paymentMiddlewareFromHTTPServer(http, undefined, undefined, false));
+  const pay = paymentMiddlewareFromHTTPServer(http, undefined, undefined, false);
+  // Copies of one voucher all pass verification until one settles, so only one at a time may reach the handler
+  const vouchersInFlight = new Set<string>();
+  app.use(async (req, res, next) => {
+    const paid = http.requiresPayment(paymentContext(req));
+    // The routes and the payment middleware must agree on what is paid, or a call would skip its checks or its payment
+    if (routed.has(req) !== paid) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    if (!paid) {
+      next();
+      return;
+    }
+    // Nobody is left to receive what the call would be charged for
+    if (res.closed) return;
+    const voucher = voucherOf(req);
+    if (voucher === undefined) {
+      await pay(req, res, next);
+      return;
+    }
+    if (vouchersInFlight.has(voucher)) {
+      res.status(409).json({ error: "payment_in_flight" });
+      return;
+    }
+    vouchersInFlight.add(voucher);
+    try {
+      await pay(req, res, next);
+    } finally {
+      vouchersInFlight.delete(voucher);
+    }
+  });
   return { app, stats, http };
 }
