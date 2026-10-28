@@ -181,7 +181,7 @@ The demo resource server, with one paid route, `GET /chunk`. It reads no `PORT` 
 | Variable | Default | When it is read |
 | --- | --- | --- |
 | `DISCOVERY_URL` | `http://127.0.0.1:4022` | At request time, by the pages and the proxy. The facilitator, which hosts the Bazaar. A trailing slash is dropped. |
-| `NEXT_PUBLIC_REPO_URL` | unset | At build time. An `http(s)` URL. When set, the header and the footer link to the repository, and a source path in these docs becomes a link to that file on `main`. |
+| `NEXT_PUBLIC_REPO_URL` | `https://github.com/oynozan/z402` | At build time. An `http(s)` URL; unset or empty, it is the z402 repository. The header and the footer link to it as GitHub, and a source path in these docs becomes a link to that file on `main`. A fork sets its own URL, and a value that is not an `http(s)` URL turns these links off. |
 | `NEXT_PUBLIC_SITE_URL` | unset | At build time. The site's public origin, such as `https://z402.example`, against which the share image's URL is made absolute. Unset, Next.js uses `http://localhost:3000` and warns during the build. |
 | `PORT` | `3000` | By the standalone server. |
 | `HOSTNAME` | `0.0.0.0` | By the standalone server. |

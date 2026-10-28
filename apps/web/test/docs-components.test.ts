@@ -119,15 +119,24 @@ describe("manropeMeasurer", () => {
 });
 
 describe("Source", () => {
-  test("links the file on GitHub when the repository is set", () => {
+  test("links the file on GitHub in the repository that is set", () => {
     vi.stubEnv("NEXT_PUBLIC_REPO_URL", "https://github.com/example/z402/");
     const out = renderToStaticMarkup(createElement(Source, { path: "packages/client/src/scheme.ts", line: "12" }));
     expect(out).toContain('href="https://github.com/example/z402/blob/main/packages/client/src/scheme.ts#L12"');
     expect(out).toContain(">packages/client/src/scheme.ts</code>");
   });
 
-  test("shows the path as code when it is not", () => {
-    vi.stubEnv("NEXT_PUBLIC_REPO_URL", "");
+  test("links the file in the z402 repository when none is set", () => {
+    for (const value of [undefined, ""]) {
+      vi.stubEnv("NEXT_PUBLIC_REPO_URL", value);
+      const out = renderToStaticMarkup(createElement(Source, { path: "./compose.yaml" }));
+      expect(out).toContain('<a class="source" href="https://github.com/oynozan/z402/blob/main/compose.yaml"');
+      expect(out).toContain(">compose.yaml</code>");
+    }
+  });
+
+  test("shows the path as code when the repository is not an http(s) URL", () => {
+    vi.stubEnv("NEXT_PUBLIC_REPO_URL", "none");
     const out = renderToStaticMarkup(createElement(Source, { path: "./compose.yaml" }));
     expect(out).toBe('<code class="md-code source">compose.yaml</code>');
   });

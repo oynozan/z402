@@ -5,6 +5,7 @@ import { Children, Fragment, isValidElement, type ReactNode } from "react";
 import { CopyCell } from "@/components/copy";
 import { Tip } from "@/components/tip";
 import { textOf } from "@/lib/format";
+import { repoUrl } from "@/lib/repo";
 import { ArrowGlyph, CalloutGlyph, OutGlyph, PlayGlyph, type CalloutKind } from "./glyphs";
 
 /** The custom elements of the docs' MDX contract, which every page uses without importing them */
@@ -246,12 +247,7 @@ export function Term({ tip, children }: { tip?: string; children?: ReactNode }) 
 
 // Source
 
-function repoUrl(): string | null {
-  const url = textOf(process.env.NEXT_PUBLIC_REPO_URL);
-  return url !== null && /^https?:\/\//.test(url) ? url.replace(/\/+$/, "") : null;
-}
-
-/** A file in the repository: a link to it on GitHub when NEXT_PUBLIC_REPO_URL is set, else its path */
+/** A file in the repository, as a link to it on main, or as its path when the repository links are off */
 export function Source({ path, line, children }: { path?: string; line?: number | string; children?: ReactNode }) {
   const file = (textOf(path) ?? "").replace(/^\.?\/+/, "");
   const label = children ?? file;

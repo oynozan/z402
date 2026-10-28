@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { CSSProperties } from "react";
-import { textOf } from "@/lib/format";
 import { MARK_PATH_15 } from "@/lib/mark";
+import { repoUrl } from "@/lib/repo";
 import { MenuToggle, NavLink, type NavItem } from "./nav";
 
 const HOW: NavItem = { href: "/#how", label: "How it works" };
@@ -11,8 +11,8 @@ const QUICKSTART: NavItem = { href: "/docs/quickstart", label: "Quickstart" };
 const START: NavItem = { href: "/#start", label: "Get started" };
 
 function repoItem(): NavItem | null {
-  const url = textOf(process.env.NEXT_PUBLIC_REPO_URL);
-  return url !== null && /^https?:\/\//.test(url) ? { href: url, label: "GitHub", external: true } : null;
+  const url = repoUrl();
+  return url === null ? null : { href: url, label: "GitHub", external: true };
 }
 
 export function Wordmark() {

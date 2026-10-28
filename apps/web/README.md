@@ -58,7 +58,7 @@ of time and any other path under `/docs` is a 404.
   | `<Endpoint>` | `method`, `path`, `auth`: `public`, `api-key` or `registration-token`; Markdown inside, optional |
   | `<Params>`, `<Param>` | `Params` takes an optional `title`; `Param` takes `name`, `type` and `required`; Markdown inside |
   | `<Term>` | `tip`, the plain-language meaning, shown by the site's `?` tooltip |
-  | `<Source>` | `path` from the repository root, `line` optional; a GitHub link when `NEXT_PUBLIC_REPO_URL` is set, else the path |
+  | `<Source>` | `path` from the repository root, `line` optional; a link to that file on `main` in the repository `NEXT_PUBLIC_REPO_URL` names (the z402 repository by default), or the path as plain code when the repository links are off |
 
 - **How it is built.** `@next/mdx` compiles the pages with the plugins `src/lib/docs/mdx/options.ts` names, as
   strings, since Turbopack hands them to its workers as JSON: remark-gfm, rehype-slug, `rehype-docs.mjs` (this app's:
@@ -73,7 +73,7 @@ of time and any other path under `/docs` is a 404.
 | Variable | Default | Read |
 |---|---|---|
 | `DISCOVERY_URL` | `http://127.0.0.1:4022` | at request time, by the pages and the proxy: the facilitator, which hosts the Bazaar |
-| `NEXT_PUBLIC_REPO_URL` | unset | at build time; when set, the header and footer link to it as GitHub, and the docs' `<Source>` links files under its `/blob/main/` |
+| `NEXT_PUBLIC_REPO_URL` | `https://github.com/oynozan/z402` | at build time; the repository the header and footer link to as GitHub, and under whose `/blob/main/` the docs' `<Source>` links files. A fork sets its own `http(s)` URL; a value that is not one turns these links off |
 | `NEXT_PUBLIC_SITE_URL` | unset | at build time; the public origin, such as `https://z402.example`, that the share image's URL is made absolute against. Unset, Next.js uses `http://localhost:3000` and warns |
 | `PORT`, `HOSTNAME` | `3000`, `0.0.0.0` | by the standalone server |
 
@@ -81,7 +81,7 @@ of time and any other path under `/docs` is a 404.
 
 ```sh
 pnpm exec tsc --noEmit    # the app and its tests
-pnpm exec vitest run      # catalog, calls, proxy, origin, and the docs: IA, anchors, code meta, search, diagrams
+pnpm exec vitest run      # catalog, calls, proxy, origin, the repo link, and the docs: IA, anchors, code meta, search, diagrams
 pnpm exec next build      # needs no Bazaar, nothing from it is built in; prerenders every docs page
 ```
 
@@ -95,6 +95,8 @@ its references so a clean checkout type-checks without it.
 
 ## Files worth knowing
 
+- `src/lib/repo.ts` is the one place that reads `NEXT_PUBLIC_REPO_URL` and holds its default, the z402 repository;
+  the header, the footer and `<Source>` all ask it.
 - `src/lib/mark.ts` is the z402 mark, a gold square cut in two by a Z, which the header, `src/app/icon.svg`,
   `src/app/apple-icon.tsx`, `src/app/opengraph-image.tsx` and the coin draw. The share image is set in Manrope from
   `src/app/fonts`, cut to Basic Latin, under the SIL Open Font License (`OFL.txt` there).
