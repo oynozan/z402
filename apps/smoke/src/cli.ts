@@ -19,10 +19,16 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
 /** What the session paid, and whether the run passed */
 export function summaryLines(result: FlowResult, sessions: readonly SessionLine[], services: Flags["services"]): string[] {
   const paid = result.steps.filter((s) => s.paid && s.ok).length;
+  // A step does not know its merchant, so with several the run's count is given once, under their sessions
   const lines =
     sessions.length === 0
       ? ["session none, no voucher was signed"]
-      : sessions.map((s) => `session ${shortAddress(s.payTo)} cumulative ${s.cumulativeZat} zat after ${plural(paid, "paid call")}`);
+      : sessions.length === 1
+        ? sessions.map((s) => `session ${shortAddress(s.payTo)} cumulative ${s.cumulativeZat} zat after ${plural(paid, "paid call")}`)
+        : [
+            ...sessions.map((s) => `session ${shortAddress(s.payTo)} cumulative ${s.cumulativeZat} zat`),
+            `${plural(paid, "paid call")} over ${sessions.length} sessions`,
+          ];
 
   const skipped = SERVICE_NAMES.filter((name) => services[name] === undefined);
   const note = skipped.length === 0 ? "" : `; skipped: ${skipped.join(", ")}`;

@@ -221,8 +221,9 @@ describe("summaryLines", () => {
       { llm: "http://l", markdown: "http://m" },
     );
     expect(lines).toEqual([
-      "session uregtest1aaa…aaaa11 cumulative 1000 zat after 2 paid calls",
-      "session uregtest1bbb…bbbb22 cumulative 500 zat after 2 paid calls",
+      "session uregtest1aaa…aaaa11 cumulative 1000 zat",
+      "session uregtest1bbb…bbbb22 cumulative 500 zat",
+      "2 paid calls over 2 sessions",
       "smoke ok: 2 steps passed on llm, markdown; skipped: embeddings, dropbox",
     ]);
   });
