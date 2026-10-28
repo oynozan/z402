@@ -1,15 +1,17 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEMO_TERMS, NETWORK_TESTNET } from "@z402/protocol";
+import { DEMO_TERMS, isValidPayTo, NETWORK_TESTNET } from "@z402/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterAll, afterEach, describe, expect, test } from "vitest";
 import { startFacilitator } from "../../src/app.js";
-import { zdecryptNetwork, zdecryptOwns } from "../../src/chain/zdecrypt.js";
+import { zdecryptNetwork, zdecryptOwnsShielded } from "../../src/chain/zdecrypt.js";
+import { isValidUivk } from "../../src/config.js";
 import { providerId } from "../../src/providers/id.js";
 import { keys, ZDECRYPT_BIN } from "../support/fixtures.js";
 
-// The same registration, with the real zdecrypt deciding who owns an address instead of a stub
+// The same registration, with the real zdecrypt deciding who owns an address instead of a stub. A key never appears in
+// a test name or in what an assertion would print, so every check on a key is on a boolean
 
 const NETWORK = NETWORK_TESTNET;
 const OPERATOR = `utest1${"q".repeat(60)}`;
@@ -25,18 +27,16 @@ afterEach(async () => {
   await Promise.all(running.splice(0).map((h) => h.close()));
 });
 
-/** What a registration must prove, as the process asks it of zdecrypt */
-async function owns(p: { payTo: string; uivk: string }): Promise<boolean> {
-  const found = await zdecryptOwns({
-    bin: ZDECRYPT_BIN,
-    key: p.uivk,
-    address: p.payTo,
-    network: zdecryptNetwork(NETWORK),
-  });
-  return found.ownedByKey && !found.hasTransparent;
+/** The string with its last character changed within the bech32 alphabet, which breaks the checksum only */
+function breakChecksum(s: string): string {
+  return s.slice(0, -1) + (s.at(-1) === "q" ? "p" : "q");
 }
 
-async function boot(dir: string) {
+/** What the process asks of zdecrypt for a registration, which is the function it is given */
+const owns = (p: { payTo: string; uivk: string }): Promise<boolean> =>
+  zdecryptOwnsShielded({ bin: ZDECRYPT_BIN, key: p.uivk, address: p.payTo, network: zdecryptNetwork(NETWORK) });
+
+async function boot(dir: string, lines: string[] = []) {
   const handle = await startFacilitator({
     network: NETWORK,
     chain: new FakeChain().viewFor(OPERATOR),
@@ -45,7 +45,7 @@ async function boot(dir: string) {
     terms: DEMO_TERMS,
     authToken: TOKEN,
     port: 0,
-    log: () => undefined,
+    log: (msg) => lines.push(msg),
     providers: { dir, chainFor: (p) => new FakeChain().viewFor(p.payTo), owns },
   });
   running.push(handle);
@@ -68,10 +68,10 @@ describe("POST /providers with the real zdecrypt", () => {
     expect(res.status).toBe(201);
     const answer = (await res.json()) as { providerId: string; apiKey: string };
     expect(answer.providerId).toBe(ID);
-    expect(JSON.stringify(answer)).not.toContain(keys.merchant.uivk);
+    expect(JSON.stringify(answer).includes(keys.merchant.uivk)).toBe(false);
     const me = await fetch(`${url}/providers/me`, { headers: { authorization: `Bearer ${answer.apiKey}` } });
     expect(me.status).toBe(200);
-    expect(readFileSync(join(dir, "registry.json"), "utf8")).toContain(keys.merchant.uivk);
+    expect(readFileSync(join(dir, "registry.json"), "utf8").includes(keys.merchant.uivk)).toBe(true);
   });
 
   test("refuses a viewing key that is not the one of the address as not_owner", async () => {
@@ -81,6 +81,28 @@ describe("POST /providers with the real zdecrypt", () => {
     expect(await res.json()).toMatchObject({ error: "not_owner" });
   });
 
+  // The altered value still has the shape of one, so the checks of the request pass and only zdecrypt can refuse it
+  test.each([
+    ["a viewing key", { payTo: MERCHANT.payTo, uivk: breakChecksum(MERCHANT.uivk) }],
+    ["a payTo", { payTo: breakChecksum(MERCHANT.payTo), uivk: MERCHANT.uivk }],
+  ])("%s of the right shape with a bad checksum is a 403 not_owner, never a 500", async (label, body) => {
+    expect(isValidUivk(body.uivk, NETWORK)).toBe(true);
+    expect(isValidPayTo(body.payTo, NETWORK)).toBe(true);
+    const dir = join(scratch, `checksum-${label.replace(/\W/g, "")}`);
+    const lines: string[] = [];
+    const { url } = await boot(dir, lines);
+
+    const res = await register(url, body);
+    const answer = await res.json();
+    expect(res.status).toBe(403);
+    expect(answer).toMatchObject({ error: "not_owner", message: expect.any(String) });
+    expect(JSON.stringify(answer).includes(body.uivk)).toBe(false);
+    // Nothing failed, so nothing is logged as a failure, and nothing was opened or stored
+    expect(lines.filter((l) => l.includes("registration failed"))).toEqual([]);
+    expect(existsSync(join(dir, "registry.json"))).toBe(false);
+    expect(readdirSync(join(dir, "ledgers")).filter((n) => n.endsWith(".jsonl"))).toEqual([]);
+  });
+
   test("refuses the full viewing key, which is no unified incoming viewing key", async () => {
     const { url } = await boot(join(scratch, "ufvk"));
     const res = await register(url, { payTo: MERCHANT.payTo, uivk: keys.merchant.ufvk });
@@ -88,7 +110,7 @@ describe("POST /providers with the real zdecrypt", () => {
     const body = (await res.json()) as { error: string; message: string };
     expect(body.error).toBe("invalid_request");
     expect(body.message).toMatch(/^uivk: /);
-    expect(body.message).not.toContain(keys.merchant.ufvk);
+    expect(body.message.includes(keys.merchant.ufvk)).toBe(false);
   });
 
   test("keeps the provider through a restart, proving its key owns the address again", async () => {
@@ -116,6 +138,34 @@ describe("POST /providers with the real zdecrypt", () => {
       (e: Error) => e,
     );
     expect(error?.message).toBe(`providersDir: provider ${ID}: the stored viewing key no longer owns its payTo`);
-    expect(error?.message).not.toContain(keys.publishedX402Uivk);
+    expect(error?.message.includes(keys.publishedX402Uivk)).toBe(false);
   });
+
+  // A stored entry that stopped decoding is one whose key no longer owns its payTo, not a failure to ask
+  test.each([["viewing key", "uivk"] as const, ["payTo", "payTo"] as const])(
+    "refuses to start on a stored %s that has a bad checksum, as one that no longer owns its payTo",
+    async (_name, field) => {
+      const dir = join(scratch, `stored-${field}`);
+      const first = await boot(dir);
+      await register(first.url, MERCHANT);
+      await first.close();
+
+      const path = join(dir, "registry.json");
+      const registry = JSON.parse(readFileSync(path, "utf8")) as { providers: Array<Record<string, string>> };
+      const entry = registry.providers[0] as Record<string, string>;
+      entry[field] = breakChecksum(entry[field] as string);
+      // The id of a payTo is fixed by it, so the entry keeps one that fits and only zdecrypt can tell
+      entry.id = providerId(NETWORK, entry.payTo as string);
+      writeFileSync(path, `${JSON.stringify(registry)}\n`);
+
+      const error = await boot(dir).then(
+        () => undefined,
+        (e: Error) => e,
+      );
+      expect(error?.message).toBe(
+        `providersDir: provider ${entry.id}: the stored viewing key no longer owns its payTo`,
+      );
+      expect(error?.message.includes(entry.uivk as string)).toBe(false);
+    },
+  );
 });

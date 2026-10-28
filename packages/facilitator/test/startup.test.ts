@@ -155,7 +155,7 @@ describe("runStartupChecks with a stand-in zdecrypt", () => {
     outputs: [{ ...KAGE_REPORT.outputs[0], ...over }],
   });
 
-  /** `ownsByKey` answers the owns check of one viewing key in place of `owns`, since a provider's can differ */
+  /** `ownsByKey` answers the owns check of one viewing key in place of `owns`, and `{ $exit, $stdout }` is an exit */
   function reply(decrypt: unknown, owns: unknown = OWNS, ownsByKey: Record<string, unknown> = {}): void {
     writeFileSync(control, JSON.stringify({ decrypt, owns, ownsByKey }));
   }
@@ -167,7 +167,13 @@ const replies = JSON.parse(require("node:fs").readFileSync(${JSON.stringify(cont
 process.stdin.resume();
 process.stdin.on("end", () => {
   const byKey = process.argv[2] === "owns" ? replies.ownsByKey[process.env.ZDECRYPT_KEY] : undefined;
-  process.stdout.write(JSON.stringify(byKey ?? replies[process.argv[2]]));
+  const reply = byKey ?? replies[process.argv[2]];
+  if (reply !== null && typeof reply === "object" && "$exit" in reply) {
+    process.stdout.write(JSON.stringify(reply.$stdout));
+    process.exitCode = reply.$exit;
+  } else {
+    process.stdout.write(JSON.stringify(reply));
+  }
 });
 `);
     stand.bin = stub.bin;
@@ -514,6 +520,32 @@ process.stdin.on("end", () => {
           `facilitator: providersDir: provider ${id}: the stored viewing key no longer owns its payTo`,
         );
         expect(out.stderr).not.toContain(PROVIDER.uivk);
+      });
+
+      test("answers 403 not_owner to a key that zdecrypt refuses, with no failure", { timeout: 30_000 }, async () => {
+        // What the real binary does with a key or an address of the right shape that does not decode
+        const refusal = { error: "not a mainnet unified full viewing key (malformed encoding)" };
+        reply(KAGE_REPORT, OWNS, { [PROVIDER.uivk]: { $exit: 2, $stdout: refusal } });
+        const dir = join(scratch, `providers-${Math.random().toString(36).slice(2)}`);
+        const { child, out, exited } = launch(configured({ Z402_PROVIDERS_DIR: dir }));
+        try {
+          await until(() => out.stdout.split("\n").length > 2, "the ready line and the provider count");
+          const url = /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(out.stdout)?.[1] ?? "";
+          const res = await fetch(`${url}/providers`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ payTo: PROVIDER.payTo, uivk: PROVIDER.uivk }),
+          });
+          expect(res.status).toBe(403);
+          expect(await res.json()).toMatchObject({ error: "not_owner" });
+          child.kill("SIGINT");
+          expect(await exited).toBe(0);
+        } finally {
+          child.kill("SIGKILL");
+        }
+        expect(existsSync(join(dir, "registry.json"))).toBe(false);
+        expect(out.stderr.includes("registration failed")).toBe(false);
+        for (const text of [out.stdout, out.stderr]) expect(text.includes(PROVIDER.uivk)).toBe(false);
       });
 
       test("registers a provider over HTTP, proves its key and stores only a hash", { timeout: 30_000 }, async () => {

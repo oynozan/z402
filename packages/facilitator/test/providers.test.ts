@@ -8,11 +8,12 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { connect, createServer, type AddressInfo } from "node:net";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import { ASSET, DEMO_TERMS, NETWORK_REGTEST, NETWORK_TESTNET, REASON, SCHEME } from "@z402/protocol";
+import { ASSET, DEMO_TERMS, NETWORK_REGTEST, NETWORK_TESTNET, REASON, SCHEME, type ChainView } from "@z402/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import { startFacilitator, type FacilitatorHandle, type FacilitatorOptions } from "../src/app.js";
@@ -198,6 +199,40 @@ function locksUnder(dir: string): string[] {
         .map(String)
         .filter((n) => n.endsWith(".lock"))
     : [];
+}
+
+/** Puts a directory where the ledger of a provider belongs, so that its next write fails with EISDIR */
+function breakLedger(rig: Rig, who: { payTo: string }): void {
+  rmSync(ledgerOf(rig, who));
+  mkdirSync(ledgerOf(rig, who));
+}
+
+/** Writes the lock of `path` as a start does that took it over while this one was paused for more than 15 s */
+function takeOver(path: string): void {
+  rmSync(`${path}.lock`);
+  const other = { pid: process.pid, host: hostname(), token: "f0f0f0f0f0f0f0f0", since: new Date().toISOString() };
+  writeFileSync(`${path}.lock`, JSON.stringify(other));
+}
+
+/** A port that nothing listens on now */
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+/** True when a connection to the port is refused, which is what nothing listening on it comes to */
+function refuses(port: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const socket = connect({ port, host: "127.0.0.1" });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", (e: NodeJS.ErrnoException) => (e.code === "ECONNREFUSED" ? resolve(true) : reject(e)));
+  });
 }
 
 function writeRegistry(rig: Rig, providers: unknown[], network: string = NETWORK): string {
@@ -793,10 +828,12 @@ describe("POST /providers", () => {
     const { url } = await boot(rig);
     const both = await Promise.all([register(url, A), register(url, A)]);
 
-    expect(both.map((r) => r.status)).toEqual([201, 200]);
-    const [first, second] = both.map((r) => r.json.apiKey as string);
-    expect((await call(url, "/providers/me", { token: first })).status).toBe(401);
-    expect((await call(url, "/providers/me", { token: second })).status).toBe(200);
+    // Whichever request reached the server first registered, and the other one rotated its key
+    expect(both.map((r) => r.status).sort()).toEqual([200, 201]);
+    const registered = both.find((r) => r.status === 201);
+    const rotated = both.find((r) => r.status === 200);
+    expect((await call(url, "/providers/me", { token: registered?.json.apiKey })).status).toBe(401);
+    expect((await call(url, "/providers/me", { token: rotated?.json.apiKey })).status).toBe(200);
   });
 });
 
@@ -844,7 +881,80 @@ describe("start-up", () => {
     expect((await call(second.url, "/providers/me", { token: old })).status).toBe(401);
   });
 
-  test("polls every provider once before it listens", async () => {
+  test("rotates the key of a provider that an earlier start registered, as a lost key is recovered", async () => {
+    const rig = newRig();
+    const first = await boot(rig);
+    const original = await enroll(first.url, A);
+    const r = await requirementsFor(first.url, A.payTo);
+    await paid(first.url, original, r, 500n, deposit(rig.chainOf(A.payTo), A.payTo));
+    await first.close();
+
+    const second = await boot(rig);
+    const rotated = await register(second.url, A);
+    expect(rotated.status).toBe(200);
+    const fresh = rotated.json.apiKey as string;
+    expect(fresh).not.toBe(original);
+    expect((await call(second.url, "/providers/me", { token: original })).status).toBe(401);
+    const me = await call(second.url, "/providers/me", { token: fresh });
+    expect(me).toMatchObject({ status: 200, json: { providerId: ID_A } });
+
+    // The session and the ledger are those the provider had before the restart, and it has no second runtime
+    const next = await settle(second.url, fresh, pay(r, 1000n), r);
+    expect(next.json).toMatchObject({ success: true, amount: "500", extra: { session: { cumulativeZat: "1000" } } });
+    expect(ledgerTypes(ledgerOf(rig, A))).toEqual(["deposit", "voucher", "voucher"]);
+    expect(second.providerCount()).toBe(1);
+
+    // A second rotation takes out the key of the first, since the hash stored by then is that one
+    const third = (await register(second.url, A)).json.apiKey as string;
+    for (const dead of [original, fresh]) {
+      expect((await call(second.url, "/providers/me", { token: dead })).status).toBe(401);
+    }
+    expect((await call(second.url, "/providers/me", { token: third })).status).toBe(200);
+  });
+
+  test("listens only once the registry and every runtime are loaded and polled, and then serves the keys", async () => {
+    const rig = newRig();
+    const first = await boot(rig);
+    const keyA = await enroll(first.url, A);
+    const keyB = await enroll(first.url, B);
+    await first.close();
+
+    // Each probe asks the port from inside a step of the start, and the answer must be that nothing listens yet
+    const port = await freePort();
+    const probes: Array<{ at: string; refused: boolean }> = [];
+    const probe = async (at: string): Promise<void> => {
+      probes.push({ at, refused: await refuses(port) });
+    };
+    const probing = (at: string, view: ChainView): ChainView => ({
+      tip: async () => {
+        await probe(at);
+        return view.tip();
+      },
+      inspect: (txid) => view.inspect(txid),
+    });
+    rig.owns.mockImplementation(async () => {
+      await probe("owns");
+      return true;
+    });
+
+    const second = await boot(
+      rig,
+      { port, chain: probing("operator tip", rig.chainOf(OPERATOR).viewFor(OPERATOR)) },
+      { chainFor: (p) => probing("provider tip", rig.chainOf(p.payTo).viewFor(p.payTo)) },
+    );
+
+    // No step is missing from the probes, so none of them can have been skipped
+    expect(probes.map((p) => p.at).sort()).toEqual(["operator tip", "owns", "owns", "provider tip", "provider tip"]);
+    expect(probes.filter((p) => !p.refused)).toEqual([]);
+    expect(second.url).toBe(`http://127.0.0.1:${port}`);
+
+    // Once it listens, the first request of a stored key is served
+    expect(await refuses(port)).toBe(false);
+    expect((await call(second.url, "/providers/me", { token: keyA })).status).toBe(200);
+    expect((await call(second.url, "/providers/me", { token: keyB })).status).toBe(200);
+  });
+
+  test("has polled every provider by the time it resolves", async () => {
     const rig = newRig();
     const first = await boot(rig);
     const keyA = await enroll(first.url, A);
@@ -1158,7 +1268,7 @@ describe("authentication", () => {
     expect(await call(url, "/supported", { method: "POST", body: {} })).toMatchObject({ status: 404 });
   });
 
-  test("GET /supported needs no key and is answered by the operator's runtime to every key of the facilitator", async () => {
+  test("GET /supported needs no key, and the operator's runtime answers every key of the facilitator", async () => {
     const rig = newRig();
     const { url } = await boot(rig);
     const key = await enroll(url, A);
@@ -1304,6 +1414,127 @@ describe("shutdown", () => {
     const before = reads.tip;
     await handle.pollNow();
     expect(reads.tip).toBe(before);
+  });
+});
+
+describe("a failure that exits the host", () => {
+  /** A deposit presented to a provider and recorded as a voucher, so that the provider's next settle writes */
+  async function ready(url: string, key: string, rig: Rig, who: Who) {
+    const r = await requirementsFor(url, who.payTo);
+    const d1 = deposit(rig.chainOf(who.payTo), who.payTo);
+    expect((await verify(url, key, pay(r, 500n, d1), r)).json.isValid).toBe(true);
+    return { r, d1 };
+  }
+
+  const failedSettle = (reply: Reply) =>
+    expect(reply.json).toMatchObject({ success: false, errorReason: REASON.unexpectedSettleError, transaction: "" });
+
+  test("a ledger write that fails in a provider loaded at start calls onFatal once", async () => {
+    const rig = newRig();
+    const first = await boot(rig);
+    const key = await enroll(first.url, A);
+    await first.close();
+
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { url } = await boot(rig, { onFatal });
+    const { r, d1 } = await ready(url, key, rig, A);
+    expect(onFatal).not.toHaveBeenCalled();
+
+    breakLedger(rig, A);
+    failedSettle(await settle(url, key, pay(r, 500n, d1), r));
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(onFatal.mock.calls[0]?.[0]).toMatchObject({ code: "EISDIR" });
+  });
+
+  test("a ledger write that fails in a provider registered while running calls onFatal once", async () => {
+    const rig = newRig();
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { url } = await boot(rig, { onFatal });
+    const key = await enroll(url, B);
+    const { r, d1 } = await ready(url, key, rig, B);
+    expect(onFatal).not.toHaveBeenCalled();
+
+    breakLedger(rig, B);
+    failedSettle(await settle(url, key, pay(r, 500n, d1), r));
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(onFatal.mock.calls[0]?.[0]).toMatchObject({ code: "EISDIR" });
+  });
+
+  test("the operator and two providers whose ledgers fail call onFatal once between them", async () => {
+    const rig = newRig();
+    const first = await boot(rig, { ledgerPath: join(rig.dir, "operator.jsonl") });
+    const keyA = await enroll(first.url, A);
+    await first.close();
+
+    // A is loaded from the registry, B registers while running, and the operator is the third runtime
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { url, pollNow } = await boot(rig, { onFatal, ledgerPath: join(rig.dir, "operator.jsonl") });
+    const keyB = await enroll(url, B);
+    const a = await ready(url, keyA, rig, A);
+    const b = await ready(url, keyB, rig, B);
+    const operator = await ready(url, TOKEN, rig, { payTo: OPERATOR, uivk: "" });
+
+    breakLedger(rig, A);
+    breakLedger(rig, B);
+    rmSync(join(rig.dir, "operator.jsonl"));
+    mkdirSync(join(rig.dir, "operator.jsonl"));
+
+    // The first runtime to fail tells the host at once, and the failures of the others add nothing to it
+    const told: number[] = [];
+    for (const [key, ready] of [
+      [keyA, a],
+      [keyB, b],
+      [TOKEN, operator],
+    ] as const) {
+      failedSettle(await settle(url, key, pay(ready.r, 500n, ready.d1), ready.r));
+      told.push(onFatal.mock.calls.length);
+    }
+    expect(told).toEqual([1, 1, 1]);
+
+    // A watcher pass that cannot write the status of a deposit it saw mined reports the same failure again
+    for (const who of [A, B, { payTo: OPERATOR }]) rig.chainOf(who.payTo).mine(1);
+    await pollNow();
+    expect(onFatal).toHaveBeenCalledTimes(1);
+  });
+
+  test("a ledger lock another start took in a registered provider calls onFatal once", async () => {
+    const rig = newRig();
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { url } = await boot(rig, { onFatal });
+    const key = await enroll(url, A);
+    const { r, d1 } = await ready(url, key, rig, A);
+
+    takeOver(ledgerOf(rig, A));
+    const before = readFileSync(ledgerOf(rig, A));
+    failedSettle(await settle(url, key, pay(r, 500n, d1), r));
+    expect(readFileSync(ledgerOf(rig, A))).toEqual(before);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(String(onFatal.mock.calls[0]?.[0])).toMatch(/is no longer locked by this facilitator/);
+  });
+
+  test("a registry lock another start took calls onFatal at the next write to it, which is refused", async () => {
+    const rig = newRig();
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { url } = await boot(rig, { onFatal });
+    const key = await enroll(url, A);
+    const registry = join(rig.providers, "registry.json");
+    const stored = readFileSync(registry);
+    expect(onFatal).not.toHaveBeenCalled();
+
+    takeOver(registry);
+    const refused = await register(url, B);
+    expect(refused).toMatchObject({ status: 500, json: { error: "internal_error" } });
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(String(onFatal.mock.calls[0]?.[0])).toMatch(/is no longer locked by this facilitator/);
+
+    // The start that lost the lock wrote nothing, and the runtime it had opened for B was let go
+    expect(readFileSync(registry)).toEqual(stored);
+    expect(locksUnder(join(rig.providers, "ledgers")).filter((n) => n.startsWith(ID_B))).toEqual([]);
+    expect((await call(url, "/providers/me", { token: key })).status).toBe(200);
+
+    // A later write is refused the same way, and the host is told only once
+    expect((await register(url, A)).status).toBe(500);
+    expect(onFatal).toHaveBeenCalledTimes(1);
   });
 });
 

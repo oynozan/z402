@@ -25,6 +25,14 @@ export class ZdecryptError extends Error {
   }
 }
 
+/** What zdecrypt printed with exit 2 when it refused its input, such as a key or an address that does not decode */
+export class ZdecryptRefused extends ZdecryptError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ZdecryptRefused";
+  }
+}
+
 export interface ZOutput {
   pool: "sapling" | "orchard" | "ironwood";
   scope: "external" | "internal";
@@ -171,7 +179,7 @@ async function call(invocation: Invocation): Promise<unknown> {
   }
   if (code === null) throw new ZdecryptError(`zdecrypt was killed by ${signal}`);
   if (code === EXIT_ERROR && isRecord(printed) && typeof printed.error === "string") {
-    throw new ZdecryptError(printed.error);
+    throw new ZdecryptRefused(printed.error);
   }
   throw new ZdecryptError(`zdecrypt exited with code ${code}`);
 }
@@ -251,4 +259,21 @@ export async function zdecryptOwns(o: {
     throw malformed("owns");
   }
   return { hasTransparent: printed.hasTransparent, ownedByKey: printed.ownedByKey };
+}
+
+/** Whether `key` is the viewing key of `address`, and `address` takes no transparent deposit */
+export async function zdecryptOwnsShielded(o: {
+  bin: string;
+  key: string;
+  address: string;
+  network: ZdecryptNetwork;
+}): Promise<boolean> {
+  try {
+    const found = await zdecryptOwns(o);
+    return found.ownedByKey && !found.hasTransparent;
+  } catch (e) {
+    // A key or an address that does not decode owns nothing, while a failure to run zdecrypt stays a failure
+    if (e instanceof ZdecryptRefused) return false;
+    throw e;
+  }
 }

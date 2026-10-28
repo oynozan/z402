@@ -2,7 +2,7 @@
 import { createLightwalletdClient } from "@z402/lightwalletd";
 import { startFacilitator, type FacilitatorHandle } from "./app.js";
 import { cachedTip, LightwalletdChainView } from "./chain/lightwalletdChainView.js";
-import { zdecryptNetwork, zdecryptOwns } from "./chain/zdecrypt.js";
+import { zdecryptNetwork, zdecryptOwnsShielded } from "./chain/zdecrypt.js";
 import { loadConfig } from "./config.js";
 import { runStartupChecks } from "./startup.js";
 
@@ -62,15 +62,13 @@ async function main(): Promise<void> {
       providers: {
         dir: config.providersDir,
         chainFor: viewOf,
-        owns: async (p) => {
-          const found = await zdecryptOwns({
+        owns: (p) =>
+          zdecryptOwnsShielded({
             bin: config.zdecryptBin,
             key: p.uivk,
             address: p.payTo,
             network: zdecryptNetwork(config.network),
-          });
-          return found.ownedByKey && !found.hasTransparent;
-        },
+          }),
         max: config.maxProviders,
         registrationToken: config.registrationToken,
       },
