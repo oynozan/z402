@@ -1,6 +1,7 @@
 import { TXID_RE, type DepositRequest, type ZcashWallet } from "@z402/protocol";
 import { systemClock, type Clock } from "../clock.js";
 import { DepositStatusUnknownError, ZalletRpcError } from "../errors.js";
+import { Mutex } from "../mutex.js";
 
 const ZAT_PER_ZEC = 100_000_000n;
 const INSUFFICIENT_RE = /insufficient/i;
@@ -127,6 +128,8 @@ export class ZalletRpcWallet implements ZcashWallet {
   readonly #retries: number;
   readonly #retryWaitMs: number;
   readonly #requestTimeoutMs: number;
+  /** One z_sendmany at a time, held until its operation settles, so deposits to two payees never pick the same notes */
+  readonly #sending = new Mutex();
   #account: Promise<string> | undefined;
   #from: Promise<string> | undefined;
   #nextId = 1;
@@ -150,7 +153,13 @@ export class ZalletRpcWallet implements ZcashWallet {
     const params = [from, [{ address: req.to, amount: zatToZecString(req.amountZat), memo: memoHex }], 1, null, "FullPrivacy"];
 
     for (let retry = 0; ; retry++) {
-      const attempt = await this.#attempt(params, req.memo);
+      const release = await this.#sending.acquire();
+      let attempt: Attempt;
+      try {
+        attempt = await this.#attempt(params, req.memo);
+      } finally {
+        release();
+      }
       if ("txid" in attempt) return attempt;
       if (retry >= this.#retries) throw new InsufficientFundsError(attempt.insufficient);
       await this.#clock.sleep(this.#retryWaitMs);

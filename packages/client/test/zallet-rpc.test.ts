@@ -607,6 +607,72 @@ describe("ZalletRpcWallet", () => {
         fake = await startFakeZallet();
       });
     });
+
+    describe("two deposits at once from one wallet", () => {
+      const MEMO_2 = "cd".repeat(32) + ":1";
+      const MEMO_2_HEX = Buffer.from(MEMO_2).toString("hex");
+
+      function sendBoth(wallet: ZalletRpcWallet): Promise<[unknown, unknown]> {
+        const settle = (p: Promise<{ txid: string }>): Promise<unknown> => p.catch((e: unknown) => e);
+        return drive(
+          clock,
+          Promise.all([
+            settle(wallet.sendDeposit({ to: TO, amountZat: 100_000n, memo: MEMO })),
+            settle(wallet.sendDeposit({ to: TO, amountZat: 100_000n, memo: MEMO_2 })),
+          ]),
+        );
+      }
+
+      function sentMemos(): string[] {
+        return fake.calls("z_sendmany").map((c) => (c.params as [string, { memo: string }[]])[1][0]!.memo);
+      }
+
+      function finishEach(txidOf: Record<string, string>): void {
+        fake.on("z_getoperationresult", (params) => ({ result: [opSuccess(txidOf[opIdOf(params)]!, opIdOf(params))] }));
+      }
+
+      it("the second z_sendmany waits until the first operation has finished, not just until it started", async () => {
+        fake.on("z_sendmany", { result: "opid-1" }, { result: "opid-2" });
+        let firstRunning = 3;
+        fake.on("z_getoperationresult", (params) => {
+          const id = opIdOf(params);
+          if (id === "opid-1" && firstRunning > 0) {
+            firstRunning -= 1;
+            return { result: [] };
+          }
+          return { result: [opSuccess(id === "opid-1" ? txid(1) : txid(2), id)] };
+        });
+        fake.on("z_getoperationstatus", (params) => ({ result: [opRunning("executing", opIdOf(params))] }));
+
+        await expect(sendBoth(make())).resolves.toEqual([{ txid: txid(1) }, { txid: txid(2) }]);
+
+        const firstPolls = fake.requests.flatMap((r, i) => (r.method === "z_getoperationresult" && opIdOf(r.params) === "opid-1" ? [i] : []));
+        expect(firstPolls).toHaveLength(4);
+        expect(fake.requests.map((r) => r.method).lastIndexOf("z_sendmany")).toBeGreaterThan(firstPolls[firstPolls.length - 1]!);
+        expect(sentMemos()).toEqual([MEMO_HEX, MEMO_2_HEX]);
+      });
+
+      it("a refused first send lets the second one through", async () => {
+        fake.on("z_sendmany", { error: { code: -8, message: "Invalid parameter, unknown address" } }, { result: "opid-2" });
+        finishEach({ "opid-2": txid(2) });
+
+        const [first, second] = await sendBoth(make());
+
+        expect(first).toBeInstanceOf(ZalletRpcError);
+        expect(second).toEqual({ txid: txid(2) });
+        expect(sentMemos()).toEqual([MEMO_HEX, MEMO_2_HEX]);
+      });
+
+      it("the wait before an insufficient-funds retry does not hold the wallet", async () => {
+        fake.on("z_sendmany", { error: { code: -6, message: "Insufficient funds" } }, { result: "opid-2" }, { result: "opid-3" });
+        finishEach({ "opid-2": txid(2), "opid-3": txid(3) });
+
+        await expect(sendBoth(make())).resolves.toEqual([{ txid: txid(3) }, { txid: txid(2) }]);
+
+        expect(sentMemos()).toEqual([MEMO_HEX, MEMO_2_HEX, MEMO_HEX]);
+        expect(clock.sleeps).toEqual([RETRY_WAIT]);
+      });
+    });
   });
 
   describe("findSentByMemo", () => {
