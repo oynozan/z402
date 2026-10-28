@@ -1,7 +1,7 @@
 # A trial on one machine, with Z402_TLS=internal in .env.vps (scripts/vps.sh adds this file by itself). Caddy's own CA
 # then signs every site, and the demo API, which reaches the facilitator at its https name, has to trust that CA. Caddy
-# copies the CA's certificate, never its key, to a volume that only the API reads, and is healthy once it has. With real
-# certificates (Z402_TLS=acme) none of this is in use.
+# copies the CA's certificate, never its key, into its config volume, which holds nothing secret and which only the API
+# reads, and is healthy once it has. With real certificates (Z402_TLS=acme) none of this is in use.
 
 services:
   caddy:
@@ -11,19 +11,14 @@ services:
       - |
         (
           until [ -s /data/caddy/pki/authorities/local/root.crt ]; do sleep 1; done
-          cp /data/caddy/pki/authorities/local/root.crt /local-ca/root.crt
-          chmod 644 /local-ca/root.crt
+          cp /data/caddy/pki/authorities/local/root.crt /config/local-root.crt
+          chmod 644 /config/local-root.crt
         ) &
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
-    volumes:
-      - local-ca:/local-ca
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/ && test -s /local-ca/root.crt"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/ && test -s /config/local-root.crt"]
   api:
     environment:
-      NODE_EXTRA_CA_CERTS: /local-ca/root.crt
+      NODE_EXTRA_CA_CERTS: /caddy-config/local-root.crt
     volumes:
-      - local-ca:/local-ca:ro
-
-volumes:
-  local-ca:
+      - caddy-config:/caddy-config:ro
