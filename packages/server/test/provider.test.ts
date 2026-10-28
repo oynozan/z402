@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { inspect } from "node:util";
+import { gzipSync } from "node:zlib";
 import { NETWORK_REGTEST, NETWORK_TESTNET } from "@z402/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { checkProvider, ProviderCheckError } from "../src/index.js";
@@ -18,6 +19,8 @@ type Options = Parameters<typeof checkProvider>[0];
 type Fetch = typeof fetch;
 
 const base: Options = { facilitatorUrl: FACILITATOR, token: TOKEN, payTo: PAY_TO, network: NETWORK };
+/** What the message says of an answer that cannot be read, after the facilitator is named */
+const UNREADABLE = "answered /providers/me with a body that is not {providerId, network, payTo}";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -37,6 +40,25 @@ const hanging = () =>
         if (signal) signal.addEventListener("abort", () => reject(signal.reason), { once: true });
       }),
   );
+
+/** A 200 over `chunks` chunks of `size` spaces, pulled one at a time, with a count of the pulls and of the cancel */
+function spaces(size: number, chunks: number, headers?: Record<string, string>) {
+  const seen = { pulls: 0, cancelled: false };
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        seen.pulls += 1;
+        if (seen.pulls > chunks) controller.close();
+        else controller.enqueue(new Uint8Array(size).fill(0x20));
+      },
+      cancel() {
+        seen.cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { seen, fetch: vi.fn<Fetch>(async () => new Response(body, { status: 200, headers })) };
+}
 
 /** The error a failed check throws, after the checks that every one of them must pass */
 async function refused(over: Partial<Options>, secret?: string): Promise<ProviderCheckError> {
@@ -202,6 +224,32 @@ describe("checkProvider", () => {
       expect(e.message).toContain("{providerId, network, payTo}");
     });
 
+    describe("a 200 body past 4096 bytes", () => {
+      it("is read up to 4096 bytes and refused from 4097", async () => {
+        const padded = (bytes: number) => JSON.stringify(ME).padEnd(bytes, " ");
+        await expect(checkProvider({ ...base, fetch: answering(reply(200, padded(4096))) })).resolves.toBeUndefined();
+        const e = await refused({ fetch: answering(reply(200, padded(4097))) });
+        expect(e).toMatchObject({ field: "facilitatorUrl", retryable: false });
+        expect(e.message).toBe(`facilitatorUrl: the facilitator at ${FACILITATOR} ${UNREADABLE}`);
+      });
+
+      it("is pulled on no further than the chunk that crosses the cap, and the stream is cancelled", async () => {
+        const { seen, fetch } = spaces(1024, 1000);
+        const e = await refused({ fetch });
+        expect(e).toMatchObject({ field: "facilitatorUrl", retryable: false });
+        expect(e.message).toBe(`facilitatorUrl: the facilitator at ${FACILITATOR} ${UNREADABLE}`);
+        expect(seen).toEqual({ pulls: 5, cancelled: true });
+      });
+
+      it("is refused on its declared length, with none of it read", async () => {
+        const { seen, fetch } = spaces(1024, 1000, { "content-length": "1024000" });
+        const e = await refused({ fetch });
+        expect(e).toMatchObject({ field: "facilitatorUrl", retryable: false });
+        expect(e.message).toBe(`facilitatorUrl: the facilitator at ${FACILITATOR} ${UNREADABLE}`);
+        expect(seen).toEqual({ pulls: 0, cancelled: true });
+      });
+    });
+
     // Beyond the table, nothing else is a z402 facilitator's answer and asking again gets the same
     it.each([400, 405, 410, 301, 204])("a %i answer, which no facilitator of this rail sends", async (status) => {
       const e = await refused({ fetch: answering(reply(status)) });
@@ -353,6 +401,39 @@ describe("checkProvider over a real connection", () => {
     }
   };
 
+  /** Sends `total` copies of `chunk` while the client reads, then ends the body or leaves it open for `stall` */
+  async function streaming(
+    chunk: Buffer,
+    total: number,
+    over: { headers?: Record<string, string>; stall?: boolean } = {},
+  ) {
+    const seen = { written: 0, cut: false };
+    let gone = () => {};
+    const closed = new Promise<void>((resolve) => {
+      gone = resolve;
+    });
+    const url = await serving((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", ...over.headers });
+      res.on("close", () => {
+        seen.cut = !res.writableFinished;
+        gone();
+      });
+      void (async () => {
+        for (let i = 0; i < total && !res.destroyed; i++) {
+          if (!res.write(chunk)) {
+            await new Promise((resolve) => {
+              res.once("drain", resolve);
+              res.once("close", resolve);
+            });
+          }
+          seen.written = i + 1;
+        }
+        if (over.stall !== true && !res.destroyed) res.end();
+      })();
+    });
+    return { url, seen, closed };
+  }
+
   it("passes for the key the server knows, with the trailing slash of the URL left off the route", async () => {
     const url = await serving(operator);
     await expect(checkProvider({ ...base, facilitatorUrl: `${url}/` })).resolves.toBeUndefined();
@@ -389,6 +470,59 @@ describe("checkProvider over a real connection", () => {
     const e = await refused({ facilitatorUrl: url, timeoutMs: 150 });
     expect(e).toMatchObject({ field: "facilitatorUrl", retryable: true });
     expect(e.message).toContain("within 150 ms");
+  });
+
+  it("is facilitatorUrl, not retryable, for a body of megabytes, which is not read to its end", async () => {
+    const stream = await streaming(Buffer.alloc(1024 * 1024, "a"), 64);
+    const e = await refused({ facilitatorUrl: stream.url });
+    expect(e).toMatchObject({ field: "facilitatorUrl", retryable: false });
+    expect(e.message).toBe(`facilitatorUrl: the facilitator at ${stream.url} ${UNREADABLE}`);
+    await stream.closed;
+    expect(stream.seen.cut).toBe(true);
+    expect(stream.seen.written).toBeLessThan(16);
+  });
+
+  it("is facilitatorUrl, not retryable, for a gzip body that decodes past the cap, before it ends", async () => {
+    const member = gzipSync(Buffer.alloc(16 * 1024 * 1024, " "));
+    const stream = await streaming(member, 1, { headers: { "content-encoding": "gzip" }, stall: true });
+    const e = await refused({ facilitatorUrl: stream.url, timeoutMs: 2000 });
+    expect(e).toMatchObject({ field: "facilitatorUrl", retryable: false });
+    expect(e.message).toBe(`facilitatorUrl: the facilitator at ${stream.url} ${UNREADABLE}`);
+    await stream.closed;
+    expect(stream.seen.cut).toBe(true);
+  });
+
+  it("counts a gzip body by what it decodes to and not by what it weighs", async () => {
+    const body = gzipSync(Buffer.concat([Buffer.from(JSON.stringify(ME)), Buffer.alloc(1024 * 1024, " ")]));
+    expect(body.length).toBeLessThan(4096);
+    const url = await serving((_req, res) => {
+      const headers = { "content-type": "application/json", "content-encoding": "gzip", "content-length": body.length };
+      res.writeHead(200, headers);
+      res.end(body);
+    });
+    const e = await refused({ facilitatorUrl: url });
+    expect(e).toMatchObject({ field: "facilitatorUrl", retryable: false });
+    expect(e.message).toBe(`facilitatorUrl: the facilitator at ${url} ${UNREADABLE}`);
+  });
+
+  it("reads an answer that is sent gzip-encoded", async () => {
+    const body = gzipSync(JSON.stringify(ME));
+    const url = await serving((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip" });
+      res.end(body);
+    });
+    await expect(checkProvider({ ...base, facilitatorUrl: url })).resolves.toBeUndefined();
+  });
+
+  it("is facilitatorUrl, retryable, when the body trickles in under the cap and never ends", async () => {
+    const url = await serving((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      const timer = setInterval(() => res.write(" "), 10);
+      res.on("close", () => clearInterval(timer));
+    });
+    const e = await refused({ facilitatorUrl: url, timeoutMs: 200 });
+    expect(e).toMatchObject({ field: "facilitatorUrl", retryable: true });
+    expect(e.message).toContain("within 200 ms");
   });
 
   it("is facilitatorUrl, retryable, when nothing listens at the address", async () => {

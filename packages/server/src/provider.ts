@@ -19,6 +19,8 @@ export class ProviderCheckError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 5000;
+/** The answer is a few hundred bytes, so more than this is not read, whatever the facilitator keeps sending */
+const MAX_BODY_BYTES = 4096;
 const MAX_CAUSES = 5;
 /** An RFC 6750 b64token, the only token an Authorization header can carry and match */
 const B64TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
@@ -67,6 +69,30 @@ function refusedWith(status: number, at: string, hasToken: boolean): ProviderChe
   // A busy or slow facilitator (408, 429) answers later, as the SDK's retry of /supported assumes
   const retryable = status >= 500 || status === 408 || status === 429;
   return new ProviderCheckError("facilitatorUrl", retryable, `${at} answered /providers/me with ${status}`);
+}
+
+/** The body as text, or undefined once it is past `max` decoded bytes, with the rest of it left unread */
+async function readCapped(res: Response, max: number): Promise<string | undefined> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
+  if (res.body === null) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 /** The network and payTo of an answer that has the three strings, and nothing for any other body */
@@ -130,13 +156,13 @@ export async function checkProvider(o: {
   }
 
   // A body that breaks off or stalls is the connection failing and not an unreadable answer
-  let body: string;
+  let body: string | undefined;
   try {
-    body = await res.text();
+    body = await readCapped(res, MAX_BODY_BYTES);
   } catch (e) {
     throw unreachable(e);
   }
-  const me = readMe(body);
+  const me = body === undefined ? undefined : readMe(body);
   if (me === undefined) {
     const reason = `${at} answered /providers/me with a body that is not {providerId, network, payTo}`;
     throw new ProviderCheckError("facilitatorUrl", false, reason);
