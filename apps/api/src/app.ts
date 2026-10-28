@@ -165,6 +165,38 @@ function startupError(e: unknown, server: x402ResourceServer, o: ApiOptions): Er
   return new Error(`facilitatorUrl: cannot read /supported from ${at} (${reason})`, { cause: e });
 }
 
+/** What GET /chunk declares to the Bazaar, in the shape declareDiscoveryExtension makes for a GET with no input */
+function bazaarExtension(priceZat: bigint) {
+  return {
+    info: {
+      input: { type: "http", method: "GET" },
+      output: { type: "json", example: { chunk: 1, cumulativeZat: priceZat.toString(), data: "chunk-1" } },
+    },
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        input: {
+          type: "object",
+          properties: {
+            type: { type: "string", const: "http" },
+            method: { type: "string", enum: ["GET"] },
+            queryParams: { type: "object", properties: {} },
+          },
+          required: ["type", "method"],
+          additionalProperties: false,
+        },
+        output: {
+          type: "object",
+          properties: { type: { type: "string" }, example: { type: "object" } },
+          required: ["type"],
+        },
+      },
+      required: ["input"],
+    },
+  };
+}
+
 /** The chunk is the paid voucher's cumulative over the price, so the handler keeps no state of its own */
 function chunk(priceZat: bigint): RequestHandler {
   return (req: Request, res: Response) => {
@@ -198,6 +230,7 @@ export async function createApiApp(o: ApiOptions): Promise<Express> {
         maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
       },
       mimeType: "application/json",
+      extensions: { bazaar: bazaarExtension(priceZat) },
     },
   };
   const http = new x402HTTPResourceServer(server, routes);

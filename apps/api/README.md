@@ -2,7 +2,9 @@
 
 The merchant's paid HTTP API. It has one route, `GET /chunk`, which costs `Z402_PRICE_ZAT` zatoshi (500 by default) and is paid with the `prepaid-voucher` scheme through the stock x402 Express middleware. For each request the middleware has the facilitator verify the voucher in the `PAYMENT-SIGNATURE` header before the handler runs, and settle it after. An unpaid `HEAD /chunk` is refused the same way.
 
-A paid call answers `{ "chunk": n, "cumulativeZat": "<voucher total>", "data": "chunk-n" }`, where n is the voucher's cumulative amount divided by the price. The handler keeps no state of its own. The wire format is in `docs/spec/protocol.md`, and the design in `docs/superpowers/specs/2026-10-27-z402-facilitator-design.md` (section 4.6).
+A paid call answers `{ "chunk": n, "cumulativeZat": "<voucher total>", "data": "chunk-n" }`, where n is the voucher's cumulative amount divided by the price. The handler keeps no state of its own. The wire format is in `docs/spec/protocol.md`, and the design in `docs/superpowers/specs/2026-10-27-z402-facilitator-design.md` and `docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md` (section 4.6 of both).
+
+The API is a provider of the facilitator: its API key picks the provider, and its `Z402_PAY_TO` and `Z402_PRICE_ZAT` are its own. The facilitator takes any price from 1 zat to its window for a route, so this API sets its price without telling the facilitator. The operator's API and a second provider's API can run side by side (see [Run as provider 2](#run-as-provider-2)).
 
 Only GET is served. The route has no verb in its key, so a request of any method that carries no valid voucher gets the 402 first. A request that carries a valid voucher but uses another method (HEAD, OPTIONS, POST and so on) gets 405 with `Allow: GET`. The middleware never settles a status of 400 or more, so that request is not charged, and the same voucher still buys a GET.
 
@@ -10,9 +12,9 @@ The terms (window, credit ratio, credit cap, zero-conf expiry margin) are not se
 
 ## Run it
 
-Start the facilitator first (`packages/facilitator/README.md`), because the API loads `/supported` from it before it listens. The API exits 1 if the facilitator is down, refuses the token, offers no `prepaid-voucher` on this network, or advertises another payTo.
+Start the facilitator first (`packages/facilitator/README.md`), because the API asks it who its key is, and then loads `/supported`, before it listens. The API exits 1 if the facilitator is down, does not take the token as a provider's API key, has that key for another payTo or network, or offers no `prepaid-voucher` on this network. It does not wait for a facilitator that is down.
 
-The facilitator README creates the bearer token in `.data/manual-token`, and runs the block clock in terminal 1 and the facilitator in terminal 2. The API is the third process that runs until stopped, so give it terminal 3, opened in the repository root. That terminal does not have the token, so it reads it from the file:
+The facilitator README creates the bearer token in `.data/manual-token`, which is the operator's API key, and runs the block clock in terminal 1 and the facilitator in terminal 2. The API is the third process that runs until stopped, so give it terminal 3, opened in the repository root. That terminal does not have the token, so it reads it from the file:
 
 ```bash
 export Z402_FACILITATOR_TOKEN="$(cat .data/manual-token)"
@@ -32,20 +34,54 @@ api listening on http://127.0.0.1:4021 network=zcash:regtest
 
 Stop the API with SIGINT or SIGTERM, which closes the server and exits 0 (or exits 1 after 5 s if that hangs).
 
-To run beside the demo (`scripts/demo.sh up` uses 4022 and 4021), start a second facilitator with its own port and its own ledger, as `packages/facilitator/README.md` shows. It cannot use the demo's ledger, because the demo facilitator holds that ledger's lock. Then give this API `Z402_FACILITATOR_URL=http://127.0.0.1:4098 Z402_API_PORT=4097`. This is for scratch runs on regtest only: two facilitators for the same merchant with separate ledgers can each credit the same deposit once, so the deposit is served twice. Never do this on mainnet.
+To run beside the demo (`scripts/demo.sh up` uses 4022 and 4021), start a second facilitator with its own port, its own ledger and its own providers directory, as `packages/facilitator/README.md` shows. It cannot use the demo's ledger or registry, because the demo facilitator holds their locks. Then give this API `Z402_FACILITATOR_URL=http://127.0.0.1:4098 Z402_API_PORT=4097`. This is for scratch runs on regtest only: two facilitators for the same merchant with separate ledgers can each credit the same deposit once, so the deposit is served twice. Never do this on mainnet.
+
+## Run as provider 2
+
+A second API can run beside the first on the same facilitator, as a provider of its own with its own address, API key and price. That is the live check of the multi-provider facilitator: the operator's API at 500 zat on port 4021, and provider 2 at 800 zat on port 4023.
+
+Provider 2 needs an account of its own, so its keys go to files of its own. Run these from the repository root, with the facilitator up. `--out` takes an absolute path inside `.secrets/`, and the second command writes the view-only file that holds no seed:
+
+```bash
+node scripts/merchant-keygen.mjs --network regtest --out "$PWD/.secrets/provider2.json"
+node scripts/merchant-keygen.mjs --view-only --from .secrets/provider2.json --out "$PWD/.secrets/provider2.view.json"
+```
+
+Then register the view-only keys with the running facilitator, which proves that the viewing key owns the address and issues the API key. The script saves the key in `--out` and prints only the provider id, the payTo and the path (`packages/facilitator/README.md`, Registering a provider):
+
+```bash
+node scripts/register-provider.mjs \
+  --keys .secrets/provider2.view.json \
+  --facilitator http://127.0.0.1:4022 \
+  --out .secrets/provider2.apikey
+```
+
+Start the second API with that key, the same view-only file for its address, its own price and its own port, in a terminal of its own:
+
+```bash
+Z402_NETWORK=regtest \
+Z402_FACILITATOR_URL=http://127.0.0.1:4022 \
+Z402_FACILITATOR_TOKEN="$(cat .secrets/provider2.apikey)" \
+Z402_MERCHANT_KEYS_FILE=.secrets/provider2.view.json \
+Z402_PRICE_ZAT=800 \
+Z402_API_PORT=4023 \
+pnpm --filter @z402/api start
+```
+
+Its 402 now asks 800 zat and names provider 2's address, and the facilitator credits deposits and vouchers to provider 2 alone. If the key and the address do not belong together the API exits 1 naming `payTo` or `facilitatorToken`. Registering the same address again issues a new key and ends the old one, which is how a lost key is recovered. The facilitator holds provider 2's viewing key from the registration on, and it can see that account's incoming payments and cannot spend them.
 
 ## Environment
 
-An empty variable counts as unset. A path that is not absolute is relative to the repository root, whatever directory `pnpm` runs the package from. A problem makes the process exit 1 with an `api: ...` line on stderr that names the variable or option at fault. A warning is an `api: warning: ...` line on stderr, and the start goes on. When the facilitator cannot be reached or refuses the token, the x402 SDK first prints its own `Failed to fetch supported kinds from facilitator: ...` warning line.
+An empty variable counts as unset. A path that is not absolute is relative to the repository root, whatever directory `pnpm` runs the package from. A problem makes the process exit 1 with an `api: ...` line on stderr that names the variable or option at fault. A warning is an `api: warning: ...` line on stderr, and the start goes on. When the facilitator accepts the key and then fails to answer `/supported`, the x402 SDK first prints its own `Failed to fetch supported kinds from facilitator: ...` warning line.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `Z402_NETWORK` | `regtest` | `regtest`, `testnet` or `mainnet`. The facilitator must offer `prepaid-voucher` on it. |
 | `Z402_FACILITATOR_URL` | none | Required. The `http://` or `https://` URL of the facilitator, without a username or password in it (the token has its own variable). There is no default on purpose, because an empty URL makes the x402 SDK send payments to x402.org. The token and every voucher travel on this link, so on testnet and mainnet `http://` is allowed only to a loopback host (`localhost`, `127.0.0.0/8` or `[::1]`). Regtest allows it to any host, such as another container of a compose network. |
-| `Z402_FACILITATOR_TOKEN` | none | The facilitator's bearer token. Nothing is sent when it is unset, and a facilitator that wants one then answers 401. It must be one token of letters, digits and `-._~+/` that may end in any number of `=`, the same rule as the facilitator's, so the API refuses a token that no header could carry (an `=` anywhere but at the end, for one). |
-| `Z402_PAY_TO` | `orchardOnlyAddress` of the keys file | The merchant's shielded-only unified address, which every 402 names as the place to send deposits (`uregtest1...`, `utest1...` or `u1...`, and the ZIP 316 revision 2 `zu...` forms). It must be the facilitator's `Z402_PAY_TO`. Prefer it to the keys file. |
+| `Z402_FACILITATOR_TOKEN` | none | The API key of the provider this API is: the facilitator's `Z402_FACILITATOR_TOKEN` for the operator, or the key that `scripts/register-provider.mjs` issued for this payTo. Nothing is sent when it is unset, and a facilitator that wants one then answers 401. It must be one token of letters, digits and `-._~+/` that may end in any number of `=`, the same rule as the facilitator's, so the API refuses a token that no header could carry (an `=` anywhere but at the end, for one). |
+| `Z402_PAY_TO` | `orchardOnlyAddress` of the keys file | The merchant's shielded-only unified address, which every 402 names as the place to send deposits (`uregtest1...`, `utest1...` or `u1...`, and the ZIP 316 revision 2 `zu...` forms). It must be the payTo that the facilitator has for the API key: its `Z402_PAY_TO` for the operator's token, and the registered payTo for a provider's key. Prefer it to the keys file. |
 | `Z402_MERCHANT_KEYS_FILE` | none | The JSON that `zdecrypt keygen` prints, which `scripts/merchant-keygen.mjs` writes. Used only when `Z402_PAY_TO` is unset. The whole file is read and parsed, seed and viewing key included, and only its `orchardOnlyAddress` is used. A file with a top-level `seedHex` key is refused on mainnet with `Z402_MERCHANT_KEYS_FILE: <file> holds the spending seed; the API needs only Z402_PAY_TO`, and one with no `seedHex` but a top-level `ufvk` key with `Z402_MERCHANT_KEYS_FILE: <file> holds the full viewing key; the API needs only Z402_PAY_TO`. Elsewhere either text is a warning. The rule goes by those two exact key names only, so a secret stored under another name, in other letter case or nested deeper is not detected. The facilitator's keys file, `.secrets/merchant-<network>.view.json` from `node scripts/merchant-keygen.mjs --view-only --from <keys file>`, holds neither and gives no warning. |
-| `Z402_PRICE_ZAT` | `500` | The price of one call in zatoshi, at least 1. It must equal the facilitator's `Z402_PRICE_ZAT`, which nothing checks at start: with different prices the API starts, and then every paid call is refused with `invalid_payment_requirements`. |
+| `Z402_PRICE_ZAT` | `500` | The price of one call in zatoshi, from 1 to the facilitator's window (`Z402_WINDOW_ZAT`, 100000 by default). The price is this API's own: the facilitator reads it from the requirements of each call and takes any amount in that range, so it does not have to match anything there. Nothing checks the window at start, and a price above it makes the facilitator refuse every paid call with `invalid_payment_requirements`. |
 | `Z402_API_HOST` | `127.0.0.1` | The address to listen on. |
 | `Z402_API_PORT` | `4021` | 0 to 65535, where 0 picks a free port. |
 
@@ -55,7 +91,7 @@ An empty variable counts as unset. A path that is not absolute is relative to th
 curl -s -D - -o /dev/null http://127.0.0.1:4021/chunk
 ```
 
-The answer is `HTTP/1.1 402 Payment Required` with an empty JSON body (`{}`). Everything is in the `PAYMENT-REQUIRED` header, which is base64 of a JSON object with `x402Version`, `error`, `resource` and `accepts`. Decode the one offer:
+The answer is `HTTP/1.1 402 Payment Required` with an empty JSON body (`{}`). Everything is in the `PAYMENT-REQUIRED` header, which is base64 of a JSON object with `x402Version`, `error`, `resource`, `accepts` and `extensions`. Decode the one offer:
 
 ```bash
 curl -s -D - -o /dev/null http://127.0.0.1:4021/chunk | tr -d '\r' \
@@ -82,13 +118,27 @@ On regtest with the default terms that is:
 }
 ```
 
-`payTo` is the merchant's address, and `termsVersion` is an opaque id that the facilitator derives from the payTo, the price and the terms. A client whose authenticated voucher is refused gets a corrective 402, whose `accepts[0].extra.session` carries its session's limits. A request without a `PAYMENT-SIGNATURE` header gets the plain 402.
+`payTo` is the merchant's address, and `termsVersion` is an opaque id that the facilitator derives from the terms alone, so every provider of a facilitator reads the same one. A client whose authenticated voucher is refused gets a corrective 402, whose `accepts[0].extra.session` carries its session's limits. A request without a `PAYMENT-SIGNATURE` header gets the plain 402. Next to `accepts` the 402 has `extensions.bazaar` (the next section).
 
 To pay it, run the agent (`scripts/demo.sh honest`, see `docs/demo.md`).
 
+## The Bazaar extension
+
+`GET /chunk` declares itself to the x402 Bazaar, the facilitator's public catalog of paid resources. Its 402 carries `extensions.bazaar`, which is fixed JSON written out in `src/app.ts` and needs no package of its own:
+
+- `info` says that the route is an `http` `GET`, and shows what a paid call answers: `{ "chunk": 1, "cumulativeZat": "<the price>", "data": "chunk-1" }`, where `cumulativeZat` is `Z402_PRICE_ZAT`.
+- `schema` is the JSON Schema (draft 2020-12) of that `info`, in the shape that `declareDiscoveryExtension` of `@x402/extensions` builds for a GET with no input.
+
+```bash
+curl -s -D - -o /dev/null http://127.0.0.1:4021/chunk | tr -d '\r' \
+  | awk -F': ' 'tolower($1) == "payment-required" { print $2 }' | base64 -d | jq '.extensions.bazaar.info'
+```
+
+A stock x402 client puts the `extensions` of the 402 it paid into its payment, and the facilitator lists a resource from the payments it settles. So the first paid call to this API makes `GET /discovery/resources` of the facilitator list `<this API>/chunk` with the provider's address, the price it was paid at and `paidCallsToday`, and nothing declares the route by hand. A payment without the extension lists nothing. The API does not declare its route to the facilitator, as the starter services do. This is also what makes provider 2 appear in the catalog.
+
 ## Startup failures
 
-Each one names the option to fix, and none quotes a token. The first three rows are checks that run before the facilitator is contacted, so a password in the URL is refused before any message could print it:
+Each one names the option to fix, and none quotes a token. The first three rows are checks that run before the facilitator is contacted, so a password in the URL is refused before any message could print it. Then the API asks the facilitator `GET /providers/me` with its token (`checkProvider` of `@z402/server`), which must answer with this API's payTo and network. That check comes before `/supported` is read, it fails the start on any problem, and it does not wait for a facilitator that is down. Its outcomes are the rows from `cannot reach` to `serves` below:
 
 | Message | Cause |
 | --- | --- |
@@ -97,10 +147,14 @@ Each one names the option to fix, and none quotes a token. The first three rows 
 | `api: facilitatorUrl: plaintext http:// is allowed only to a loopback host on zcash:testnet; use https://` | an `http://` URL to a host that is not loopback, on testnet or mainnet |
 | `api: Z402_MERCHANT_KEYS_FILE: <file> holds the spending seed; the API needs only Z402_PAY_TO` | a mainnet keys file with a `seedHex` key (set `Z402_PAY_TO` instead); `holds the full viewing key` for one with only a `ufvk` key |
 | `api: Z402_FACILITATOR_URL is required (...)` | no facilitator URL |
-| `api: facilitatorUrl: cannot read /supported from the facilitator at <url> (fetch failed: connect ECONNREFUSED ...)` | the facilitator is not running at that URL |
-| `api: facilitatorToken: the facilitator at <url> refused the request (... (401) ...)` | the token is missing or wrong |
-| `api: payTo: the facilitator at <url> does not advertise <address> as its payTo` | the API and the facilitator have different merchants |
-| `api: network: the facilitator at <url> offers prepaid-voucher on zcash:regtest, not on zcash:testnet` | `Z402_NETWORK` differs from the facilitator's |
+| `api: facilitatorUrl: cannot reach the facilitator at <origin> (ECONNREFUSED)` | the facilitator is not running at that URL. `did not answer /providers/me within 5000 ms` is one that takes the connection and never answers, and `answered /providers/me with 503` one that is starting or failing (any 5xx, and 408 and 429) |
+| `api: facilitatorUrl: the facilitator at <origin> has no /providers/me (404), so it is not a facilitator of the multi-provider rail` | an older facilitator, or a URL that is not one. `answered /providers/me with a body that is not {providerId, network, payTo}` is a 200 from something else |
+| `api: facilitatorToken: the facilitator at <origin> refused the API key (401)` | the key is wrong, rotated out, or not one of this facilitator's. A 403 reads the same |
+| `api: facilitatorToken: the facilitator at <origin> wants an API key (401) and none is set` | `Z402_FACILITATOR_TOKEN` is unset |
+| `api: payTo: the facilitator at <origin> has this API key for another payTo than <address>` | the key and `Z402_PAY_TO` belong to different providers |
+| `api: payTo: the facilitator at <origin> serves zcash:testnet, not zcash:regtest` | `Z402_NETWORK` differs from the facilitator's |
+| `api: facilitatorUrl: the facilitator at <url> advertises terms this API cannot use (...)` | the terms in its `/supported` are not a set of terms |
+| `api: network: the facilitator at <url> offers prepaid-voucher on zcash:regtest, not on zcash:testnet` | its `/supported` offers the scheme on another network only |
 | `api: port: cannot listen on 127.0.0.1:4021 (EADDRINUSE)` | the port is taken |
 | `api: port: cannot listen on 127.0.0.1:80 (EACCES)` | the port is forbidden to this user (a port below 1024 without root, for one) |
 

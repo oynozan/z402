@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   decodePaymentRequiredHeader,
   decodePaymentResponseHeader,
+  decodePaymentSignatureHeader,
   encodePaymentSignatureHeader,
 } from "@x402/core/http";
 import { FacilitatorCapabilityError } from "@x402/core/server";
@@ -118,6 +119,36 @@ async function paidChunk(res: Response): Promise<unknown> {
   return res.json();
 }
 
+/** The bazaar extension a 402 to a GET carries, written out and not built, with the first price in its example */
+const bazaarOf = (price: string) => ({
+  info: {
+    input: { type: "http", method: "GET" },
+    output: { type: "json", example: { chunk: 1, cumulativeZat: price, data: "chunk-1" } },
+  },
+  schema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    properties: {
+      input: {
+        type: "object",
+        properties: {
+          type: { type: "string", const: "http" },
+          method: { type: "string", enum: ["GET"] },
+          queryParams: { type: "object", properties: {} },
+        },
+        required: ["type", "method"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: { type: { type: "string" }, example: { type: "object" } },
+        required: ["type"],
+      },
+    },
+    required: ["input"],
+  },
+});
+
 /** The decoded PAYMENT-REQUIRED of a 402 */
 async function refusalOf(res: Response): Promise<PaymentRequired> {
   expect(res.status).toBe(402);
@@ -217,6 +248,7 @@ describe("paid /chunk through the whole stack", () => {
           },
         },
       ],
+      extensions: { bazaar: bazaarOf("500") },
     });
   });
 
@@ -494,11 +526,118 @@ describe("paid /chunk through the whole stack", () => {
   );
 });
 
+describe("the bazaar extension of GET /chunk", () => {
+  /** What GET /discovery/resources answers, the items only */
+  const listed = async (facilitatorUrl: string): Promise<any[]> =>
+    ((await (await fetch(`${facilitatorUrl}/discovery/resources`)).json()) as { items: any[] }).items;
+
+  test("an unpaid GET /chunk declares a GET with an example of its answer and a schema that checks both", async () => {
+    const s = await fullStack();
+    const required = await refusalOf(await fetch(`${s.api.url}/chunk`));
+    const bazaar = (required.extensions as { bazaar: { info: any; schema: any } }).bazaar;
+
+    expect(bazaar.info.input.method).toBe("GET");
+    expect(bazaar.info.input).toEqual({ type: "http", method: "GET" });
+    expect(bazaar.info.output).toEqual({ type: "json", example: { chunk: 1, cumulativeZat: "500", data: "chunk-1" } });
+    expect(bazaar.schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
+    expect(bazaar.schema.required).toEqual(["input"]);
+    expect(bazaar.schema.properties.input.properties.method).toEqual({ type: "string", enum: ["GET"] });
+    expect(bazaar.schema.properties.input.properties.type).toEqual({ type: "string", const: "http" });
+    expect(Object.keys(bazaar.schema.properties.output.properties)).toEqual(["type", "example"]);
+    expect(required.extensions).toEqual({ bazaar: bazaarOf("500") });
+  });
+
+  test("the stock validator of @x402/extensions finds nothing wrong with it", async () => {
+    // @x402/express validates the extension of each route against its schema when the first request comes, and warns
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const s = await fullStack();
+
+    await refusalOf(await fetch(`${s.api.url}/chunk`));
+
+    const printed = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join(" ");
+    expect(printed).not.toMatch(/bazaar/i);
+    expect(printed).not.toMatch(/x402:/);
+  });
+
+  test("the example is the answer to the first paid call, and it follows the price", async () => {
+    const chain = new FakeChain({ expiryDelta: 40 });
+    const facilitator = await facilitatorOn(chain);
+    const api = await apiOn(facilitator.url, { priceZat: 800n });
+    const required = await refusalOf(await fetch(`${api.url}/chunk`));
+    const example = (required.extensions as any).bazaar.info.output.example;
+
+    const p = payer(api.url);
+    p.client.pendingTxid = deposit(chain, p.client.sessionKey, 1);
+
+    expect(example).toEqual({ chunk: 1, cumulativeZat: "800", data: "chunk-1" });
+    expect(await paidChunk(await p.chunk())).toEqual(example);
+    expect(required.extensions).toEqual({ bazaar: bazaarOf("800") });
+  });
+
+  test("a stock client echoes the extension in its payment, and the paid flow works as before", async () => {
+    const s = await fullStack();
+    s.client.pendingTxid = deposit(s.chain, s.client.sessionKey, 1);
+
+    for (let i = 1; i <= 3; i++) {
+      expect(await paidChunk(await s.chunk())).toEqual({
+        chunk: i,
+        cumulativeZat: String(500 * i),
+        data: `chunk-${i}`,
+      });
+    }
+
+    expect(s.sent).toHaveLength(3);
+    for (const header of s.sent) {
+      const payment = decodePaymentSignatureHeader(header);
+      expect(payment.extensions).toEqual({ bazaar: bazaarOf("500") });
+      expect(payment.resource?.url).toBe(`${s.api.url}/chunk`);
+    }
+    expect(s.client.refusals).toEqual([]);
+  });
+
+  test("the facilitator lists /chunk from its paid calls, which is what the extension is for", async () => {
+    const s = await fullStack();
+    expect(await listed(s.facilitator.url)).toEqual([]);
+    s.client.pendingTxid = deposit(s.chain, s.client.sessionKey, 1);
+
+    for (let i = 1; i <= 3; i++) await paidChunk(await s.chunk());
+
+    expect(await listed(s.facilitator.url)).toMatchObject([
+      {
+        resource: `${s.api.url}/chunk`,
+        type: "http",
+        x402Version: 2,
+        accepts: [{ scheme: SCHEME, network: NETWORK, amount: "500", payTo: PAY_TO }],
+        extensions: { bazaar: bazaarOf("500") },
+        paidCallsToday: 3,
+      },
+    ]);
+  });
+
+  test("a payment that echoes no extension lists nothing, so the extension is what lists /chunk", async () => {
+    const s = await fullStack();
+    const seed = seedOf(3);
+    const d1 = deposit(s.chain, publicKeyFromSeed(seed), 1);
+    // voucherHeader builds the payment by hand and echoes no extensions, as a client that drops them would
+    const header = await voucherHeader(s.api.url, seed, "500", d1);
+    expect(decodePaymentSignatureHeader(header).extensions).toBeUndefined();
+
+    expect(await paidChunk(await fetch(`${s.api.url}/chunk`, { headers: { "payment-signature": header } }))).toEqual({
+      chunk: 1,
+      cumulativeZat: "500",
+      data: "chunk-1",
+    });
+
+    expect(await listed(s.facilitator.url)).toEqual([]);
+  });
+});
+
 describe("a second provider on the operator's facilitator", () => {
   const PAY_TO_2 = `uregtest1${"p".repeat(60)}`;
   const UIVK_2 = `uivkregtest1${"sec3ret".repeat(10)}`;
 
-  test("registers and runs its own API at 800 zat beside the operator's at 500, and both are paid", async () => {
+  test("registers, runs its own API at 800 zat beside the operator's at 500, and both are listed", async () => {
     const chain = new FakeChain({ expiryDelta: 40 });
     const chain2 = new FakeChain({ expiryDelta: 40 });
     const facilitator = await facilitatorOn(chain, {
@@ -537,6 +676,22 @@ describe("a second provider on the operator's facilitator", () => {
     expect(await paidChunk(await first.chunk())).toEqual({ chunk: 2, cumulativeZat: "1000", data: "chunk-2" });
     expect(first.client.refusals).toEqual([]);
     expect(second.client.refusals).toEqual([]);
+
+    const items = ((await (await fetch(`${facilitator.url}/discovery/resources`)).json()) as { items: any[] }).items;
+    expect(items).toHaveLength(2);
+    const byAmount = Object.fromEntries(items.map((i) => [i.accepts[0].amount, i]));
+    expect(byAmount["500"]).toMatchObject({
+      resource: `${operatorApi.url}/chunk`,
+      accepts: [{ payTo: PAY_TO }],
+      extensions: { bazaar: bazaarOf("500") },
+      paidCallsToday: 2,
+    });
+    expect(byAmount["800"]).toMatchObject({
+      resource: `${providerApi.url}/chunk`,
+      accepts: [{ payTo: PAY_TO_2 }],
+      extensions: { bazaar: bazaarOf("800") },
+      paidCallsToday: 2,
+    });
   });
 });
 

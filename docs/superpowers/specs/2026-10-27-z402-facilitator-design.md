@@ -1,5 +1,7 @@
 # z402 server side: facilitator, server scheme, paid API (design)
 
+Superseded in part by [2026-10-28-z402-multi-provider-design.md](2026-10-28-z402-multi-provider-design.md): multi-provider rail, per-route prices, facilitator-hosted Bazaar (protocol v2.0).
+
 Date: 2026-10-27 · Owner: facilitator agent · Status: **draft, awaiting review**
 
 This design covers the server half of z402: the x402 v2 facilitator, the server scheme, the paid API route, the lightwalletd client and the Rust decryptor. The client half (client scheme, wallet adapter, agent, fake chain) belongs to the client agent (`z402-08`). The wire contract between them is frozen in `docs/spec/protocol.md`, which the client agent drafts. Section 5 lists what this side needs that contract to say.
