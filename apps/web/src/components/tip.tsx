@@ -4,7 +4,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } f
 
 type Opener = "hover" | "focus" | "tap";
 
-const GAP = 10;
+const GAP = 8;
 const EDGE = 12;
 const CLOSE_DELAY_MS = 120;
 
@@ -12,7 +12,7 @@ function isMouse(e: React.PointerEvent): boolean {
   return e.pointerType === "mouse";
 }
 
-/** A "?" button whose note opens on hover, keyboard focus or a tap, and closes on Escape or a tap elsewhere */
+/** A "?" cell whose note opens on hover, keyboard focus or a tap, and closes on Escape or a tap elsewhere */
 export function Tip({ label, children }: { label: string; children: ReactNode }) {
   const id = useId();
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -47,13 +47,10 @@ export function Tip({ label, children }: { label: string; children: ReactNode })
     const place = () => {
       const anchor = button.getBoundingClientRect();
       const box = pop.getBoundingClientRect();
-      const centre = anchor.left + anchor.width / 2;
-      const left = Math.min(Math.max(EDGE, centre - box.width / 2), window.innerWidth - EDGE - box.width);
+      const left = Math.min(Math.max(EDGE, anchor.left + anchor.width / 2 - box.width / 2), window.innerWidth - EDGE - box.width);
       const above = anchor.top - GAP - box.height >= EDGE;
       pop.style.left = `${Math.round(left)}px`;
       pop.style.top = `${Math.round(above ? anchor.top - GAP - box.height : anchor.bottom + GAP)}px`;
-      pop.style.setProperty("--arrow-x", `${Math.round(centre - left)}px`);
-      pop.dataset.side = above ? "top" : "bottom";
     };
     place();
 
@@ -95,7 +92,12 @@ export function Tip({ label, children }: { label: string; children: ReactNode })
         onPointerLeave={(e) => isMouse(e) && closeSoon()}
         onFocus={(e) => e.currentTarget.matches(":focus-visible") && show("focus")}
         onBlur={() => setOpener((current) => (current === "hover" ? current : null))}
-        onClick={() => (opener === "tap" ? close() : setOpener("tap"))}
+        onClick={(e) => {
+          // A tip inside a row that opens on click must not open the row as well
+          e.stopPropagation();
+          if (opener === "tap") close();
+          else setOpener("tap");
+        }}
       >
         ?
       </button>

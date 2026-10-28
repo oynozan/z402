@@ -1,95 +1,87 @@
 import { describe, expect, test } from "vitest";
-import type { DiscoveryResource, DiscoveryStatusEntry } from "../src/lib/discovery-types";
 import {
   buildBoard,
   groupOffers,
   healthOf,
   mergeStatus,
+  OTHER,
   parseResources,
   parseStatus,
-  summarize,
 } from "../src/lib/services";
-
-const PAY_TO = `uregtest1${"q".repeat(60)}`;
-
-function item(
-  resource: string,
-  serviceName: string | undefined,
-  method: string | undefined,
-  z402: { unit?: string; note?: string } = {},
-  amount = "500",
-): DiscoveryResource {
-  return {
-    resource,
-    type: "http",
-    x402Version: 2,
-    accepts: [
-      {
-        scheme: "prepaid-voucher",
-        network: "zcash:regtest",
-        amount,
-        asset: "ZEC",
-        payTo: PAY_TO,
-        maxTimeoutSeconds: 60,
-      },
-    ],
-    lastUpdated: "2026-10-27T12:00:00.000Z",
-    description: `Calls ${resource}`,
-    mimeType: "application/json",
-    ...(serviceName !== undefined && { serviceName }),
-    extensions: {
-      bazaar: { info: { input: { type: "http", ...(method !== undefined && { method }) } }, schema: {} },
-      z402,
-    },
-  };
-}
-
-const ITEMS = [
-  item("http://localhost:4031/v1/generate", "LLM inference", "POST", { unit: "output chunk", note: "The operator sees prompts." }),
-  item("http://localhost:4032/v1/markdown", "URL to markdown", "GET", { unit: "page" }),
-  item("http://localhost:4034/v1/drops", "Encrypted drop box", "POST", { unit: "10 blocks", note: "Encrypted blobs only." }),
-  item("http://localhost:4034/v1/drops/:id/hold", "Encrypted drop box", "POST", { unit: "10 blocks", note: "Encrypted blobs only." }),
-];
-
-const status = (over: DiscoveryStatusEntry): DiscoveryStatusEntry => ({
-  serviceName: "LLM inference",
-  url: "http://localhost:4031",
-  up: true,
-  ready: true,
-  latencyMs: 3,
-  checkedAt: "2026-10-27T12:00:00.000Z",
-  callsToday: 12,
-  unit: "output chunk",
-  priceZat: "500",
-  ...over,
-});
+import { AGE_FILE, DROPS, HOLD, ITEMS, LLM, MARKDOWN, PAY_TO, item, status } from "./fixtures";
 
 describe("parseResources", () => {
   test("reads the response object and keeps what the site shows", () => {
-    const offers = parseResources({ x402Version: 2, items: ITEMS, pagination: { limit: 1000, offset: 0, total: 4 } });
-    expect(offers).toHaveLength(4);
+    const offers = parseResources({ x402Version: 2, items: ITEMS, pagination: { limit: 1000, offset: 0, total: 5 } });
+    expect(offers).toHaveLength(5);
     expect(offers?.[0]).toEqual({
       url: "http://localhost:4031/v1/generate",
       serviceName: "LLM inference",
       method: "POST",
-      description: "Calls http://localhost:4031/v1/generate",
+      description: "Streams qwen2.5-0.5b-instruct output, one chunk of about 32 tokens per paid call.",
       unit: "output chunk",
-      note: "The operator sees prompts.",
+      note: "The operator sees your prompts. Open-weights model.",
       priceZat: "500",
+      tags: ["llm", "inference", "text"],
+      input: { queryParams: null, pathParams: null, bodyType: "json", body: { prompt: "Write a haiku about privacy." } },
+      output: JSON.stringify({ stream: "<id>", index: 0, text: "...", done: false }, null, 2),
+      terms: {
+        scheme: "prepaid-voucher",
+        network: "zcash:regtest",
+        asset: "ZEC",
+        payTo: PAY_TO,
+        windowZat: "100000",
+        creditRatioBps: 2500,
+        creditCapZat: "200000",
+      },
     });
+  });
+
+  test("reads query parameters, path parameters and a text body", () => {
+    const [markdown, drops, hold] = parseResources({ items: [MARKDOWN, DROPS, HOLD] })!;
+    expect(markdown?.method).toBe("GET");
+    expect(markdown?.input).toEqual({ queryParams: { url: "https://example.com" }, pathParams: null, bodyType: null, body: null });
+    expect(drops?.input?.body).toBe(AGE_FILE);
+    expect(hold?.input).toEqual({ queryParams: null, pathParams: { id: "example" }, bodyType: "json", body: {} });
   });
 
   test("skips items without a resource and tolerates missing extensions", () => {
     const offers = parseResources({ items: [{ type: "http" }, { resource: "http://x.test/a", accepts: "nope" }, 7] });
     expect(offers).toEqual([
-      { url: "http://x.test/a", serviceName: null, method: "GET", description: null, unit: null, note: null, priceZat: null },
+      {
+        url: "http://x.test/a",
+        serviceName: null,
+        method: "GET",
+        description: null,
+        unit: null,
+        note: null,
+        priceZat: null,
+        tags: [],
+        input: null,
+        output: null,
+        terms: null,
+      },
     ]);
   });
 
   test("falls back to POST for a body route that declared no method", () => {
-    const raw = item("http://x.test/a", "A", undefined);
-    raw.extensions = { bazaar: { info: { input: { type: "http", bodyType: "json", body: {} } } } };
+    const raw = item("http://x.test/a", { serviceName: "A", input: { bodyType: "json", body: {} } });
     expect(parseResources({ items: [raw] })?.[0]?.method).toBe("POST");
+  });
+
+  test("keeps tags lower case, once each, and refuses terms it cannot read", () => {
+    const raw = item("http://x.test/a", { tags: ["LLM", " llm ", "", 7 as unknown as string, "Text"] });
+    raw.accepts[0]!.extra = { windowZat: "1e5", creditRatioBps: 10_001, creditCapZat: 5 };
+    const [offer] = parseResources({ items: [raw] })!;
+    expect(offer?.tags).toEqual(["llm", "text"]);
+    expect(offer?.terms).toMatchObject({ windowZat: null, creditRatioBps: null, creditCapZat: "5" });
+  });
+
+  test("cuts a very long example answer", () => {
+    const raw = item("http://x.test/a", { output: { text: "x".repeat(10_000) } });
+    const output = parseResources({ items: [raw] })?.[0]?.output ?? "";
+    expect(output.length).toBeLessThan(4_100);
+    expect(output.endsWith("…")).toBe(true);
   });
 
   test("returns null for a body that is not a resource list", () => {
@@ -100,19 +92,31 @@ describe("parseResources", () => {
 });
 
 describe("parseStatus", () => {
-  test("reads each entry and coerces the loose fields", () => {
-    const parsed = parseStatus({ services: [status({ callsToday: "7", priceZat: 500 }), { url: "http://x.test" }, null] });
-    expect(parsed).toEqual([
+  test("reads the array the discovery service sends, and the older object form", () => {
+    const entry = status({ callsToday: "7", priceZat: 500, latencyMs: 2.6 });
+    const expected = {
+      serviceName: "LLM inference",
+      url: "http://localhost:4031",
+      up: true,
+      ready: true,
+      latencyMs: 3,
+      callsToday: 7,
+      unit: "output chunk",
+      priceZat: "500",
+    };
+    expect(parseStatus([entry])).toEqual([expected]);
+    expect(parseStatus({ services: [entry, { url: "http://x.test" }, null] })).toEqual([
+      expected,
       {
-        serviceName: "LLM inference",
-        url: "http://localhost:4031",
-        up: true,
-        ready: true,
-        callsToday: 7,
-        unit: "output chunk",
-        priceZat: "500",
+        serviceName: null,
+        url: "http://x.test",
+        up: false,
+        ready: null,
+        latencyMs: null,
+        callsToday: null,
+        unit: null,
+        priceZat: null,
       },
-      { serviceName: null, url: "http://x.test", up: false, ready: null, callsToday: null, unit: null, priceZat: null },
     ]);
   });
 
@@ -123,30 +127,39 @@ describe("parseStatus", () => {
 });
 
 describe("groupOffers", () => {
-  test("makes one row per service name, in discovery order", () => {
-    const rows = groupOffers(parseResources({ items: ITEMS }) ?? []);
-    expect(rows.map((r) => r.name)).toEqual(["LLM inference", "URL to markdown", "Encrypted drop box"]);
+  const rows = () => groupOffers(parseResources({ items: ITEMS }) ?? []);
+
+  test("makes one row per service name, in discovery order, each with its category", () => {
+    expect(rows().map((r) => [r.name, r.category])).toEqual([
+      ["LLM inference", "llm"],
+      ["URL to markdown", "web"],
+      ["Text embeddings", "embeddings"],
+      ["Encrypted drop box", "storage"],
+    ]);
   });
 
-  test("keeps every paid route of a service, with its method and path", () => {
-    const drop = groupOffers(parseResources({ items: ITEMS }) ?? [])[2];
+  test("keeps every paid route of a service, with its method, path, example and note", () => {
+    const drop = rows()[3];
     expect(drop?.routes.map((r) => `${r.method} ${r.path}`)).toEqual(["POST /v1/drops", "POST /v1/drops/:id/hold"]);
-    expect(drop?.routes.map((r) => r.unit)).toEqual(["10 blocks", "10 blocks"]);
-    expect(drop?.notes).toEqual(["Encrypted blobs only."]);
+    expect(drop?.routes.map((r) => r.note)).toEqual([
+      "Only client-side encrypted (age) blobs. Size and time are capped.",
+      null,
+    ]);
+    expect(drop?.routes[1]?.input?.pathParams).toEqual({ id: "example" });
+    expect(drop?.notes).toEqual(["Only client-side encrypted (age) blobs. Size and time are capped."]);
+    expect(drop?.tags).toEqual(["storage", "handoff", "encrypted"]);
   });
 
   test("lists a route discovery repeats once", () => {
-    const rows = groupOffers(parseResources({ items: [ITEMS[0], ITEMS[0]] }) ?? []);
-    expect(rows[0]?.routes).toHaveLength(1);
+    expect(groupOffers(parseResources({ items: [LLM, LLM] }) ?? [])[0]?.routes).toHaveLength(1);
   });
 
-  test("groups unnamed routes by origin and names them by host", () => {
-    const rows = groupOffers(
-      parseResources({ items: [item("http://a.test:81/x", undefined, "GET"), item("http://a.test:81/y", undefined, "GET")] }) ?? [],
-    );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.name).toBe("a.test:81");
-    expect(rows[0]?.routes.map((r) => r.path)).toEqual(["/x", "/y"]);
+  test("groups unnamed routes by origin, names them by host and files them under other", () => {
+    const grouped = groupOffers(parseResources({ items: [item("http://a.test:81/x"), item("http://a.test:81/y")] }) ?? []);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0]?.name).toBe("a.test:81");
+    expect(grouped[0]?.category).toBe(OTHER);
+    expect(grouped[0]?.routes.map((r) => r.path)).toEqual(["/x", "/y"]);
   });
 });
 
@@ -162,36 +175,37 @@ describe("status", () => {
     expect(healthOf(undefined)).toBe("unknown");
   });
 
-  test("mergeStatus matches by name, else by origin, and keeps the count", () => {
-    const rows = groupOffers(parseResources({ items: ITEMS }) ?? []);
+  test("mergeStatus matches by name, else by origin, and keeps the count and latency", () => {
     const merged = mergeStatus(
-      rows,
-      parseStatus({
-        services: [
-          status({ callsToday: 12 }),
-          status({ serviceName: "markdown", url: "http://localhost:4032", ready: false, callsToday: 0 }),
-        ],
-      }),
+      groupOffers(parseResources({ items: ITEMS }) ?? []),
+      parseStatus([
+        status({ callsToday: 12, latencyMs: 4 }),
+        status({ serviceName: "markdown", url: "http://localhost:4032", ready: false, callsToday: 0, latencyMs: 9 }),
+      ]),
     );
-    expect(merged.map((r) => [r.name, r.health, r.callsToday])).toEqual([
-      ["LLM inference", "up", 12],
-      ["URL to markdown", "starting", 0],
-      ["Encrypted drop box", "unknown", null],
+    expect(merged.map((r) => [r.name, r.health, r.callsToday, r.latencyMs])).toEqual([
+      ["LLM inference", "up", 12, 4],
+      ["URL to markdown", "starting", 0, 9],
+      ["Text embeddings", "unknown", null, null],
+      ["Encrypted drop box", "unknown", null, null],
     ]);
   });
 
   test("mergeStatus adds a service that only status knows", () => {
     const merged = mergeStatus(
       [],
-      parseStatus({ services: [status({ serviceName: "Text embeddings", url: "http://localhost:4033", up: false })] }),
+      parseStatus([status({ serviceName: "Text embeddings", url: "http://localhost:4033", up: false, latencyMs: null })]),
     );
     expect(merged).toEqual([
       {
         key: "name:Text embeddings",
         name: "Text embeddings",
+        category: OTHER,
+        tags: [],
         routes: [],
         notes: [],
         health: "down",
+        latencyMs: null,
         callsToday: 12,
         unit: "output chunk",
         priceZat: "500",
@@ -207,18 +221,9 @@ describe("buildBoard", () => {
     expect(buildBoard({ offers: null, status: [] }).state).toBe("empty");
   });
 
-  test("counts the services and those up", () => {
-    const board = buildBoard({
-      offers: parseResources({ items: ITEMS }),
-      status: parseStatus({
-        services: [
-          status({}),
-          status({ serviceName: "URL to markdown", url: "http://localhost:4032" }),
-          status({ serviceName: "Encrypted drop box", url: "http://localhost:4034", ready: false }),
-        ],
-      }),
-    });
+  test("is ready with a row per service", () => {
+    const board = buildBoard({ offers: parseResources({ items: ITEMS }), status: parseStatus([status({})]) });
     expect(board.state).toBe("ready");
-    expect(summarize(board)).toEqual({ services: 3, up: 2 });
+    expect(board.services).toHaveLength(4);
   });
 });

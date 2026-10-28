@@ -1,66 +1,109 @@
 import Link from "next/link";
+import type { CSSProperties } from "react";
 import { textOf } from "@/lib/format";
-import { NavCta, NavLinks } from "./nav-links";
+import { MenuToggle, NavLink, type NavItem } from "./nav";
 
-function repoUrl(): string | null {
+const HOW: NavItem = { href: "/#how", label: "How it works" };
+const SERVICES: NavItem = { href: "/services", label: "Services" };
+const START: NavItem = { href: "/#start", label: "Get started" };
+
+function repoItem(): NavItem | null {
   const url = textOf(process.env.NEXT_PUBLIC_REPO_URL);
-  return url !== null && /^https?:\/\//.test(url) ? url : null;
+  return url !== null && /^https?:\/\//.test(url) ? { href: url, label: "GitHub", external: true } : null;
 }
 
 export function Wordmark() {
+  return <span className="wordmark">z402</span>;
+}
+
+/** pay.sh's section badge, the number, a tick, then the name */
+export function Badge({ index, label }: { index?: string; label: string }) {
   return (
-    <Link href="/" className="wordmark" aria-label="z402 home">
-      z402
-    </Link>
+    <p className="badge">
+      {index !== undefined && (
+        <>
+          <span className="chip">{index}</span>
+          <span className="tick" aria-hidden="true" />
+        </>
+      )}
+      <span className="chip">{label}</span>
+    </p>
   );
 }
 
-function Links() {
-  return <NavLinks repo={repoUrl()} />;
-}
-
 export function Header() {
+  const repo = repoItem();
+  const links = repo === null ? [HOW, SERVICES] : [HOW, SERVICES, repo];
   return (
-    <header className="band nav">
-      <div className="frame nav-frame">
-        <Wordmark />
-        <nav className="nav-links" aria-label="Main">
-          <Links />
+    <header className="section nav">
+      <div className="frame nav-bar">
+        <Link className="nav-brand" href="/" aria-label="z402 home">
+          <Wordmark />
+        </Link>
+        <nav className="nav-links" aria-label="Main" style={{ "--links": links.length } as CSSProperties}>
+          {links.map((item) => (
+            <NavLink key={item.href} item={item} className="nav-link" />
+          ))}
         </nav>
-        <div className="nav-cta">
-          <NavCta />
-        </div>
+        <Link className="nav-cta" href={START.href}>
+          {START.label}
+        </Link>
+        <MenuToggle items={links} />
       </div>
     </header>
   );
 }
 
-export function Footer() {
+/** The proxy's JSON, which is no page for the router to prefetch */
+const DEVELOPERS: NavItem[] = [
+  { href: "/discovery/resources", label: "Bazaar list" },
+  { href: "/discovery/status", label: "Status feed" },
+];
+
+function FootColumn({ title, items }: { title: string; items: NavItem[] }) {
   return (
-    <footer className="band foot">
-      <div className="frame foot-frame">
-        <div className="foot-brand">
-          <Wordmark />
-          <p>Shielded x402 payments for AI agents.</p>
+    <nav className="foot-col" aria-label={title}>
+      <p className="foot-title">{title}</p>
+      <ul className="foot-links">
+        {items.map((item) => (
+          <li key={item.href}>
+            {item.href.startsWith("/discovery/") ? (
+              <a className="foot-link" href={item.href}>
+                {item.label}
+              </a>
+            ) : (
+              <NavLink item={item} className="foot-link" />
+            )}
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
+export function Footer() {
+  const repo = repoItem();
+  return (
+    <footer className="section foot">
+      <div className="frame">
+        <div className="foot-cols">
+          <div className="foot-brand">
+            <Link className="foot-mark" href="/" aria-label="z402 home">
+              <Wordmark />
+            </Link>
+            <p className="foot-line">Shielded x402 payments for AI agents.</p>
+          </div>
+          <FootColumn title="Site" items={[HOW, SERVICES, START]} />
+          <FootColumn title="Developers" items={repo === null ? DEVELOPERS : [...DEVELOPERS, repo]} />
         </div>
-        <nav className="foot-links" aria-label="Footer">
-          <Links />
-        </nav>
+        <div className="foot-tail" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+        </div>
       </div>
     </footer>
   );
-}
-
-export function Chip({ index, label }: { index?: string; label: string }) {
-  return (
-    <p className="chip">
-      {index !== undefined && <span>{index}</span>}
-      <span>{label}</span>
-    </p>
-  );
-}
-
-/** The two row checkerboard that opens every band below the hero */
-export function Seam() {
-  return <div className="wall" aria-hidden="true" />;
 }
