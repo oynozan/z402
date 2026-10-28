@@ -65,6 +65,33 @@ describe("Mermaid", () => {
     expect(out).toMatch(/@container \(width &lt; \d+px\)|@container \(width < \d+px\)/);
   });
 
+  test("draws a graph that cannot fold any narrower once", () => {
+    // A dependency graph of one-word names, as wide on a phone as anywhere
+    const fan = `flowchart TD
+  Z[zebra] --> CI([chain-init])
+  CI --> ZI([zallet-init])
+  CI --> ZA[zaino]
+  ZI --> ZL[zallet]
+  ZL --> WF([wallet-fund])
+  WF --> CK[clock]
+  KG([keygen]) --> FA[facilitator]
+  ZA --> FA
+  KG --> MR([markdown-register])
+  FA --> MR
+  FA --> API[api]
+  FA --> LLM[llm]
+  FA --> EMB[embeddings]
+  FA --> DB[dropbox]
+  FA --> WEB[web]
+  FA --> MD[markdown]
+  MR --> MD
+  LM[llm-model] --> LLM
+  EM[embed-model] --> EMB`;
+    const out = renderToStaticMarkup(createElement(Mermaid, { source: fan }));
+    expect(out.match(/<svg/g)).toHaveLength(1);
+    expect(out).not.toContain("@container");
+  });
+
   test("shows a syntax error on the page outside a production build", () => {
     vi.stubEnv("NODE_ENV", "development");
     const out = renderToStaticMarkup(createElement(Mermaid, { source: "flowchart LR\n  A -->" }));

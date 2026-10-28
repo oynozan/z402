@@ -47,7 +47,11 @@ export function Mermaid({ source }: { source: string }) {
   let narrow: Drawing | null = null;
   try {
     wide = draw(source, `${id}w`, WIDE);
-    if (wide.width > NARROW) narrow = draw(source, `${id}n`, NARROW);
+    if (wide.width > NARROW) {
+      // Kept only when it is narrower: a graph Pele cannot fold any further would be the same drawing twice
+      const folded = draw(source, `${id}n`, NARROW);
+      if (folded.width < wide.width) narrow = folded;
+    }
   } catch (error) {
     if (process.env.NODE_ENV === "production") {
       throw new Error(`A mermaid diagram does not render: ${messageOf(error)}\n\n${source}`);
