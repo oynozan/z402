@@ -58,9 +58,13 @@ clock, the API and the facilitator). Afterwards
 `127.0.0.1` in the VM to `127.0.0.1` on the host, and one bound to `0.0.0.0` to every host
 interface.
 
-The agent is Zallet account 0. `AGENT_UA` is its Orchard-only UA at diversifier index 1:
-`z_getaddressforaccount [<account_uuid>, ["orchard"], 1]` returns the same address every time.
-After `down.sh --wipe` the seed, account and `AGENT_UA` are new.
+The agent is Zallet account 0. `AGENT_UA` is its Orchard-only UA at the lowest diversifier index
+from 1 to 16 that accepts one. Zallet puts the account's default (p2pkh+sapling+orchard) address on
+the first Sapling-valid index, which depends on the seed, and refuses an Orchard-only request there.
+`fund-agent.sh` and the client's `ZalletRpcWallet` apply the same rule, and
+`z_getaddressforaccount [<account_uuid>, ["orchard"], <index>]` returns the same address every
+time. `fund-agent.sh` prints the index it chose. After `down.sh --wipe`, the seed, the account and
+`AGENT_UA` are all new.
 
 ## Helpers
 
