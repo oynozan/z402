@@ -239,7 +239,7 @@ describe("concurrency limit", () => {
     expect([...chain.calls.keys()]).toEqual([1, 2, 3, 4, 5].map(txidOf));
   });
 
-  test("a lookup holds its slot for its whole polling loop", async () => {
+  test("a lookup gives its slot up while it sleeps between polls", async () => {
     const { chain, resolver } = rig({ maxConcurrent: 1 });
     chain.script(txidOf(1), [NOT_FOUND, NOT_FOUND, found(txidOf(1))]);
     chain.script(txidOf(2), [found(txidOf(2))]);
@@ -247,29 +247,92 @@ describe("concurrency limit", () => {
 
     await Promise.all([resolver.lookup(txidOf(1), 5000), resolver.lookup(txidOf(2), 5000)]);
 
-    expect(inspect.mock.calls.map(([txid]) => txid)).toEqual([txidOf(1), txidOf(1), txidOf(1), txidOf(2)]);
+    expect(inspect.mock.calls.map(([txid]) => txid)).toEqual([txidOf(1), txidOf(2), txidOf(1), txidOf(1)]);
   });
 
+  /** One slot, held for 6 s by a read of txid 1, so a lookup queued behind it with a 5 s budget spends that budget */
+  function slowFirstRead() {
+    vi.useFakeTimers();
+    const chain = new ScriptedChain();
+    const real = chain.inspect.bind(chain);
+    vi.spyOn(chain, "inspect").mockImplementation(async (txid) => {
+      if (txid === txidOf(1)) await new Promise((resolve) => setTimeout(resolve, 6000));
+      return real(txid);
+    });
+    return { chain, resolver: new DepositResolver({ chain, maxConcurrent: 1 }) };
+  }
+
   test("the wait for a slot counts against the budget, and a lookup that spent it there makes no inspect", async () => {
-    const { chain, resolver } = rig({ maxConcurrent: 1 });
+    const { chain, resolver } = slowFirstRead();
+    const lookups = Promise.all([resolver.lookup(txidOf(1), 0), resolver.lookup(txidOf(2), 5000)]);
+    await vi.advanceTimersByTimeAsync(7000);
+    const [, second] = await lookups;
 
-    const [, second] = await Promise.all([resolver.lookup(txidOf(1), 5000), resolver.lookup(txidOf(2), 5000)]);
-
-    expect(chain.calls.get(txidOf(1))).toBe(6);
     expect(chain.calls.get(txidOf(2))).toBeUndefined();
     expect(errorOf(second)).toBeInstanceOf(ChainUnavailableError);
     expect(resolver.peek(txidOf(2))).toBeUndefined();
   });
 
   test("a lookup that spent its budget waiting for a slot answers the result held for its txid", async () => {
-    const { chain, resolver } = rig({ maxConcurrent: 1 });
+    const { chain, resolver } = slowFirstRead();
     chain.script(txidOf(2), [found(txidOf(2))]);
     await resolver.lookup(txidOf(2), 0);
 
-    const [, second] = await Promise.all([resolver.lookup(txidOf(1), 5000), resolver.lookup(txidOf(2), 5000)]);
+    const lookups = Promise.all([resolver.lookup(txidOf(1), 0), resolver.lookup(txidOf(2), 5000)]);
+    await vi.advanceTimersByTimeAsync(7000);
+    const [, second] = await lookups;
 
     expect(second).toMatchObject({ kind: "found", inspection: { txid: txidOf(2) } });
     expect(chain.calls.get(txidOf(2))).toBe(1);
+  });
+
+  test("a lookup that already read and then spent its budget waiting for a slot ends with what it read", async () => {
+    vi.useFakeTimers();
+    const chain = new ScriptedChain();
+    const real = chain.inspect.bind(chain);
+    let firstRead = true;
+    // txid 2 reads once, then waits 6 s behind a slow read of txid 1 for its second
+    vi.spyOn(chain, "inspect").mockImplementation(async (txid) => {
+      if (txid === txidOf(1)) await new Promise((resolve) => setTimeout(resolve, 6000));
+      if (txid === txidOf(2) && firstRead) firstRead = false;
+      return real(txid);
+    });
+    const resolver = new DepositResolver({ chain, maxConcurrent: 1 });
+    const second = resolver.lookup(txidOf(2), 5000);
+    await vi.advanceTimersByTimeAsync(500);
+    void resolver.lookup(txidOf(1), 0);
+    await vi.advanceTimersByTimeAsync(8000);
+
+    expect(await second).toEqual({ kind: "not_found" });
+    expect(chain.calls.get(txidOf(2))).toBe(1);
+  });
+});
+
+describe("slots are held only while a read is in flight", () => {
+  test("twenty lookups of absent txids delay an honest first read by one poll and one read at most", async () => {
+    vi.useFakeTimers();
+    const chain = new ScriptedChain();
+    chain.delayMs = 100;
+    const resolver = new DepositResolver({ chain });
+    for (let n = 0; n < 20; n++) void resolver.lookup(txidOf(100 + n), 30_000);
+    await vi.advanceTimersByTimeAsync(2500);
+
+    const honest = txidOf(1);
+    chain.script(honest, [found(honest)]);
+    const real = chain.inspect.bind(chain);
+    let readAt: number | undefined;
+    vi.spyOn(chain, "inspect").mockImplementation((txid) => {
+      if (txid === honest) readAt ??= Date.now();
+      return real(txid);
+    });
+    const startedAt = Date.now();
+    const lookup = resolver.lookup(honest, 30_000);
+    await vi.advanceTimersByTimeAsync(1000 + 100);
+
+    expect(readAt).toBeDefined();
+    expect((readAt ?? Number.POSITIVE_INFINITY) - startedAt).toBeLessThanOrEqual(1000 + 100);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(await lookup).toMatchObject({ kind: "found" });
   });
 });
 

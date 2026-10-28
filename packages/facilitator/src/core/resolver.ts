@@ -93,36 +93,43 @@ export class DepositResolver {
     if (this.#running >= this.#maxConcurrent && this.#queue.length >= this.#maxQueued) {
       return { kind: "unavailable", error: new ChainUnavailableError("deposit lookups are saturated") };
     }
-    const waited = await this.#acquire();
-    try {
-      // A caller whose budget ran out in the queue gets what is known, not one more read past its budget
-      if (waited && this.#now() - startedAt >= budgetMs) {
-        const error = new ChainUnavailableError("deposit lookup waited its whole budget for a slot");
-        return this.peek(txid) ?? { kind: "unavailable", error };
-      }
-      const lookup = await this.#poll(txid, budgetMs, startedAt);
-      this.#remember(txid, lookup);
-      return lookup;
-    } finally {
-      this.#release();
-    }
-  }
-
-  async #poll(txid: string, budgetMs: number, startedAt: number): Promise<Lookup> {
     let outage: ChainUnavailableError | undefined;
+    let reads = 0;
     for (;;) {
+      // A slot is held only around a read, so lookups sleeping between polls leave it to the others
+      const waited = await this.#acquire();
       try {
-        const inspection = await this.#chain.inspect(txid);
-        if (inspection.found) return { kind: "found", inspection, tip: await this.#chain.tip() };
+        // A caller whose budget ran out in the queue gets what is known, not one more read past its budget
+        if (waited && this.#now() - startedAt >= budgetMs) {
+          if (reads > 0) break;
+          const error = new ChainUnavailableError("deposit lookup waited its whole budget for a slot");
+          return this.peek(txid) ?? { kind: "unavailable", error };
+        }
+        reads++;
+        const found = await this.#read(txid);
+        if (found !== undefined) {
+          this.#remember(txid, found);
+          return found;
+        }
       } catch (e) {
         if (!(e instanceof ChainUnavailableError)) throw e;
         outage = e;
+      } finally {
+        this.#release();
       }
       // Written as a negation so a NaN budget ends the loop instead of running it forever
       if (!(this.#now() - startedAt + this.#pollMs <= budgetMs)) break;
       await this.#sleep(this.#pollMs);
     }
-    return outage === undefined ? { kind: "not_found" } : { kind: "unavailable", error: outage };
+    const lookup: Lookup = outage === undefined ? { kind: "not_found" } : { kind: "unavailable", error: outage };
+    this.#remember(txid, lookup);
+    return lookup;
+  }
+
+  /** One inspect, and the tip once the deposit is found, undefined while the chain shows nothing */
+  async #read(txid: string): Promise<Lookup | undefined> {
+    const inspection = await this.#chain.inspect(txid);
+    return inspection.found ? { kind: "found", inspection, tip: await this.#chain.tip() } : undefined;
   }
 
   #recentlyMissed(txid: string): boolean {
