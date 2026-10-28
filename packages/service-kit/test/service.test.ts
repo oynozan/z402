@@ -427,8 +427,14 @@ describe("start-up", () => {
     port: 0,
   });
 
-  async function answering(handler: express.RequestHandler): Promise<Listening> {
+  /** What a facilitator answers GET /providers/me with for TEST_TOKEN */
+  const pairedKey: express.RequestHandler = (_req, res) =>
+    void res.json({ providerId: "0123456789abcdef", network: TEST_NETWORK, payTo: TEST_PAY_TO });
+
+  /** A server that pairs the key as a facilitator does, unless `knowsKey` is false, and answers the rest with `handler` */
+  async function answering(handler: express.RequestHandler, { knowsKey = true } = {}): Promise<Listening> {
     const app = express();
+    if (knowsKey) app.get("/providers/me", pairedKey);
     app.use(handler);
     const listening = await serve(app, { host: "127.0.0.1", port: 0 });
     closers.push(async () => {
@@ -461,20 +467,58 @@ describe("start-up", () => {
     }
   }, 60_000);
 
-  test("a facilitator that is down or failing is waited for, up to the wait", async () => {
-    const failing = await answering((_req, res) => void res.status(503).json({ error: "starting" }));
-    const log: string[] = [];
-    const started = Date.now();
-    await expect(
-      createPaidService({
-        env: envAt(failing.url),
+  test("a key the facilitator does not pair with this payTo fails at once, naming the variable to fix", async () => {
+    const OTHER_PAY_TO = `uregtest1${"p".repeat(60)}`;
+    const answers: [express.RequestHandler, RegExp][] = [
+      [(_req, res) => void res.status(404).send("Cannot GET /providers/me"), /^Z402_FACILITATOR_URL: .*\(404\)/],
+      [(_req, res) => void res.json({ hello: "world" }), /^Z402_FACILITATOR_URL: .*not \{providerId, network, payTo\}/],
+      [(_req, res) => void res.status(401).json({ error: "unauthorized" }), /^Z402_FACILITATOR_TOKEN: .*\(401\)/],
+      [
+        (_req, res) => void res.json({ providerId: "0123456789abcdef", network: TEST_NETWORK, payTo: OTHER_PAY_TO }),
+        /^Z402_PAY_TO: .*another payTo/,
+      ],
+      [
+        (_req, res) => void res.json({ providerId: "0123456789abcdef", network: "zcash:testnet", payTo: TEST_PAY_TO }),
+        new RegExp(`^Z402_PAY_TO: .*, not ${TEST_NETWORK}$`),
+      ],
+    ];
+    for (const [handler, error] of answers) {
+      const other = await answering(handler, { knowsKey: false });
+      const started = Date.now();
+      const log: string[] = [];
+      const failure = await createPaidService({
+        env: envAt(other.url),
         service: DEFINITION,
-        facilitatorWaitMs: 2_500,
+        facilitatorWaitMs: 10_000,
         log: (m) => log.push(m),
-      }),
-    ).rejects.toThrow(/^Z402_FACILITATOR_URL: cannot read \/supported .*503/);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
-    expect(log).toEqual([expect.stringMatching(/503.*; waiting for it$/)]);
+      }).then(
+        () => undefined,
+        (e: unknown) => (e instanceof Error ? e.message : String(e)),
+      );
+      expect(failure).toMatch(error);
+      expect(failure).not.toContain(TEST_TOKEN);
+      expect(Date.now() - started).toBeLessThan(1_500);
+      expect(log).toEqual([]);
+    }
+  }, 60_000);
+
+  test("a facilitator that is down or failing is waited for, up to the wait", async () => {
+    // Failing at /providers/me, and failing at /supported once the key is paired
+    for (const knowsKey of [false, true]) {
+      const failing = await answering((_req, res) => void res.status(503).json({ error: "starting" }), { knowsKey });
+      const log: string[] = [];
+      const started = Date.now();
+      await expect(
+        createPaidService({
+          env: envAt(failing.url),
+          service: DEFINITION,
+          facilitatorWaitMs: 2_500,
+          log: (m) => log.push(m),
+        }),
+      ).rejects.toThrow(knowsKey ? /^Z402_FACILITATOR_URL: cannot read \/supported .*503/ : /^Z402_FACILITATOR_URL: .*503/);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
+      expect(log).toEqual([expect.stringMatching(/503.*; waiting for it$/)]);
+    }
 
     // Nothing listens on the port yet, and the facilitator that starts there a moment later is used
     const port = await freePort();
@@ -520,7 +564,7 @@ describe("start-up", () => {
           facilitatorWaitMs: 4_500,
           log: (m) => log.push(m),
         });
-        await expect(starting).rejects.toThrow(/^Z402_FACILITATOR_URL: cannot read \/supported /);
+        await expect(starting).rejects.toThrow(/^Z402_FACILITATOR_URL: (cannot read \/supported|cannot reach) /);
         expect(log).toEqual([expect.stringMatching(/; waiting for it$/)]);
       }
       expect(warn).not.toHaveBeenCalled();
@@ -544,15 +588,18 @@ describe("start-up", () => {
         facilitatorWaitMs: 0,
         log: quiet,
       }),
-    ).rejects.toThrow(/^Z402_FACILITATOR_URL: cannot read \/supported .*timed out/);
+    ).rejects.toThrow(/^Z402_FACILITATOR_URL: .*did not answer \/providers\/me within 5000 ms/);
     expect(Date.now() - started).toBeLessThan(8_000);
   }, 20_000);
 
   test("a misconfiguration the facilitator reports fails at once", async () => {
     const stack = await echoStack();
     const started = Date.now();
-    const wrong: Partial<ServiceEnv>[] = [{ facilitatorToken: "wrong-token" }, { payTo: `uregtest1${"p".repeat(60)}` }];
-    for (const change of wrong) {
+    const wrong: [Partial<ServiceEnv>, RegExp][] = [
+      [{ facilitatorToken: "wrong-token" }, /^Z402_FACILITATOR_TOKEN: .*refused the API key \(401\)/],
+      [{ payTo: `uregtest1${"p".repeat(60)}` }, /^Z402_PAY_TO: .*has this API key for another payTo/],
+    ];
+    for (const [change, error] of wrong) {
       await expect(
         createPaidService({
           env: { ...stack.env, ...change },
@@ -560,7 +607,7 @@ describe("start-up", () => {
           facilitatorWaitMs: 10_000,
           log: quiet,
         }),
-      ).rejects.toThrow(/^Z402_(FACILITATOR_TOKEN|PAY_TO): /);
+      ).rejects.toThrow(error);
     }
     expect(Date.now() - started).toBeLessThan(1_500);
   });

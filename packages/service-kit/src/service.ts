@@ -2,8 +2,8 @@
  * A paid service (design §3.2): its routes are paid with prepaid-voucher through the stock x402 Express middleware,
  * each at its own price, and each one declares itself for Bazaar discovery, in its 402 and to the facilitator's
  * catalog while the service is ready. The wiring follows apps/api/src/app.ts: one payTo and one network for the scheme
- * and every route, the facilitator's terms loaded and checked before anything listens, and route keys without a verb so
- * that HEAD, which Express hands to the GET handler, must pay too.
+ * and every route, the API key checked against that payTo and the facilitator's terms loaded and checked before anything
+ * listens, and route keys without a verb so that HEAD, which Express hands to the GET handler, must pay too.
  */
 import { decodePaymentSignatureHeader } from "@x402/core/http";
 import {
@@ -27,7 +27,7 @@ import {
   type DeclareDiscoveryExtensionInput,
 } from "@x402/extensions/bazaar";
 import { ASSET, parseTerms, parseVoucherPayload, SCHEME, ZCASH_NETWORKS } from "@z402/protocol";
-import { PrepaidVoucherServerScheme } from "@z402/server";
+import { checkProvider, PrepaidVoucherServerScheme, ProviderCheckError, type ProviderCheckField } from "@z402/server";
 import express, { type Express, type Request, type RequestHandler } from "express";
 import {
   declarationBodies,
@@ -163,6 +163,12 @@ const READY_TIMEOUT_MS = 2_000;
 const READY_CACHE_MS = 5_000;
 const FACILITATOR_WAIT_MS = 120_000;
 const FACILITATOR_RETRY_MS = 2_000;
+/** The variable each setting of a failed provider check is read from */
+const PROVIDER_VARIABLES: Record<ProviderCheckField, string> = {
+  facilitatorToken: "Z402_FACILITATOR_TOKEN",
+  payTo: "Z402_PAY_TO",
+  facilitatorUrl: "Z402_FACILITATOR_URL",
+};
 /** The heartbeat the facilitator's catalog reads liveness from (multi-provider design §4.4) */
 const DECLARE_INTERVAL_MS = 30_000;
 const X402_VERSION = 2;
@@ -280,12 +286,11 @@ function startupError(e: unknown, server: x402ResourceServer, env: ServiceEnv): 
     error: new Error(message, { cause: e }),
     wait: false,
   });
+  if (e instanceof ProviderCheckError) {
+    const reason = e.message.slice(`${e.field}: `.length);
+    return { error: new Error(`${PROVIDER_VARIABLES[e.field]}: ${reason}`, { cause: e }), wait: e.retryable };
+  }
   if (e instanceof FacilitatorCapabilityError) {
-    // A facilitator that serves several providers advertises no payTo at all
-    const advertised = server.getSupportedKind(X402_VERSION, env.network, SCHEME)?.extra?.payTo;
-    if (advertised !== undefined && advertised !== env.payTo) {
-      return fail(`Z402_PAY_TO: ${at} does not advertise ${env.payTo} as its payTo`);
-    }
     return fail(`Z402_FACILITATOR_URL: ${at} advertises terms this service cannot use (${e.problems.join("; ")})`);
   }
   if (e instanceof RouteConfigurationError) {
@@ -374,6 +379,13 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
   const deadline = Date.now() + (o.facilitatorWaitMs ?? env.facilitatorWaitMs ?? FACILITATOR_WAIT_MS);
   for (let attempt = 1; ; attempt++) {
     try {
+      await checkProvider({
+        facilitatorUrl: env.facilitatorUrl,
+        ...(env.facilitatorToken !== undefined && { token: env.facilitatorToken }),
+        payTo: env.payTo,
+        network: env.network,
+        timeoutMs: SUPPORTED_TIMEOUT_MS,
+      });
       await loadTerms(facilitator, http);
       break;
     } catch (e) {
