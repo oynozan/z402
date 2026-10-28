@@ -195,6 +195,53 @@ Proposed to the client agent on 2026-10-27; it is to be frozen as v1 with both A
 - **Unbound vouchers:** vouchers are not bound to a resource, so a leaked `PAYMENT-SIGNATURE` can be raced. TLS is the defence; `PAYMENT-SIGNATURE` is never logged.
 - **No refunds:** unused deposit balance stays with the merchant (unchanged from the doc).
 
+### 7.1 Open mainnet gates (final whole-branch review, 2026-10-28)
+
+Every item below was found and confirmed by the final review or its fix-wave re-reviews. None of them affects the regtest demo. They stay open on purpose until a mainnet plan takes them up.
+
+- **Endpoint trust (C-5):**
+  - zdecrypt checks no proof, signature or block inclusion. The facilitator therefore trusts its lightwalletd on whether a deposit exists and how deep it is mined.
+  - Mainnet needs a merchant-operated node, not a public endpoint. A non-loopback mainnet endpoint already logs a warning.
+- **Request flood (C-9, S-1, SEC-B3):**
+  - Lookups are unauthenticated, so about 4/r + 20 concurrent verifies with random txids can still keep honest deposit lookups waiting, where r is the read rate.
+  - The fix is a per-client limiter in front of the API, plus a protocol §8 row for HTTP 429 + Retry-After (relay R13).
+- **Ledger lock:**
+  - A holder can still write one more batch between its ownership check and its append after a takeover.
+  - A live holder can be taken over after a forward wall-clock jump, clock skew, or a stall over about 10 s. A long synchronous startup replay counts as such a stall.
+  - Both cases need `flock` or a lease (LL-3, SEC-B4, SEC-B6).
+  - A non-regular or future-dated `<lock>.takeover` makes starts poll forever with no message (LL-2, SEC-B5).
+  - Replay's own repair writes bypass the ownership guard (LL-4).
+  - A ledger path that is a dangling symlink at the first start gets a second lock (SEC-B1). Such paths should be refused or canonicalized through the link.
+- **Ledger file:**
+  - Compaction is not done, although replay already streams the file (C-13).
+  - There is no fsync, so a power loss can drop the unsynced tail of appends (DM-30).
+  - A file holding only a BOM or a no-break space gets its header glued on and then refuses to replay (LL-5).
+- **Expiry boundary (F1, F2):**
+  - A call that presents no txid and is over its limit can still get `deposit_required` from a tip-only judgment, without a refresh, and so can over-fund at the expiry boundary.
+  - The v1.3 fix: never answer `deposit_required` while any credited deposit is unresolved, and refresh before answering.
+- **Oracles, for v1.3:**
+  - A session that has paid a real deposit can still tell a txid credited to another session from an uncredited one. This is the v1.2 known limit (S-3).
+  - `forget()` on credit makes the next probe of a just-credited txid a fresh read: about 5 ms slower, with different codes under an outage (SEC-B2).
+  - The synchronous operator note for credited-elsewhere txids takes about 5 µs (SEC-B8).
+  - zdecrypt's run time leaks about 0.9 ms (S-7).
+- **The watcher re-decrypts live deposits on every pass (C-15).** It needs a status-only `ChainView` read with FakeChain support (relay R12).
+- **Timeouts and shutdown:**
+  - A worst-case verify takes exactly the API's 60 s timeout, with no headroom (F3).
+  - A SIGTERM during a deposit wait exits 1 and leaves the lock, so the next start waits up to about 15.25 s (SEC-B7, DEMO-B1).
+- **Configuration edges (WB-SC-6, SEC-B9):**
+  - Seed detection matches the key names `seedHex` and `ufvk`. It is a denylist, so a seed under any other name would load.
+  - Userinfo in `Z402_LWD_URL` is ignored.
+  - The loopback host check accepts `127.256.0.1`.
+  - Price drift between the API and the facilitator is not detected at startup. The fix is to move `termsVersion()` into `@z402/protocol`, and per-route prices need their own protocol version (R34).
+- **merchant-keygen (N-1 to N-4, SEC-B10, R51):**
+  - `--view-only` checks the address by its prefix only.
+  - `--from` echoes its value in errors.
+  - An unreadable directory gives a raw EACCES.
+  - `--view-only --force` over a seed-bearing file moves the seed without the backup reminder.
+  - Two concurrent `--force` runs on an existing file can lose a key whose address was already printed. Only a warning covers this.
+  - A new key file cannot be created on FAT or exFAT.
+- **`scripts/show-deposit.sh` has never been run through shellcheck,** which was not installable here. `bash -n` and the behaviour suites stand in for it.
+
 ## 8. Credits
 
 zdecrypt follows the decrypt-loop shape of Kage `crates/x402z-facilitator/src/verify.rs` (github.com/nickthelegend/zec-shielded-x402 @ `0330760`, MIT) and Hanko `packages/core/src/lib.rs` (github.com/nickthelegend/zec-payment-verify-sdk @ `3c7edae`, MIT). Its tests use their published demo keys and txids.
