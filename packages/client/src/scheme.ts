@@ -71,6 +71,8 @@ export interface SessionView {
   readonly deposits: readonly Readonly<LocalDeposit>[];
   readonly nextIndex: number;
   readonly depositsMade: number;
+  /** Why the session refuses every payment from now on, undefined while it can still pay */
+  readonly halted: { readonly code: string; readonly txid: string | undefined } | undefined;
 }
 
 /** Minimum gap between checks of one uncertain txid, counted from when the wallet reported it */
@@ -91,7 +93,7 @@ function haltedError(halt: { code: string; txid: string | undefined }): Error {
   return new Error(`session halted by ${halt.code} on deposit ${halt.txid ?? "(none presented)"}`);
 }
 
-function viewOf(session: Session): SessionView {
+function viewOf({ session, halted }: SessionState): SessionView {
   return {
     network: session.network,
     payTo: session.payTo,
@@ -101,6 +103,7 @@ function viewOf(session: Session): SessionView {
     deposits: session.deposits.map((d) => ({ ...d })),
     nextIndex: session.nextIndex,
     depositsMade: session.depositsMade,
+    halted: halted === undefined ? undefined : { ...halted },
   };
 }
 
@@ -215,16 +218,17 @@ export class PrepaidVoucherScheme implements SchemeNetworkClient {
   }
 
   session(payTo: string, network?: string): SessionView | undefined {
-    for (const { session } of this.#states.values()) {
+    for (const state of this.#states.values()) {
+      const { session } = state;
       if (session.payTo !== payTo || (network !== undefined && session.network !== network)) continue;
-      return viewOf(session);
+      return viewOf(state);
     }
     return undefined;
   }
 
   /** Every session, one per payee, in the order they started */
   sessions(): SessionView[] {
-    return [...this.#states.values()].map(({ session }) => viewOf(session));
+    return [...this.#states.values()].map(viewOf);
   }
 
   /** Cancels safety timers, lets in-flight deposits finish, then closes the wallet */

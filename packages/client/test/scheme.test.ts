@@ -1167,11 +1167,13 @@ const REJECTIONS = [
 
 describe("halt after a deposit rejection", () => {
   it.each(REJECTIONS)("after %s the next payload rejects, naming code and txid, without paying", async (code) => {
-    const { wallet, clock, events, hook, pay } = setup();
+    const { wallet, clock, events, scheme, hook, pay } = setup();
     const R = makeReq();
     const r1 = await pay(R);
     const t1 = voucher(r1).depositTxid as string;
+    expect(scheme.session(PAY_TO)?.halted).toBeUndefined();
     await expect(hook(refused(R, r1, code, snap()))).resolves.toBeUndefined();
+    expect(scheme.session(PAY_TO)?.halted).toEqual({ code, txid: t1 });
     const seen = events.length;
 
     const next = pay(makeReq());
@@ -1243,6 +1245,7 @@ describe("halt after an unknown deposit status", () => {
     expect(events).toHaveLength(seen);
     expect(scheme.session(PAY_TO)?.deposits).toEqual([{ index: 1, memo: MEMO_1, state: "uncertain" }]);
     expect(scheme.session(PAY_TO)?.depositsMade).toBe(0);
+    expect(scheme.session(PAY_TO)?.halted).toEqual({ code: "deposit_status_unknown", txid: "(unknown)" });
   });
 
   it("a later deposit that comes back unknown halts a session that had paid before", async () => {

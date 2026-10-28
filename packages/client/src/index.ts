@@ -14,3 +14,5 @@ export {
   type SentTransaction,
   type ZalletRpcWalletOptions,
 } from "./wallet/zallet-rpc.js";
+// The seams a custom wallet or chain source implements, so callers need no @z402/protocol import for them
+export { ChainUnavailableError, type DepositRequest, type TxStatus, type TxStatusSource, type ZcashWallet } from "@z402/protocol";
