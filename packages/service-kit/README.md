@@ -21,7 +21,7 @@ service.app.get("/v1/hello", (_req, res) => res.json({ hello: "world" })); // ru
 await serve(service.app, env);
 ```
 
-TypeScript users also need `@types/express` for the `Express` type in the declarations. `@z402-net/service-kit/testing` (`startTestStack`) is available only inside the z402 repository, because it runs the real facilitator, which needs the `zdecrypt` binary.
+TypeScript users also need `@types/express` for the `Express` type in the declarations. `@z402-net/service-kit/testing` (`startTestStack`) is available only inside the z402 repository, because it runs the repository's unpublished `@z402/facilitator` and `@z402/testkit`.
 
 Source and issues: https://github.com/oynozan/z402
 
