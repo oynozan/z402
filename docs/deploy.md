@@ -37,8 +37,9 @@ answers and the clock once the agent is funded:
 
 Measured on a 4-CPU arm64 VM with a fast link: building the images from nothing took about 1.5 minutes (the Node image
 69 s, 31 s of it compiling zdecrypt; the web image 19 s). With the images built, `up -d` on empty volumes returned
-after 45 s, and every service was healthy a second later, the model downloads included. Funding the agent is most of
-that (36 s). A fresh server first downloads about 1 GB of images (Zebra, Zallet, Zaino, llama.cpp, the Rust and Node
+after 45 to 75 s, and every service was healthy within two minutes (111 s in the latest run), the model downloads and
+the LLM's first load included. Funding the agent is most of the wait (36 to 48 s). A fresh server first downloads about
+1 GB of images (Zebra, Zallet, Zaino, llama.cpp, the Rust and Node
 build bases), plus the crates and npm packages of the build.
 
 `chain-init`, `zallet-init`, `wallet-fund` and `keygen` are one-shot jobs: `docker compose ps -a` shows them as
