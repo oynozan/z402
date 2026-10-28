@@ -2,8 +2,9 @@
 #
 # A private Zcash regtest chain (Zebra, Zallet holding the funded agent wallet, Zaino, a block clock), the merchant
 # keys, the facilitator with its service catalog, the paid API, the four starter services with a local llama.cpp model
-# runtime, and the website. Runbook and ports: docs/deploy.md. Compose settings: .env.example. Each service's own
-# settings and API keys: services/<name>/.env.
+# runtime, and the website. markdown runs as provider 2, an independent provider with its own payTo and API key.
+# Runbook and ports: docs/deploy.md. Compose settings: .env.example. Each service's own settings and API keys:
+# services/<name>/.env.
 
 name: z402
 
@@ -247,16 +248,21 @@ services:
 
   keygen:
     <<: *job
-    # The seed never reaches stdout or stderr, which docker logs keeps. keygen.mjs checks the file whatever zdecrypt
-    # did, and removes it when it holds no keys, so the next run generates them again.
+    # The operator's keys, and provider 2's in a volume of their own. The seed never reaches stdout or stderr, which
+    # docker logs keeps. keygen.mjs checks each file whatever zdecrypt did, and removes one that holds no keys, so the
+    # next run generates them again.
     command:
       - sh
       - -c
       - |
-        umask 077; [ -e /keys/merchant-regtest.json ] || zdecrypt keygen --network regtest --pretty > /keys/merchant-regtest.json
+        umask 077
+        for file in /keys/merchant-regtest.json /markdown-keys/merchant-regtest.json; do
+          [ -e "$$file" ] || zdecrypt keygen --network regtest --pretty > "$$file"
+        done
         exec node docker/keygen.mjs
     volumes:
       - keys:/keys
+      - markdown-keys:/markdown-keys
       - runtime:/run/z402
 
   facilitator:
@@ -280,8 +286,10 @@ services:
       Z402_FACILITATOR_PORT: "4022"
       Z402_MERCHANT_KEYS_FILE: /keys/merchant-regtest.json
       Z402_LEDGER: /data/facilitator-ledger.regtest.jsonl
-      # The registry and every registered provider's ledger, on the state volume next to the operator's ledger
+      # The registered providers, their ledgers and the service catalog, kept with the operator's ledger
       Z402_PROVIDERS_DIR: /data/providers.regtest
+      # Empty leaves POST /providers open, which is safe only while nothing outside this network reaches the facilitator
+      Z402_REGISTRATION_TOKEN: ${Z402_REGISTRATION_TOKEN:-}
     volumes:
       - keys:/keys:ro
       - runtime:/run/z402:ro
@@ -300,6 +308,34 @@ services:
       # wait-lightwalletd.mjs alone may take 10 minutes, and its startup checks come after it
       start_period: 15m
       start_interval: 3s
+
+  # Provider 2 -----------------------------------------------------------------
+
+  # markdown is provider 2: an independent provider with its own payTo, and its own API key, which this job gets from
+  # the facilitator's POST /providers and keeps in the markdown-runtime volume for markdown alone. Every up checks the
+  # stored key with GET /providers/me and keeps it while it works, since registering again rotates it. A new key:
+  # docker compose stop markdown, docker compose run --rm markdown-register --rotate, docker compose start markdown.
+  markdown-register:
+    <<: *job
+    # The entrypoint rather than the command, so that flags after the service name (--rotate) are added to these
+    entrypoint:
+      - node
+      - docker/register-provider.mjs
+      - --keys
+      - /markdown-keys/merchant-regtest.json
+      - --out
+      - /run/markdown
+    environment:
+      Z402_FACILITATOR_URL: http://facilitator:4022
+      Z402_REGISTRATION_TOKEN: ${Z402_REGISTRATION_TOKEN:-}
+    volumes:
+      - markdown-keys:/markdown-keys:ro
+      - markdown-runtime:/run/markdown
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      facilitator:
+        condition: service_healthy
 
   # Paid HTTP ------------------------------------------------------------------
 
@@ -373,14 +409,19 @@ services:
     environment:
       <<: *service-env
       PORT: "4032"
+      # Provider 2's own payTo and API key, which markdown-register writes, in place of the operator's
+      Z402_PAY_TO_FILE: /run/markdown/pay-to
+      Z402_FACILITATOR_TOKEN_FILE: /run/markdown/api-key
     volumes:
-      - runtime:/run/z402:ro
+      - markdown-runtime:/run/markdown:ro
     ports:
       - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_MARKDOWN_PORT:-4032}:4032"
     mem_limit: 768m
     depends_on:
       facilitator:
         condition: service_healthy
+      markdown-register:
+        condition: service_completed_successfully
     healthcheck: *service-health
 
   embeddings:
@@ -573,6 +614,8 @@ volumes:
   chain-info:
   keys:
   runtime:
+  markdown-keys:
+  markdown-runtime:
   facilitator-data:
   dropbox-data:
   models:

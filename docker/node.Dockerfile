@@ -1,6 +1,6 @@
-# One image for every Node process of compose.yaml (chain jobs, keygen, facilitator, API, services, agent, smoke
-# test): the pnpm workspace without the website, run from source with tsx, plus the zdecrypt binary that the
-# facilitator and the keygen job call. Build context: the repository root.
+# One image for every Node process of compose.yaml (chain jobs, keygen, facilitator, provider registration, API,
+# services, agent, smoke test): the pnpm workspace without the website, run from source with tsx, plus the zdecrypt
+# binary that the facilitator and the keygen job call. Build context: the repository root.
 
 ARG NODE_IMAGE=node:26.12.1-bookworm-slim
 ARG RUST_IMAGE=rust:1.98.1-slim-bookworm
@@ -39,7 +39,7 @@ COPY --from=source /src/ ./
 COPY --from=zdecrypt --chmod=0755 /usr/local/bin/zdecrypt crates/zdecrypt/target/release/zdecrypt
 # Mount points owned by the runtime user, so a fresh named volume mounted on one inherits the owner
 RUN ln -s /app/crates/zdecrypt/target/release/zdecrypt /usr/local/bin/zdecrypt \
- && mkdir -p /data/dropbox /keys /run/z402 /chain-info \
- && chown node:node /data /data/dropbox /keys /run/z402 /chain-info
+ && mkdir -p /data/dropbox /keys /markdown-keys /run/z402 /run/markdown /chain-info \
+ && chown node:node /data /data/dropbox /keys /markdown-keys /run/z402 /run/markdown /chain-info
 ENV NODE_ENV=production
 USER node

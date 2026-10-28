@@ -2,8 +2,8 @@
 
 `docker compose up -d` in the repository root runs the whole project on one machine: a private Zcash regtest chain
 with a funded agent wallet and a block clock, the merchant keys, the facilitator with its service catalog, the paid
-API (`GET /chunk`), the four starter services, a local llama.cpp model runtime for `llm` and `embeddings`, and the
-website. No `.env` and no other step is needed.
+API (`GET /chunk`), the four starter services (`markdown` as a second, independent provider), a local llama.cpp model
+runtime for `llm` and `embeddings`, and the website. No `.env` and no other step is needed.
 
 Needs Docker Engine 25 or later with Compose v2.24 or later, at least 4 GB of memory, about 8 GB of free disk, and
 internet access on the first start. Linux amd64 is the target. macOS arm64 works too, with Zaino (amd64 only)
@@ -30,8 +30,9 @@ answers and the clock once the agent is funded:
 1. `zebra` → `chain-init` mines blocks 1 and 2, where NU5 to NU6.3 activate
 2. `zallet-init` creates the wallet, account 0 and the miner address, once → `zallet`, and `zaino` beside it
 3. `wallet-fund` mines 110 blocks and shields 62.5 ZEC to the agent, when it holds less than 1 ZEC → `clock`
-4. `keygen` creates the merchant keys and the facilitator token, once → `facilitator` (after Zaino answers) → `api`,
-   `llm`, `markdown`, `embeddings`, `dropbox`, `web`
+4. `keygen` creates the merchant keys of the operator and of provider 2 and the facilitator token, once →
+   `facilitator` (after Zaino answers) → `api`, `llm`, `embeddings`, `dropbox`, `web`, and `markdown-register`, which
+   registers provider 2 with the facilitator once (see [Providers](#providers)) → `markdown`
 5. `llm-model` and `embed-model` download their models (about 580 MB) on the first start; `llm` and `embeddings` show
    `health: starting` until the model is loaded. Nothing else waits for them.
 
@@ -42,8 +43,8 @@ the LLM's first load included. Funding the agent is most of the wait (36 to 48 s
 1 GB of images (Zebra, Zallet, Zaino, llama.cpp, the Rust and Node
 build bases), plus the crates and npm packages of the build.
 
-`chain-init`, `zallet-init`, `wallet-fund` and `keygen` are one-shot jobs: `docker compose ps -a` shows them as
-`Exited (0)`. Every `up` runs them again, and they do nothing once their work is done.
+`chain-init`, `zallet-init`, `wallet-fund`, `keygen` and `markdown-register` are one-shot jobs: `docker compose ps -a`
+shows them as `Exited (0)`. Every `up` runs them again, and they do nothing once their work is done.
 
 Watch it: `docker compose logs -f wallet-fund facilitator`, or `docker compose logs -f` for everything.
 
@@ -60,10 +61,11 @@ docker compose run --rm smoke                                       # paid calls
 Then open http://localhost:3000.
 
 `smoke` proves that paid calls work end to end. It waits until `llm`, `markdown`, `embeddings` and `dropbox` are
-healthy (on the first start, until the models are loaded), makes one deposit from the agent's wallet, and runs a short
-script on each service over the compose network: an `llm` stream of up to three chunks, one page, one embedding, and a
-drop uploaded, held, fetched and deleted. Every answer is checked. It prints one line per step, then `smoke ok` and
-exits 0, or `smoke FAILED` and exits 1. `markdown` fetches https://example.com unless `--page` names another page:
+healthy (on the first start, until the models are loaded), makes a deposit from the agent's wallet to each payee (the
+operator, and provider 2 for `markdown`), and runs a short script on each service over the compose network: an `llm`
+stream of up to three chunks, one page, one embedding, and a drop uploaded, held, fetched and deleted. Every answer is
+checked. It prints one line per step, then `smoke ok` and exits 0, or `smoke FAILED` and exits 1. `markdown` fetches
+https://example.com unless `--page` names another page:
 
 ```bash
 docker compose run --rm smoke --page https://www.rfc-editor.org/rfc/rfc9110.html
@@ -79,7 +81,7 @@ docker compose run --rm smoke --page https://www.rfc-editor.org/rfc/rfc9110.html
 | markdown | 4032 | `Z402_MARKDOWN_PORT` (4032) |
 | embeddings | 4033 | `Z402_EMBEDDINGS_PORT` (4033) |
 | dropbox | 4034 | `Z402_DROPBOX_PORT` (4034) |
-| facilitator | 4022 | no, the website serves its catalog at `/discovery/*` |
+| facilitator | 4022 | no, the website serves its catalog at `/discovery/*` ([Exposure](#exposure)) |
 | zebra, zallet, zaino, llm-model, embed-model | 18232, 28232, 8137, 8080 | no |
 
 Published ports bind to `Z402_PUBLISH_HOST`, `0.0.0.0` by default so a server serves them. On a laptop, or behind a
@@ -98,7 +100,7 @@ bypass `ufw`.
   `https://llm.example.com`, or `http://203.0.113.7:4031`): it is the resource URL in every 402 and in discovery.
   Change it with the host port too.
 - `HOST`, `PORT`, the network, the price, the facilitator URL and token, and the payTo are fixed by `compose.yaml` and
-  cannot be changed from these files.
+  cannot be changed from these files. `markdown`'s token and payTo are provider 2's own ([Providers](#providers)).
 
 `docker compose up -d` recreates a service whose settings changed. After pulling new code:
 `docker compose up -d --build --remove-orphans`. `--remove-orphans` also removes the container of a service that is
@@ -129,6 +131,50 @@ embedded string), so the service's own defaults apply. Then leave the local mode
 `Z402_LLM_MODEL_SCALE=0` and `Z402_EMBED_MODEL_SCALE=0`, and run `docker compose up -d`. A service is ready, and
 charges, once its provider lists the model.
 
+## Providers
+
+The facilitator is one payment rail for many providers, each paid to its own payTo and calling the facilitator with
+its own API key. Compose runs two:
+
+- **The operator**: the API, `llm`, `embeddings` and `dropbox`. `keygen` creates its keys in the `keys` volume, which
+  only `keygen` and the facilitator mount, and writes its public payTo and the facilitator token, the operator's API
+  key, to the `runtime` volume.
+- **Provider 2**: `markdown`, an independent provider with keys and an API key of its own, as a provider on another
+  machine would have. `keygen` creates its keys in the `markdown-keys` volume, which only `keygen` and
+  `markdown-register` mount. `markdown-register` registers its payTo and view-only key (UIVK) with the facilitator
+  (`POST /providers`), then writes the payTo and the API key it gets back to the `markdown-runtime` volume, which only
+  `markdown` mounts besides it, read-only. The key is `/run/markdown/api-key` there, mode 0600. The job prints the
+  provider id only, never the key, the UIVK or the seed.
+
+The facilitator keeps the registered providers, their ledgers and the service catalog beside the operator's ledger,
+in the `facilitator-data` volume (`/data/providers.regtest`).
+
+Every `up` runs `markdown-register` again. It asks the facilitator whether the stored key is still provider 2's
+(`GET /providers/me`) and keeps it if so, since registering again rotates the key and would cut off the running
+`markdown`. It registers again only when the facilitator no longer knows the key, as after the `facilitator-data` volume
+was deleted, and then says so: run `docker compose restart markdown` if `markdown` was running. When the facilitator
+refuses the registration (a registration token it lacks, no provider slot left, keys that do not match), the job exits
+1 and `markdown` does not start; `docker compose logs markdown-register` says why.
+
+A new API key for provider 2 ends the old one at once, so `markdown` stops first: running on the old key, it would
+take payments it can no longer settle, which the agent counts as paid all the same.
+
+```bash
+docker compose stop markdown
+docker compose run --rm markdown-register --rotate
+docker compose start markdown
+```
+
+### Exposure
+
+The facilitator's port is never published. The services, the API and the website reach it over the compose network,
+and the website passes on only the public catalog reads (`/discovery/*`). While that holds, no one outside reaches
+`POST /providers`, which is open by default. Before outside providers connect, put the facilitator behind TLS (a
+reverse proxy that terminates HTTPS in front of port 4022) and set `Z402_REGISTRATION_TOKEN` in `.env` to a random
+token, for example `openssl rand -hex 32`, then run `docker compose up -d`. A provider then registers with
+`Authorization: Bearer <token>`, and `markdown-register` sends it for provider 2. With open registration, anyone who
+reaches the facilitator can take its provider slots (32 by default) and list resources on the website.
+
 ## The agent
 
 ```bash
@@ -145,8 +191,9 @@ It pays from Zallet account 0. Each run first checks that the agent still holds 
   back by itself (`restart: unless-stopped`) and the one-shot jobs do not run again (`docker compose restart` runs
   them, and they change nothing). A restart or a reboot starts every container at once: the services wait up to 2
   minutes for the facilitator, and the API waits for it before it starts. Here all were healthy again after 20 to 27 s.
-- `docker compose down -v` deletes every volume: chain, wallet, Zaino's index, merchant keys, facilitator ledger,
-  drops and models. The next `up -d` starts a new chain from height 0.
+- `docker compose down -v` deletes every volume: chain, wallet, Zaino's index, both providers' merchant keys and
+  provider 2's API key, the facilitator's ledgers and registered providers, drops and models. The next `up -d` starts a
+  new chain from height 0.
 - The chain and the facilitator ledger go together. The ledger records sessions and deposits by transaction id and
   height on one chain; a new chain reuses the heights and has none of those transactions, so a ledger kept from the
   old one credits deposits that do not exist. The wallet is tied to the chain the same way. Never delete one of the
@@ -158,11 +205,14 @@ It pays from Zallet account 0. Each run first checks that the agent still holds 
   docker volume rm z402_chain z402_zallet z402_zaino z402_chain-info z402_facilitator-data z402_dropbox-data
   ```
 
+  The facilitator then no longer knows provider 2, so the next `up -d` registers it again, with a new API key.
+
 Docker keeps container logs without limit unless the daemon sets a rotating default (`/etc/docker/daemon.json`,
 `"log-opts": {"max-size": "10m", "max-file": "3"}`).
 
 `node --test docker/test/` checks this setup without a running Docker daemon: start order, restarts, the smoke
-service, image pins, file modes in the images and the limits that fit the local models.
+service, which containers each key volume reaches, image pins, file modes in the images, the limits that fit the local
+models, and `markdown-register` against a stub facilitator.
 
 ## Beyond regtest
 
