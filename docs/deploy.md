@@ -98,7 +98,8 @@ bypass `ufw`.
   any `127.0.0.1` URL copied from the example: inside a container that is the container itself.
 - On a server, set `PUBLIC_URL` in each `services/<name>/.env` to the origin agents reach it at (for example
   `https://llm.example.com`, or `http://203.0.113.7:4031`): it is the resource URL in every 402 and in discovery.
-  Change it with the host port too.
+  Change it with the host port too. The demo API's is `Z402_API_PUBLIC_URL` in the root `.env`, which lists its
+  `GET /chunk` in the catalog.
 - A service charges its own price (LLM 200 zat a chunk, embeddings 100 a call, markdown 1,000 a page, drop box 500 an
   upload or hold), and `Z402_PRICE_ZAT` in its `services/<name>/.env` sets another, from 1 to the facilitator's
   `windowZat`.

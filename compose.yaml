@@ -355,6 +355,8 @@ services:
       Z402_FACILITATOR_URL: http://facilitator:4022
       Z402_API_HOST: 0.0.0.0
       Z402_API_PORT: "4021"
+      # The origin agents reach the API at, which its catalog item names; set, it lists GET /chunk in the Bazaar
+      Z402_API_PUBLIC_URL: ${Z402_API_PUBLIC_URL:-http://localhost:${Z402_API_PORT:-4021}}
     volumes:
       - runtime:/run/z402:ro
     ports:
