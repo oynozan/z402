@@ -794,6 +794,10 @@ describe("startApi", () => {
     ["publicUrl", { publicUrl: "https://api.example.com/?" }],
     ["publicUrl", { publicUrl: "https://api.example.com#top" }],
     ["publicUrl", { publicUrl: `https://api.example.com/${"a".repeat(2048)}` }],
+    ["serviceName", { serviceName: "" }],
+    ["serviceName", { serviceName: "A".repeat(33) }],
+    ["serviceName", { serviceName: "Partner\nAPI" }],
+    ["serviceName", { serviceName: 7 as unknown as string }],
     ["declareIntervalMs", { declareIntervalMs: 0 }],
     ["declareIntervalMs", { declareIntervalMs: 1.5 }],
     ["declareIntervalMs", { declareIntervalMs: 2 ** 31 }],
@@ -827,6 +831,7 @@ describe("startApi", () => {
     ["facilitatorToken", { facilitatorToken: "abc\nSECRET" }, "SECRET"],
     ["publicUrl", { publicUrl: "https://agent:hunter2@api.example.com" }, "hunter2"],
     ["publicUrl", { publicUrl: "https://api.example.com/?key=hunter2" }, "hunter2"],
+    ["serviceName", { serviceName: "hunter2\n" }, "hunter2"],
   ])("a %s that carries a secret is refused without quoting it anywhere", async (field, over, secret) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const error = await startApi(apiOptions("http://127.0.0.1:9", over)).then(
@@ -1123,6 +1128,17 @@ describe("declaring GET /chunk to the facilitator's Bazaar", { timeout: LONG }, 
     const seen = Date.parse(item.lastSeen);
     expect(seen).toBeGreaterThanOrEqual(before);
     expect(seen).toBeLessThanOrEqual(Date.now());
+  });
+
+  test("a serviceName names the route in the 402 and in the listed item, as a second provider's API sets one", async () => {
+    const facilitator = await facilitatorOn(new FakeChain({ expiryDelta: 40 }));
+    const api = await declaring(facilitator.url, { serviceName: "Partner API" });
+    await vi.waitFor(async () => expect(await listedFor(facilitator.url)).toHaveLength(1), { timeout: 5_000 });
+
+    const [item] = await listedFor(facilitator.url);
+    expect(item.serviceName).toBe("Partner API");
+    const required = await refusalOf(await fetch(`${api.url}/chunk`));
+    expect(required.resource).toEqual({ ...resourceAt(`${PUBLIC_URL}/chunk`), serviceName: "Partner API" });
   });
 
   test("the 402 names the declared resource, a trailing slash of the public URL dropped", async () => {

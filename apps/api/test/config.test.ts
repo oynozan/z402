@@ -52,6 +52,7 @@ describe("loadConfig", () => {
       Z402_API_HOST: "0.0.0.0",
       Z402_API_PORT: "8080",
       Z402_API_PUBLIC_URL: "https://api.example.com:8443/z402/",
+      Z402_API_SERVICE_NAME: "Partner API",
     });
     expect(config).toEqual({
       network: "zcash:testnet",
@@ -62,6 +63,7 @@ describe("loadConfig", () => {
       host: "0.0.0.0",
       port: 8080,
       publicUrl: "https://api.example.com:8443/z402",
+      serviceName: "Partner API",
     });
   });
 
@@ -73,10 +75,12 @@ describe("loadConfig", () => {
         Z402_PRICE_ZAT: "",
         Z402_API_PORT: "",
         Z402_API_PUBLIC_URL: "",
+        Z402_API_SERVICE_NAME: "",
       }),
     );
     expect(config).toMatchObject({ network: "zcash:regtest", facilitatorToken: undefined, priceZat: 500n, port: 4021 });
     expect(config.publicUrl).toBeUndefined();
+    expect(config.serviceName).toBeUndefined();
   });
 
   test.each([
@@ -221,6 +225,29 @@ describe("Z402_API_PUBLIC_URL", () => {
       expect(message).not.toContain("hunter2");
     }
   });
+});
+
+describe("Z402_API_SERVICE_NAME", () => {
+  const serviceName = (value: string | undefined) => loadConfig(env({ Z402_API_SERVICE_NAME: value })).serviceName;
+
+  test("is left out of the options when unset, so that the route keeps the name Demo API", () => {
+    expect(serviceName(undefined)).toBeUndefined();
+    expect(serviceName("")).toBeUndefined();
+  });
+
+  test.each(["Partner API", "x", "A".repeat(32), "Weather & Co. (v2)"])("%j is taken as it is", (raw) => {
+    expect(serviceName(raw)).toBe(raw);
+  });
+
+  // The facilitator's catalog takes 1 to 32 printable ASCII characters, so a name it would refuse stops the start
+  test.each(["A".repeat(33), "Partner\tAPI", "Partner\nAPI", "P\u00e4rtner API", "\u007f"])(
+    "%j is refused at start, without being quoted",
+    (raw) => {
+      expect(() => serviceName(raw)).toThrow(
+        new ConfigError("Z402_API_SERVICE_NAME: must be 1 to 32 printable ASCII characters"),
+      );
+    },
+  );
 });
 
 describe("payTo from Z402_MERCHANT_KEYS_FILE", () => {

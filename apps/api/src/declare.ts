@@ -4,7 +4,7 @@
  * facilitator's Bazaar with POST /discovery/resources, at once and then every 30 s, and that beat is also how the
  * catalog tells that the API is up. The item is read from the 402 that an unpaid request to the route gets from the
  * same x402 server, so the catalog offers exactly what the route asks for. One bad item refuses a whole call, so the
- * one limit that the facilitator puts on the URL is checked at start.
+ * limits that the facilitator puts on the URL and on the name are checked at start.
  */
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { HTTPAdapter, HTTPRequestContext, x402HTTPResourceServer } from "@x402/core/server";
@@ -29,6 +29,9 @@ export const CHUNK_PATH = "/chunk";
 export const DECLARE_INTERVAL_MS = 30_000;
 /** The longest resource URL the facilitator's catalog takes */
 const MAX_URL_CHARS = 2048;
+/** The longest serviceName the facilitator's catalog takes, all of it printable ASCII */
+const MAX_SERVICE_NAME = 32;
+const PRINTABLE = /^[\x20-\x7e]+$/;
 /** The facilitator answers a declaration from memory, so one that takes longer counts as not reached this time */
 const DECLARE_TIMEOUT_MS = 10_000;
 const MAX_LOGGED_CHARS = 200;
@@ -53,6 +56,12 @@ export function publicUrlProblem(url: unknown): string | undefined {
     return `with ${CHUNK_PATH} it makes a resource URL over ${MAX_URL_CHARS} characters`;
   }
   return undefined;
+}
+
+/** Why `name` cannot be the name the catalog shows for this API, or undefined when the catalog takes it */
+export function serviceNameProblem(name: unknown): string | undefined {
+  if (typeof name === "string" && name.length <= MAX_SERVICE_NAME && PRINTABLE.test(name)) return undefined;
+  return `must be 1 to ${MAX_SERVICE_NAME} printable ASCII characters`;
 }
 
 /** An unpaid request for `path`, as the payment middleware hands one to the x402 server */

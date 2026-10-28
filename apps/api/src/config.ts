@@ -16,7 +16,7 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import type { ApiOptions } from "./app.js";
-import { publicUrlProblem } from "./declare.js";
+import { publicUrlProblem, serviceNameProblem } from "./declare.js";
 
 /** The repository root, found from this file and never from the working directory, which `pnpm --filter` changes */
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -179,6 +179,15 @@ function publicUrlOf(env: Env): string | undefined {
   return url.replace(/\/+$/, "");
 }
 
+/** The name the catalog shows for this API, which only a declaring API is listed under */
+function serviceNameOf(env: Env): string | undefined {
+  const name = read(env, "Z402_API_SERVICE_NAME");
+  if (name === undefined) return undefined;
+  const problem = serviceNameProblem(name);
+  if (problem !== undefined) throw new ConfigError(`Z402_API_SERVICE_NAME: ${problem}`);
+  return name;
+}
+
 /** Reads and checks the environment, throwing a ConfigError that names the variable, and passes each warning to warn */
 export function loadConfig(env: Env, warn = (message: string): void => console.error(message)): ApiOptions {
   const profile = profileOf(env);
@@ -191,5 +200,6 @@ export function loadConfig(env: Env, warn = (message: string): void => console.e
     host: hostOf(env),
     port: portOf(env),
     publicUrl: publicUrlOf(env),
+    serviceName: serviceNameOf(env),
   };
 }

@@ -31,7 +31,14 @@ import {
 } from "@z402/protocol";
 import { checkProvider, PrepaidVoucherServerScheme, ProviderCheckError } from "@z402/server";
 import express, { type Express, type Request, type RequestHandler, type Response } from "express";
-import { CHUNK_PATH, DECLARE_INTERVAL_MS, declaredResource, publicUrlProblem, startDeclaring } from "./declare.js";
+import {
+  CHUNK_PATH,
+  DECLARE_INTERVAL_MS,
+  declaredResource,
+  publicUrlProblem,
+  serviceNameProblem,
+  startDeclaring,
+} from "./declare.js";
 
 export interface ApiOptions {
   network: ZcashNetwork;
@@ -47,6 +54,8 @@ export interface ApiOptions {
   port?: number;
   /** Where this API is reached, which the 402 names as the route's resource and the Bazaar lists it under */
   publicUrl?: string;
+  /** The name the catalog shows for this API, default Demo API, such as Partner API for a second provider */
+  serviceName?: string;
   /** How often the route is declared to the Bazaar, default 30000, and only a publicUrl makes the API declare */
   declareIntervalMs?: number;
   /** Where the outcomes of the declarations are reported, default stderr */
@@ -111,6 +120,8 @@ function checkOptions(o: ApiOptions): void {
   if (typeof o.priceZat !== "bigint" || o.priceZat < 1n) throw new Error("priceZat: must be a bigint of at least 1 zat");
   const problem = o.publicUrl === undefined ? undefined : publicUrlProblem(o.publicUrl);
   if (problem !== undefined) throw new Error(`publicUrl: ${problem}`);
+  const unnamed = o.serviceName === undefined ? undefined : serviceNameProblem(o.serviceName);
+  if (unnamed !== undefined) throw new Error(`serviceName: ${unnamed}`);
   const every = o.declareIntervalMs;
   if (every !== undefined && (!Number.isInteger(every) || every < 1 || every > MAX_TIMER_MS)) {
     throw new Error(`declareIntervalMs: expected a whole number of milliseconds from 1 to ${MAX_TIMER_MS}`);
@@ -236,7 +247,7 @@ async function buildApi(o: ApiOptions): Promise<{ app: Express; http: x402HTTPRe
   // Before the first /supported, so a refused key or another payTo is named for what it is
   await checkKey(o);
   // One payTo and one network feed both the scheme and the route, since nothing compares the two later
-  const { network, payTo, priceZat, publicUrl } = o;
+  const { network, payTo, priceZat, publicUrl, serviceName = SERVICE_NAME } = o;
   const server = new x402ResourceServer(facilitatorClient(o)).register(
     network,
     new PrepaidVoucherServerScheme({ payTo, network }),
@@ -256,7 +267,7 @@ async function buildApi(o: ApiOptions): Promise<{ app: Express; http: x402HTTPRe
       description: CHUNK_DESCRIPTION,
       mimeType: "application/json",
       // The names and unit the website's catalog shows, in the shape the service kit gives its routes
-      serviceName: SERVICE_NAME,
+      serviceName,
       tags: SERVICE_TAGS,
       extensions: { bazaar: bazaarExtension(priceZat), z402: { unit: CHUNK_UNIT } },
     },
