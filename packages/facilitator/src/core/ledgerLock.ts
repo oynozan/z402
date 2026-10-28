@@ -7,6 +7,9 @@
  * holder this process cannot see, such as a container sharing the volume, so a start watches it: a heartbeat means a
  * live holder and a refusal, and staleMs without one means a takeover. A takeover runs under `<lock>.takeover`, created
  * exclusively, and checks again under it that the lock is still the one judged stale, so two starts cannot both win.
+ * The holder reads its lock again at every heartbeat and before every ledger write, and once the file names another
+ * start, or is gone, it reports the loss and writes nothing more, so a holder paused past staleMs cannot write after
+ * the start that took over.
  */
 import { randomBytes } from "node:crypto";
 import {
@@ -55,11 +58,23 @@ interface Seen {
   size: number;
 }
 
+/** A ledger lock this process holds */
+export interface HeldLock {
+  /** Throws unless the lock file still names this start, read afresh on each call */
+  assertHeld(): void;
+  /** Frees the lock, and does nothing the second time */
+  release(): void;
+}
+
 /** Ledgers this process holds or is taking, by canonical path */
 const held = new Set<string>();
 
-/** Makes this process the one writer of the ledger at `path`, and resolves with the release of its lock */
-export async function lockLedger(path: string, timing: Partial<LockTiming> = {}): Promise<() => void> {
+/** Makes this process the one writer of the ledger at `path`, and tells `onLost` once if the lock stops naming it */
+export async function lockLedger(
+  path: string,
+  options: Partial<LockTiming> & { onLost?: (err: Error) => void } = {},
+): Promise<HeldLock> {
+  const { onLost, ...timing } = options;
   const t = { ...TIMING, ...timing };
   const key = canonicalOf(path);
   if (held.has(key)) throw new Error(`ledgerPath: ${path} is already open in this process`);
@@ -73,7 +88,7 @@ export async function lockLedger(path: string, timing: Partial<LockTiming> = {})
       since: new Date().toISOString(),
     };
     const fd = await acquire(path, lock, me, t);
-    return holding(key, lock, me, fd, t);
+    return holding({ path, key, lock, me, fd, t, onLost });
   } catch (e) {
     held.delete(key);
     throw e;
@@ -215,28 +230,85 @@ function clearIfStale(mutex: string, t: LockTiming): void {
   } catch {}
 }
 
-function holding(key: string, lock: string, me: Holder, fd: number, t: LockTiming): () => void {
+interface Holding {
+  path: string;
+  key: string;
+  lock: string;
+  me: Holder;
+  fd: number;
+  t: LockTiming;
+  onLost: ((err: Error) => void) | undefined;
+}
+
+function holding({ path, key, lock, me, fd, t, onLost }: Holding): HeldLock {
+  let released = false;
+  let lost: Error | undefined;
+  const lose = (err: Error): Error => {
+    if (lost !== undefined) return lost;
+    lost = err;
+    clearInterval(timer);
+    try {
+      onLost?.(err);
+    } catch {}
+    return err;
+  };
   const timer = setInterval(() => {
+    const standing = standingOf(lock, me);
+    if (standing?.certain === true) {
+      lose(lostLock(path, standing.why));
+      return;
+    }
+    // A lock that cannot be read right now is still touched, through the descriptor only this start holds
     try {
       const now = new Date();
       futimesSync(fd, now, now);
     } catch {}
   }, t.heartbeatMs);
   timer.unref();
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    clearInterval(timer);
-    held.delete(key);
-    try {
-      closeSync(fd);
-    } catch {}
-    // A lock that someone else wrote since then is theirs, so it stays
-    try {
-      if (look(lock)?.holder?.token === me.token) unlinkSync(lock);
-    } catch {}
+
+  return {
+    assertHeld: () => {
+      if (released) throw lostLock(path, "it released the lock");
+      if (lost !== undefined) throw lost;
+      const standing = standingOf(lock, me);
+      if (standing === undefined) return;
+      const err = lostLock(path, standing.why);
+      // A lock that cannot be read refuses this write, and only one the file shows is not this start's is lost for good
+      throw standing.certain ? lose(err) : err;
+    },
+    release: () => {
+      if (released) return;
+      released = true;
+      clearInterval(timer);
+      held.delete(key);
+      try {
+        closeSync(fd);
+      } catch {}
+      // A lock that someone else wrote since then is theirs, so it stays
+      try {
+        if (look(lock)?.holder?.token === me.token) unlinkSync(lock);
+      } catch {}
+    },
   };
+}
+
+/** Undefined while the lock file names this start, else why not, and whether the file says so for certain */
+function standingOf(lock: string, me: Holder): { why: string; certain: boolean } | undefined {
+  let seen: Seen | undefined;
+  try {
+    seen = look(lock);
+  } catch (e) {
+    if (e instanceof NotRegular) return { why: "its lock is not a regular file", certain: true };
+    const code = e instanceof Error ? codeOf(e.cause) : undefined;
+    return { why: `its lock cannot be read (${code ?? "unknown error"})`, certain: false };
+  }
+  if (seen === undefined) return { why: "its lock is gone", certain: true };
+  const h = seen.holder;
+  if (h === undefined) return { why: "its lock names no facilitator", certain: true };
+  if (h.token !== me.token || h.pid !== me.pid) {
+    return { why: `pid ${h.pid} on ${h.host} holds it since ${h.since}`, certain: true };
+  }
+  return undefined;
 }
 
 const PRINTABLE = /^[^\x00-\x1f\x7f]+$/;
@@ -285,8 +357,14 @@ function cannot(what: string, e: unknown): Error {
   return new Error(`ledgerPath: cannot ${what} (${codeOf(e) ?? "unknown error"})`, { cause: e });
 }
 
+class NotRegular extends Error {}
+
 function notRegular(lock: string): Error {
-  return new Error(`ledgerPath: ${lock} is not a regular file; delete it if no facilitator is running`);
+  return new NotRegular(`ledgerPath: ${lock} is not a regular file; delete it if no facilitator is running`);
+}
+
+function lostLock(path: string, why: string): Error {
+  return new Error(`ledgerPath: ${path} is no longer locked by this facilitator (${why}), so it writes nothing more`);
 }
 
 function unreadable(lock: string): Error {

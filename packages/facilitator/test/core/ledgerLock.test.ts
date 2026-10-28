@@ -1,5 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,7 +16,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { lockLedger, type LockTiming } from "../../src/core/ledgerLock.js";
+import { lockLedger, type HeldLock, type LockTiming } from "../../src/core/ledgerLock.js";
 
 /** Short enough to keep each wait under half a second */
 const FAST: LockTiming = { heartbeatMs: 40, staleMs: 400, pollMs: 20 };
@@ -43,16 +44,21 @@ const lockFile = () => `${ledger()}.lock`;
 const readLock = (path = lockFile()): Record<string, unknown> => JSON.parse(readFileSync(path, "utf8"));
 
 async function lock(path = ledger(), timing: Partial<LockTiming> = FAST): Promise<() => void> {
-  const release = await lockLedger(path, timing);
-  releases.push(release);
-  return release;
+  return (await held(path, timing)).release;
+}
+
+/** The lock itself, released after the test */
+async function held(path = ledger(), options: Parameters<typeof lockLedger>[1] = FAST): Promise<HeldLock> {
+  const taken = await lockLedger(path, options);
+  releases.push(taken.release);
+  return taken;
 }
 
 /** The error a lock attempt ends with, and how long it took */
 async function refusal(path = ledger(), timing: Partial<LockTiming> = FAST): Promise<{ error: Error; ms: number }> {
   const started = performance.now();
   try {
-    releases.push(await lockLedger(path, timing));
+    releases.push((await lockLedger(path, timing)).release);
   } catch (e) {
     return { error: e as Error, ms: performance.now() - started };
   }
@@ -341,6 +347,73 @@ describe("starts that race for one stale lock", () => {
     expect(outcomes.filter((o) => o === "won")).toHaveLength(1);
     expect(outcomes.filter((o) => o === "lost")).toHaveLength(7);
   }, 20_000);
+});
+
+describe("a lock that another start took", () => {
+  /** A heartbeat too slow to run within a test, so only assertHeld looks */
+  const QUIET = { ...FAST, heartbeatMs: 60_000 };
+  const LOST = /^ledgerPath: .*ledger\.jsonl is no longer locked by this facilitator/;
+
+  /** Replaces the lock the way a start that took it over writes its own */
+  function takeOver(over: Record<string, unknown> = {}, ageMs = 0): void {
+    rmSync(lockFile());
+    writeLock(holder({ token: "f0f0f0f0f0f0f0f0", ...over }), ageMs);
+  }
+
+  test("checks out while the lock is this start's, and not once it is released", async () => {
+    const lock = await held(ledger(), QUIET);
+    expect(() => lock.assertHeld()).not.toThrow();
+    lock.release();
+    expect(() => lock.assertHeld()).toThrow(LOST);
+  });
+
+  test.each([
+    ["another token under this pid, as a sibling container's pid 1 would write it", {}],
+    ["another pid", { pid: 1 }],
+  ])("is refused before the next write when it holds %s", async (_, over) => {
+    const lock = await held(ledger(), QUIET);
+    takeOver(over);
+    expect(() => lock.assertHeld()).toThrow(LOST);
+    expect(() => lock.assertHeld()).toThrow(/pid \d+ on .* holds it/);
+  });
+
+  test("is refused before the next write once its file is gone", async () => {
+    const lock = await held(ledger(), QUIET);
+    rmSync(lockFile());
+    expect(() => lock.assertHeld()).toThrow(/its lock is gone/);
+  });
+
+  test("is found by the heartbeat, which stops touching it and reports the loss once", async () => {
+    const onLost = vi.fn<(err: Error) => void>();
+    const lock = await held(ledger(), { ...FAST, onLost });
+    // Rewritten in place, so a heartbeat that kept touching its descriptor would move this file's time
+    writeLock(holder({ token: "f0f0f0f0f0f0f0f0" }), 60_000);
+    const stale = statSync(lockFile()).mtimeMs;
+
+    await vi.waitFor(() => expect(onLost).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    await new Promise((resolve) => setTimeout(resolve, 5 * FAST.heartbeatMs));
+
+    expect(onLost).toHaveBeenCalledTimes(1);
+    expect(onLost.mock.calls[0]?.[0].message).toMatch(LOST);
+    expect(statSync(lockFile()).mtimeMs).toBe(stale);
+    expect(() => lock.assertHeld()).toThrow(LOST);
+    lock.release();
+    expect(readLock()).toMatchObject({ token: "f0f0f0f0f0f0f0f0" });
+  });
+
+  const asRoot = process.getuid?.() === 0;
+  test.skipIf(asRoot)("that cannot be read refuses a write, while the heartbeat still touches it", async () => {
+    const onLost = vi.fn<(err: Error) => void>();
+    const lock = await held(ledger(), { ...FAST, onLost });
+    chmodSync(lockFile(), 0o000);
+    stops.push(() => chmodSync(lockFile(), 0o600));
+    const before = statSync(lockFile()).mtimeMs;
+    await new Promise((resolve) => setTimeout(resolve, 4 * FAST.heartbeatMs));
+
+    expect(() => lock.assertHeld()).toThrow(/is no longer locked by this facilitator \(its lock cannot be read/);
+    expect(statSync(lockFile()).mtimeMs).toBeGreaterThan(before);
+    expect(onLost).not.toHaveBeenCalled();
+  });
 });
 
 describe("one lock for every spelling of a ledger path", () => {

@@ -7,7 +7,7 @@ while (Date.now() < Number(goAt)) {
 }
 const timing = { heartbeatMs: Number(heartbeatMs), staleMs: Number(staleMs), pollMs: Number(pollMs) };
 lockLedger(path ?? "", timing).then(
-  (release) => {
+  ({ release }) => {
     process.stdout.write("won\n");
     setTimeout(() => {
       release();

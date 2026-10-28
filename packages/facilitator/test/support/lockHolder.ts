@@ -2,7 +2,7 @@
 import { lockLedger } from "../../src/core/ledgerLock.js";
 
 const [path, heartbeatMs, staleMs, pollMs] = process.argv.slice(2);
-const release = await lockLedger(path ?? "", {
+const { release } = await lockLedger(path ?? "", {
   heartbeatMs: Number(heartbeatMs),
   staleMs: Number(staleMs),
   pollMs: Number(pollMs),

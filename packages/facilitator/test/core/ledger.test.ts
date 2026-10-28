@@ -373,6 +373,31 @@ describe("Ledger replay of a large file", () => {
   });
 });
 
+describe("a ledger whose guard refuses", () => {
+  test("writes nothing, and refuses every append after, as after a failed write", () => {
+    let owned = false;
+    const guard = vi.fn(() => {
+      if (!owned) throw new Error("ledgerPath: the lock is someone else's");
+    });
+    const ledger = new Ledger(file(), { guard });
+
+    expect(() => ledger.appendSync([voucherEvent()])).toThrow("ledgerPath: the lock is someone else's");
+    expect(existsSync(file())).toBe(false);
+    owned = true;
+    expect(() => ledger.appendSync([voucherEvent()])).toThrow(/refuses writes after a failed write/);
+    expect(existsSync(file())).toBe(false);
+  });
+
+  test("is asked before every write and lets a good one through", () => {
+    const guard = vi.fn();
+    const ledger = new Ledger(file(), { guard });
+    ledger.appendSync([voucherEvent()]);
+    ledger.appendSync([depositEvent()]);
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(new Ledger(file()).replay()).toEqual([voucherEvent(), depositEvent()]);
+  });
+});
+
 describe("the ledger header", () => {
   const PAY_TO = `uregtest1${"q".repeat(60)}`;
   const header = (over: Record<string, unknown> = {}) =>

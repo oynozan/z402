@@ -60,7 +60,7 @@ export interface FacilitatorOptions {
   pollIntervalMs?: number;
   /** How long verify waits for a deposit the chain does not show yet, default 30000 */
   depositWaitMs?: number;
-  /** Called once, on the first failed ledger write in settle or the watcher, the host should exit to replay the file */
+  /** Called once, on the first failed ledger write or once the ledger lock names another start, so the host exits */
   onFatal?: (err: unknown) => void;
   /** Receives one line per request (method, path, status, reason code) and the diagnostics, which default to stderr */
   log?: Log;
@@ -337,14 +337,14 @@ interface OpenLedger {
 }
 
 /** Locks the file, proves it can be written, then replays it, so a facilitator that says ready can record a settle */
-async function openLedger(path: string | undefined, own: LedgerOwner): Promise<OpenLedger> {
+async function openLedger(path: string | undefined, own: LedgerOwner, fatal: Fatal): Promise<OpenLedger> {
   if (path === undefined) return { ledger: new Ledger(), state: new FacilitatorState(), release: () => undefined };
-  const release = await lockLedger(path);
+  const lock = await lockLedger(path, { onLost: fatal });
   try {
     writable(path);
-    return { ...replayed(path, own), release };
+    return { ...replayed(path, own, lock.assertHeld), release: lock.release };
   } catch (e) {
-    release();
+    lock.release();
     throw e;
   }
 }
@@ -362,9 +362,10 @@ function writable(path: string): void {
 }
 
 /** Replays the ledger of `own`, and gives a ledger with no events the header that names its facilitator */
-function replayed(path: string, own: LedgerOwner): { ledger: Ledger; state: FacilitatorState } {
+function replayed(path: string, own: LedgerOwner, guard: () => void): { ledger: Ledger; state: FacilitatorState } {
   try {
-    const ledger = new Ledger(path);
+    // Every write first checks that the lock is still this facilitator's
+    const ledger = new Ledger(path, { guard });
     const state = new FacilitatorState();
     let first = true;
     // Each event is applied as it is read, so a long ledger is never held whole
@@ -401,26 +402,34 @@ function listen(app: Express, host: string, port: number, log: Log): Promise<Ser
 /** Opens the ledger, polls the chain once, then listens, and a failed poll does not stop the start */
 export async function startFacilitator(o: FacilitatorOptions): Promise<FacilitatorHandle> {
   checkOptions(o);
-  const opened = await openLedger(o.ledgerPath, { network: o.network, payTo: o.payTo });
+  const fatal = once(o.onFatal);
+  const opened = await openLedger(o.ledgerPath, { network: o.network, payTo: o.payTo }, fatal);
   try {
-    return await serve(o, opened);
+    return await serve(o, opened, fatal);
   } catch (e) {
     opened.release();
     throw e;
   }
 }
 
-async function serve(o: FacilitatorOptions, { ledger, state, release }: OpenLedger): Promise<FacilitatorHandle> {
-  const host = o.host ?? DEFAULT_HOST;
-  const { onFatal } = o;
+type Fatal = (err: unknown) => void;
 
-  // The first failed write is the only one reported, since the host exits on it
+/** The first failure is the only one reported, since the host exits on it */
+function once(onFatal: Fatal | undefined): Fatal {
   let fired = false;
-  const fatal = (err: unknown): void => {
+  return (err) => {
     if (fired) return;
     fired = true;
     onFatal?.(err);
   };
+}
+
+async function serve(
+  o: FacilitatorOptions,
+  { ledger, state, release }: OpenLedger,
+  fatal: Fatal,
+): Promise<FacilitatorHandle> {
+  const host = o.host ?? DEFAULT_HOST;
   // A watcher pass already in flight when close() runs must not write once it resumes
   let closed = false;
 

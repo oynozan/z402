@@ -78,14 +78,23 @@ export function checkLedgerHeader(first: LedgerEvent | undefined, own: LedgerOwn
 export class Ledger {
   readonly #path: string | undefined;
   readonly #chunkBytes: number;
+  readonly #guard: (() => void) | undefined;
   readonly #memory: LedgerEvent[] = [];
   /** The failed write after which every append is refused, since the file and the live state may disagree */
   #broken: { cause: unknown } | undefined;
 
-  /** `chunkBytes` is how much replay reads at a time, for tests */
-  constructor(path?: string, o: { chunkBytes?: number } = {}) {
+  constructor(
+    path?: string,
+    o: {
+      /** How much replay reads at a time, for tests */
+      chunkBytes?: number;
+      /** Runs before every write to the file, and a throw from it refuses that write and every one after */
+      guard?: () => void;
+    } = {},
+  ) {
     this.#path = path;
     this.#chunkBytes = o.chunkBytes ?? CHUNK_BYTES;
+    this.#guard = o.guard;
     if (path !== undefined) mkdirSync(dirname(path), { recursive: true });
   }
 
@@ -102,6 +111,12 @@ export class Ledger {
     if (this.#path === undefined) {
       this.#memory.push(...structuredClone(events));
       return;
+    }
+    try {
+      this.#guard?.();
+    } catch (e) {
+      this.#broken = { cause: e };
+      throw e;
     }
     const before = sizeOf(this.#path);
     try {
