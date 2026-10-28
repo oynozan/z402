@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   decodePaymentRequiredHeader,
   decodePaymentResponseHeader,
+  decodePaymentSignatureHeader,
   encodePaymentSignatureHeader,
 } from "@x402/core/http";
 import { FacilitatorCapabilityError } from "@x402/core/server";
@@ -40,8 +41,8 @@ const OTHER_PAY_TO = `uregtest1${"p".repeat(60)}`;
 const TESTNET_PAY_TO = `utest1${"q".repeat(60)}`;
 const MAINNET_PAY_TO = `u1${"q".repeat(60)}`;
 const TOKEN = "t-api-4c9a1e-secret";
-/** The facilitator's terms version for PAY_TO, price 500 and the demo terms, as packages/facilitator/test/app.test.ts pins it */
-const TERMS_VERSION = "23e5935a1b39a198";
+/** The facilitator's terms version for the demo terms, sha256 over ["z402-terms-v2",{the terms}] taken with shasum */
+const TERMS_VERSION = "cb7f148af0fda19a";
 /** Generous for the long runs, which take well under a second each on a laptop */
 const LONG = 30_000;
 
@@ -61,7 +62,6 @@ function facilitatorOptions(chain: FakeChain, over: Partial<FacilitatorOptions> 
     network: NETWORK,
     chain: chain.viewFor(PAY_TO),
     payTo: PAY_TO,
-    priceZat: 500n,
     terms: DEMO_TERMS,
     authToken: TOKEN,
     port: 0,
@@ -118,6 +118,36 @@ async function paidChunk(res: Response): Promise<unknown> {
   expect(res.status).toBe(200);
   return res.json();
 }
+
+/** The bazaar extension a 402 to a GET carries, written out and not built, with the first price in its example */
+const bazaarOf = (price: string) => ({
+  info: {
+    input: { type: "http", method: "GET" },
+    output: { type: "json", example: { chunk: 1, cumulativeZat: price, data: "chunk-1" } },
+  },
+  schema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    properties: {
+      input: {
+        type: "object",
+        properties: {
+          type: { type: "string", const: "http" },
+          method: { type: "string", enum: ["GET"] },
+          queryParams: { type: "object", properties: {} },
+        },
+        required: ["type", "method"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: { type: { type: "string" }, example: { type: "object" } },
+        required: ["type"],
+      },
+    },
+    required: ["input"],
+  },
+});
 
 /** The decoded PAYMENT-REQUIRED of a 402 */
 async function refusalOf(res: Response): Promise<PaymentRequired> {
@@ -218,6 +248,7 @@ describe("paid /chunk through the whole stack", () => {
           },
         },
       ],
+      extensions: { bazaar: bazaarOf("500") },
     });
   });
 
@@ -281,7 +312,7 @@ describe("paid /chunk through the whole stack", () => {
 
   test("the requirements and the chunk number follow priceZat", async () => {
     const chain = new FakeChain({ expiryDelta: 40 });
-    const facilitator = await facilitatorOn(chain, { priceZat: 700n });
+    const facilitator = await facilitatorOn(chain);
     const api = await apiOn(facilitator.url, { priceZat: 700n });
     expect((await refusalOf(await fetch(`${api.url}/chunk`))).accepts[0]?.amount).toBe("700");
 
@@ -495,17 +526,185 @@ describe("paid /chunk through the whole stack", () => {
   );
 });
 
+describe("the bazaar extension of GET /chunk", () => {
+  /** What GET /discovery/resources answers, the items only */
+  const listed = async (facilitatorUrl: string): Promise<any[]> =>
+    ((await (await fetch(`${facilitatorUrl}/discovery/resources`)).json()) as { items: any[] }).items;
+
+  test("an unpaid GET /chunk declares a GET with an example of its answer and a schema that checks both", async () => {
+    const s = await fullStack();
+    const required = await refusalOf(await fetch(`${s.api.url}/chunk`));
+    const bazaar = (required.extensions as { bazaar: { info: any; schema: any } }).bazaar;
+
+    expect(bazaar.info.input.method).toBe("GET");
+    expect(bazaar.info.input).toEqual({ type: "http", method: "GET" });
+    expect(bazaar.info.output).toEqual({ type: "json", example: { chunk: 1, cumulativeZat: "500", data: "chunk-1" } });
+    expect(bazaar.schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
+    expect(bazaar.schema.required).toEqual(["input"]);
+    expect(bazaar.schema.properties.input.properties.method).toEqual({ type: "string", enum: ["GET"] });
+    expect(bazaar.schema.properties.input.properties.type).toEqual({ type: "string", const: "http" });
+    expect(Object.keys(bazaar.schema.properties.output.properties)).toEqual(["type", "example"]);
+    expect(required.extensions).toEqual({ bazaar: bazaarOf("500") });
+  });
+
+  test("the stock validator of @x402/extensions finds nothing wrong with it", async () => {
+    // @x402/express validates the extension of each route against its schema when the first request comes, and warns
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const s = await fullStack();
+
+    await refusalOf(await fetch(`${s.api.url}/chunk`));
+
+    const printed = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join(" ");
+    expect(printed).not.toMatch(/bazaar/i);
+    expect(printed).not.toMatch(/x402:/);
+  });
+
+  test("the example is the answer to the first paid call, and it follows the price", async () => {
+    const chain = new FakeChain({ expiryDelta: 40 });
+    const facilitator = await facilitatorOn(chain);
+    const api = await apiOn(facilitator.url, { priceZat: 800n });
+    const required = await refusalOf(await fetch(`${api.url}/chunk`));
+    const example = (required.extensions as any).bazaar.info.output.example;
+
+    const p = payer(api.url);
+    p.client.pendingTxid = deposit(chain, p.client.sessionKey, 1);
+
+    expect(example).toEqual({ chunk: 1, cumulativeZat: "800", data: "chunk-1" });
+    expect(await paidChunk(await p.chunk())).toEqual(example);
+    expect(required.extensions).toEqual({ bazaar: bazaarOf("800") });
+  });
+
+  test("a stock client echoes the extension in its payment, and the paid flow works as before", async () => {
+    const s = await fullStack();
+    s.client.pendingTxid = deposit(s.chain, s.client.sessionKey, 1);
+
+    for (let i = 1; i <= 3; i++) {
+      expect(await paidChunk(await s.chunk())).toEqual({
+        chunk: i,
+        cumulativeZat: String(500 * i),
+        data: `chunk-${i}`,
+      });
+    }
+
+    expect(s.sent).toHaveLength(3);
+    for (const header of s.sent) {
+      const payment = decodePaymentSignatureHeader(header);
+      expect(payment.extensions).toEqual({ bazaar: bazaarOf("500") });
+      expect(payment.resource?.url).toBe(`${s.api.url}/chunk`);
+    }
+    expect(s.client.refusals).toEqual([]);
+  });
+
+  test("the facilitator lists /chunk from its paid calls, which is what the extension is for", async () => {
+    const s = await fullStack();
+    expect(await listed(s.facilitator.url)).toEqual([]);
+    s.client.pendingTxid = deposit(s.chain, s.client.sessionKey, 1);
+
+    for (let i = 1; i <= 3; i++) await paidChunk(await s.chunk());
+
+    expect(await listed(s.facilitator.url)).toMatchObject([
+      {
+        resource: `${s.api.url}/chunk`,
+        type: "http",
+        x402Version: 2,
+        accepts: [{ scheme: SCHEME, network: NETWORK, amount: "500", payTo: PAY_TO }],
+        extensions: { bazaar: bazaarOf("500") },
+        paidCallsToday: 3,
+      },
+    ]);
+  });
+
+  test("a payment that echoes no extension lists nothing, so the extension is what lists /chunk", async () => {
+    const s = await fullStack();
+    const seed = seedOf(3);
+    const d1 = deposit(s.chain, publicKeyFromSeed(seed), 1);
+    // voucherHeader builds the payment by hand and echoes no extensions, as a client that drops them would
+    const header = await voucherHeader(s.api.url, seed, "500", d1);
+    expect(decodePaymentSignatureHeader(header).extensions).toBeUndefined();
+
+    expect(await paidChunk(await fetch(`${s.api.url}/chunk`, { headers: { "payment-signature": header } }))).toEqual({
+      chunk: 1,
+      cumulativeZat: "500",
+      data: "chunk-1",
+    });
+
+    expect(await listed(s.facilitator.url)).toEqual([]);
+  });
+});
+
+describe("a second provider on the operator's facilitator", () => {
+  const PAY_TO_2 = `uregtest1${"p".repeat(60)}`;
+  const UIVK_2 = `uivkregtest1${"sec3ret".repeat(10)}`;
+
+  test("registers, runs its own API at 800 zat beside the operator's at 500, and both are listed", async () => {
+    const chain = new FakeChain({ expiryDelta: 40 });
+    const chain2 = new FakeChain({ expiryDelta: 40 });
+    const facilitator = await facilitatorOn(chain, {
+      providers: {
+        dir: join(scratch, "providers-two"),
+        chainFor: () => chain2.viewFor(PAY_TO_2),
+        owns: async () => true,
+      },
+    });
+    const registered = await fetch(`${facilitator.url}/providers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ payTo: PAY_TO_2, uivk: UIVK_2 }),
+    });
+    expect(registered.status).toBe(201);
+    const { apiKey } = (await registered.json()) as { apiKey: string };
+
+    // The second API starts with its own key, payTo and price, against a /supported that names none of them
+    const operatorApi = await apiOn(facilitator.url);
+    const providerApi = await apiOn(facilitator.url, { facilitatorToken: apiKey, payTo: PAY_TO_2, priceZat: 800n });
+    const accepted = async (url: string) => (await refusalOf(await fetch(`${url}/chunk`))).accepts[0];
+    expect(await accepted(operatorApi.url)).toMatchObject({ payTo: PAY_TO, amount: "500" });
+    expect(await accepted(providerApi.url)).toMatchObject({ payTo: PAY_TO_2, amount: "800" });
+    expect((await accepted(providerApi.url))?.extra.termsVersion).toBe(TERMS_VERSION);
+    expect((await accepted(operatorApi.url))?.extra.termsVersion).toBe(TERMS_VERSION);
+
+    const first = payer(operatorApi.url);
+    const second = payer(providerApi.url);
+    first.client.pendingTxid = deposit(chain, first.client.sessionKey, 1);
+    second.client.pendingTxid = chain2.broadcast({
+      outputs: [{ to: PAY_TO_2, valueZat: 100000n, memo: depositMemo(second.client.sessionKey, 1) }],
+    });
+    expect(await paidChunk(await first.chunk())).toEqual({ chunk: 1, cumulativeZat: "500", data: "chunk-1" });
+    expect(await paidChunk(await second.chunk())).toEqual({ chunk: 1, cumulativeZat: "800", data: "chunk-1" });
+    expect(await paidChunk(await second.chunk())).toEqual({ chunk: 2, cumulativeZat: "1600", data: "chunk-2" });
+    expect(await paidChunk(await first.chunk())).toEqual({ chunk: 2, cumulativeZat: "1000", data: "chunk-2" });
+    expect(first.client.refusals).toEqual([]);
+    expect(second.client.refusals).toEqual([]);
+
+    const items = ((await (await fetch(`${facilitator.url}/discovery/resources`)).json()) as { items: any[] }).items;
+    expect(items).toHaveLength(2);
+    const byAmount = Object.fromEntries(items.map((i) => [i.accepts[0].amount, i]));
+    expect(byAmount["500"]).toMatchObject({
+      resource: `${operatorApi.url}/chunk`,
+      accepts: [{ payTo: PAY_TO }],
+      extensions: { bazaar: bazaarOf("500") },
+      paidCallsToday: 2,
+    });
+    expect(byAmount["800"]).toMatchObject({
+      resource: `${providerApi.url}/chunk`,
+      accepts: [{ payTo: PAY_TO_2 }],
+      extensions: { bazaar: bazaarOf("800") },
+      paidCallsToday: 2,
+    });
+  });
+});
+
 /** The facilitator's answer at /providers/me to the operator's key, with the providerId its app.test.ts pins */
 const ME = { providerId: "f93eeecbf393ea04", network: NETWORK, payTo: PAY_TO };
 
-/** The terms and payTo of an `accepts` entry, as /supported advertises them */
+/** The terms of an accepts entry as /supported advertises them, with no payTo since protocol v2.0 */
 const ADVERTISED = {
   windowZat: "100000",
   creditRatioBps: 2500,
   creditCapZat: "200000",
   zeroConfMinExpiryBlocks: 20,
   termsVersion: TERMS_VERSION,
-  payTo: PAY_TO,
 };
 
 /** A /supported body that offers prepaid-voucher on `network` with `extra` */
@@ -623,23 +822,32 @@ describe("startApi", () => {
   });
 
   test("a facilitator whose terms the API cannot use fails naming facilitatorUrl", async () => {
-    // A /supported with the right payTo and no terms at all
-    const stub = await stubFacilitator({}, supportedOn(NETWORK, { payTo: PAY_TO }));
+    // A /supported that offers the scheme and no terms at all
+    const stub = await stubFacilitator({}, supportedOn(NETWORK, {}));
     const err = await startFailure(stub.url);
     expect(err.message).toMatch(/^facilitatorUrl:/);
+    expect(err.message).toMatch(/terms/);
     expect(err.cause).toBeInstanceOf(FacilitatorCapabilityError);
   });
 
-  test("a /supported that advertises another payTo still fails naming payTo, once /providers/me agrees", async () => {
-    const stub = await stubFacilitator({}, supportedOn(NETWORK, { ...ADVERTISED, payTo: OTHER_PAY_TO }));
-    const err = await startFailure(stub.url);
-    expect(err.message).toMatch(/^payTo:/);
-    expect(err.cause).toBeInstanceOf(FacilitatorCapabilityError);
-    expect(stub.paths).toEqual(["/providers/me", "/supported"]);
+  test("a /supported that still carries a payTo does not fail the start, since /providers/me binds it", async () => {
+    for (const payTo of [PAY_TO, OTHER_PAY_TO]) {
+      const stub = await stubFacilitator({}, supportedOn(NETWORK, { ...ADVERTISED, payTo }));
+      const api = await apiOn(stub.url);
+      expect((await refusalOf(await fetch(`${api.url}/chunk`))).accepts[0]).toMatchObject({ payTo: PAY_TO });
+      expect(stub.paths.slice(0, 2)).toEqual(["/providers/me", "/supported"]);
+    }
+  });
+
+  test("a /supported without a payTo starts the API at the payTo /providers/me agreed to", async () => {
+    const stub = await stubFacilitator({}, supportedOn(NETWORK, ADVERTISED));
+    const api = await apiOn(stub.url);
+    const accepted = (await refusalOf(await fetch(`${api.url}/chunk`))).accepts[0];
+    expect(accepted).toMatchObject({ payTo: PAY_TO, amount: "500", extra: ADVERTISED });
   });
 
   test("a /supported that offers another network still fails naming network, once /providers/me agrees", async () => {
-    const stub = await stubFacilitator({}, supportedOn(NETWORK_TESTNET, { ...ADVERTISED, payTo: TESTNET_PAY_TO }));
+    const stub = await stubFacilitator({}, supportedOn(NETWORK_TESTNET, ADVERTISED));
     const err = await startFailure(stub.url);
     expect(err.message).toMatch(/^network:/);
     expect(stub.paths).toEqual(["/providers/me", "/supported"]);

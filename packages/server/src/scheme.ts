@@ -40,7 +40,6 @@ export class PrepaidVoucherServerScheme implements SchemeNetworkServer {
     default: { supported: ["authorization"], default: "authorization" },
   } as const satisfies Record<string, PaymentFlowConfig>;
 
-  readonly #payTo: string;
   readonly #network: ZcashNetwork;
   /** Session snapshot of a refused verify, keyed by the request's PaymentPayload object */
   readonly #refusedSessions = new WeakMap<object, unknown>();
@@ -52,7 +51,6 @@ export class PrepaidVoucherServerScheme implements SchemeNetworkServer {
     if (!isValidPayTo(o.payTo, o.network)) {
       throw new Error(`payTo: not a shielded-only unified address for ${o.network}`);
     }
-    this.#payTo = o.payTo;
     this.#network = o.network;
   }
 
@@ -98,7 +96,7 @@ export class PrepaidVoucherServerScheme implements SchemeNetworkServer {
     supportedKind: SupportedKind,
     _facilitatorExtensions: string[],
   ): Promise<PaymentRequirements> {
-    // Terms only, the facilitator's own payTo is checked at startup and never copied
+    // Terms only, a facilitator that still advertises a payTo of its own has it ignored
     const terms: Record<string, unknown> = {};
     for (const key of TERM_KEYS) {
       const value = supportedKind.extra?.[key];
@@ -113,7 +111,6 @@ export class PrepaidVoucherServerScheme implements SchemeNetworkServer {
     _facilitatorExtensions: string[],
   ): string | void {
     const extra = supportedKind.extra ?? {};
-    if (extra.payTo !== this.#payTo) return "facilitator extra.payTo is missing or differs from the API's payTo";
     try {
       parseTerms(extra);
     } catch (e) {

@@ -31,15 +31,17 @@ const PAY_TO = `uregtest1${"q".repeat(60)}`;
 const OTHER_PAY_TO = `uregtest1${"p".repeat(60)}`;
 const TERMS_VERSION = "0123456789abcdef";
 
-/** What the facilitator puts in its /supported kind, the five terms and its own payTo */
+/** What the facilitator puts in its /supported kind since protocol v2.0, the five terms and no payTo */
 const ADVERTISED = {
   windowZat: "100000",
   creditRatioBps: 2500,
   creditCapZat: "200000",
   zeroConfMinExpiryBlocks: 20,
   termsVersion: TERMS_VERSION,
-  payTo: PAY_TO,
 };
+
+/** What an older facilitator put there, which still carries its operator's payTo */
+const WITH_PAY_TO = { ...ADVERTISED, payTo: OTHER_PAY_TO };
 
 const REQ: PaymentRequirements = {
   scheme: SCHEME,
@@ -212,7 +214,7 @@ describe("PrepaidVoucherServerScheme", () => {
     });
 
     it("enhance copies the five term keys and not payTo", async () => {
-      const out = await s.enhancePaymentRequirements(REQ, kindWith(ADVERTISED), []);
+      const out = await s.enhancePaymentRequirements(REQ, kindWith(WITH_PAY_TO), []);
       expect(out.extra).toEqual({
         windowZat: "100000",
         creditRatioBps: 2500,
@@ -240,9 +242,7 @@ describe("PrepaidVoucherServerScheme", () => {
   });
 
   describe("validateFacilitatorSupport", () => {
-    it("validateFacilitatorSupport catches payTo drift and bad terms", () => {
-      const drifted = kindWith({ ...ADVERTISED, payTo: OTHER_PAY_TO });
-      expect(s.validateFacilitatorSupport(NETWORK, drifted, [])).toMatch(/payTo/);
+    it("validateFacilitatorSupport catches bad terms and accepts the terms the facilitator advertises", () => {
       const badTerms = kindWith({ ...ADVERTISED, windowZat: 100000 });
       expect(s.validateFacilitatorSupport(NETWORK, badTerms, [])).toMatch(/terms/);
       expect(s.validateFacilitatorSupport(NETWORK, kindWith(ADVERTISED), [])).toBeUndefined();
@@ -253,10 +253,17 @@ describe("PrepaidVoucherServerScheme", () => {
       expect(s.validateFacilitatorSupport(NETWORK, newer, [])).toBeUndefined();
     });
 
-    it("names payTo when the facilitator advertises none, or no extra at all", () => {
-      const { payTo: _payTo, ...withoutPayTo } = ADVERTISED;
-      expect(s.validateFacilitatorSupport(NETWORK, kindWith(withoutPayTo), [])).toMatch(/payTo/);
-      expect(s.validateFacilitatorSupport(NETWORK, kindWith(undefined), [])).toMatch(/payTo/);
+    it("does not read extra.payTo: the facilitator advertises none, and the API's key names its payTo instead", () => {
+      expect(Object.keys(ADVERTISED)).not.toContain("payTo");
+      expect(s.validateFacilitatorSupport(NETWORK, kindWith(ADVERTISED), [])).toBeUndefined();
+      // Nothing compares it, so an older facilitator's payTo, or any other value in its place, changes nothing
+      expect(s.validateFacilitatorSupport(NETWORK, kindWith(WITH_PAY_TO), [])).toBeUndefined();
+      expect(s.validateFacilitatorSupport(NETWORK, kindWith({ ...ADVERTISED, payTo: PAY_TO }), [])).toBeUndefined();
+      expect(s.validateFacilitatorSupport(NETWORK, kindWith({ ...ADVERTISED, payTo: 7 }), [])).toBeUndefined();
+    });
+
+    it("names the terms when the facilitator advertises no extra at all", () => {
+      expect(s.validateFacilitatorSupport(NETWORK, kindWith(undefined), [])).toMatch(/terms/);
     });
 
     const { creditRatioBps: _bps, ...WITHOUT_BPS } = ADVERTISED;
@@ -448,11 +455,17 @@ describe("PrepaidVoucherServerScheme registered in an x402ResourceServer", () =>
     ]);
   });
 
-  it("refuses to initialize against a facilitator that advertises another payTo", async () => {
-    const server = serverOver(facilitator({ extra: { ...ADVERTISED, payTo: OTHER_PAY_TO } }));
-    const error = await failureOf(server.initialize());
-    expect(error).toBeInstanceOf(FacilitatorCapabilityError);
-    expect((error as Error).message).toMatch(/payTo/);
+  it("initializes against a facilitator that advertises no payTo, which is what a v2.0 one does", async () => {
+    const server = serverOver(facilitator({ extra: ADVERTISED }));
+    await expect(server.initialize()).resolves.toBeUndefined();
+  });
+
+  it("initializes against a facilitator that still advertises another payTo, since nothing compares it", async () => {
+    const server = await started(facilitator({ extra: WITH_PAY_TO }));
+    // The route's payTo is the API's own, whatever the facilitator says its operator's is
+    const [built] = await server.buildPaymentRequirements(ROUTE);
+    expect(built?.payTo).toBe(PAY_TO);
+    expect(built?.extra).not.toHaveProperty("payTo");
   });
 
   it("refuses to initialize against a facilitator whose terms are bad", async () => {
