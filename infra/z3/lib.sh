@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # the settings, FILE_FOUND and FILE_TEXT are read by the scripts that source this file
 # Shared settings for the z402 Z3 regtest scripts, sourced by up.sh, down.sh and fund-agent.sh
 
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
@@ -42,7 +44,7 @@ z3_env() {
 compose() {
   (
     z3_env
-    cd "$Z3_DIR"
+    cd "$Z3_DIR" || exit
     docker compose -p "$Z3_PROJECT" -f docker-compose.yml -f docker-compose.regtest.yml \
       -f "$HERE/compose.loopback.yml" --env-file .env.regtest "$@"
   )
