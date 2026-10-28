@@ -1,0 +1,23 @@
+{
+  "name": "@z402/discovery",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@x402/core": "2.28.0",
+    "@x402/extensions": "2.28.0",
+    "express": "5.3.0"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@z402/service-kit": "workspace:*"
+  }
+}
