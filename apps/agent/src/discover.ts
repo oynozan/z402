@@ -278,6 +278,29 @@ function size(bytes: number): string {
   return kib >= 1024 ? `${Math.round((kib / 1024) * 10) / 10} MiB` : `${kib} KiB`;
 }
 
+/** The deepest nesting of objects and arrays in JSON text, counted on the raw bytes without parsing them */
+export function nestingDepth(bytes: Uint8Array): number {
+  let depth = 0;
+  let deepest = 0;
+  let inString = false;
+  let escaped = false;
+  for (const byte of bytes) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (byte === 0x5c) escaped = true;
+      else if (byte === 0x22) inString = false;
+    } else if (byte === 0x22) {
+      inString = true;
+    } else if (byte === 0x7b || byte === 0x5b) {
+      depth++;
+      if (depth > deepest) deepest = depth;
+    } else if (byte === 0x7d || byte === 0x5d) {
+      depth--;
+    }
+  }
+  return deepest;
+}
+
 /** The answer as bytes, read until the budget of the run is spent, and never past it */
 async function readBytes(res: Response, run: Run): Promise<Uint8Array<ArrayBuffer>> {
   const tooBig = (): DiscoverError => new DiscoverError(`${run.endpoint} sent more than ${size(run.maxBytes)}`);
@@ -316,7 +339,12 @@ function guardFetch(): void {
     const res = await stock(input, { ...init, signal: run.signal });
     const bytes = await readBytes(res, run);
     const empty = res.status === 204 || res.status === 205 || res.status === 304;
-    return new Response(empty ? null : bytes, { status: res.status, statusText: res.statusText, headers: res.headers });
+    // A JSON body nested past MAX_DEPTH is refused before the stock client parses it, which would take far more memory
+    if (res.ok && nestingDepth(bytes) > MAX_DEPTH) {
+      throw new DiscoverError(`${run.endpoint} sent JSON nested deeper than ${MAX_DEPTH} levels`);
+    }
+    // No statusText: a reason phrase outside Latin-1 makes the Response constructor throw, and nothing reads it
+    return new Response(empty ? null : bytes, { status: res.status, headers: res.headers });
   }) as typeof fetch;
 }
 
@@ -385,20 +413,18 @@ async function listAll(base: string, io: DiscoverIo, limits: DiscoverLimits): Pr
         items.push(item);
         added++;
       }
-      // A page with nothing new is a service that ignores offset and sends the first page again
-      if (added === 0) {
-        if (total !== undefined && items.length < total) {
-          io.warn(`${shown(items.length, total)}: the service sent no further page`);
-        }
-        return items;
-      }
-
       if (items.length > MAX_RESOURCES) {
         items.length = MAX_RESOURCES;
         io.warn(shown(items.length, total));
         return items;
       }
-      if (total === undefined || items.length >= total) return items;
+      // The service has sent as many entries as it counts, repeats included, so asking again would only repeat them
+      if (total === undefined || offset >= total) return items;
+      // A page with nothing new is a service that ignores offset and sends the first page again
+      if (added === 0) {
+        io.warn(`${shown(items.length, total)}: the service sent no further page`);
+        return items;
+      }
       if (items.length >= MAX_RESOURCES) break;
     }
     io.warn(shown(items.length, total));

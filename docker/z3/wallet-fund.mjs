@@ -66,7 +66,9 @@ async function agentAddress(account) {
       if (isDiversifierReuse(e)) continue;
       throw e;
     }
-    if (typeof result?.address !== "string") throw new Error("z_getaddressforaccount returned no address");
+    if (typeof result?.address !== "string" || result.address === "") {
+      throw new Error("z_getaddressforaccount returned no address");
+    }
     return result.address;
   }
   throw new Error(

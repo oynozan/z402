@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import {
   bazaarResourceServerExtension,
@@ -9,7 +9,7 @@ import {
   type DeclareDiscoveryExtensionInput,
 } from "@x402/extensions/bazaar";
 import { afterEach, describe, expect, it } from "vitest";
-import { discoverMain, listLines, rankByIntent, runDiscover, type DiscoverIo, type Listed, type Ranked } from "../src/discover.js";
+import { discoverMain, listLines, nestingDepth, rankByIntent, runDiscover, type DiscoverIo, type Listed, type Ranked } from "../src/discover.js";
 import { DISCOVER_USAGE, USAGE, type DiscoverFlags } from "../src/flags.js";
 
 const PAY_TO = "uregtest1etwrjmjldyyet5pge876dfxerpgmsmarxg920s50y3dgc3wa36xmemqexfyw87jm3h0cttupk92qkrv8uafvjrl2j73d8nck7g35axkz";
@@ -678,6 +678,40 @@ describe("an endpoint that is hostile or broken", () => {
       expect(err).toEqual(["showing the first 1000 of 1500 resources"]);
     });
 
+    it("stops once the service has sent as many entries as it counts, repeats included, without a warning", async () => {
+      const items = [entry(0), entry(0), entry(1)];
+      const server = await fake((req, res) => reply(res, 200, page(items, 3, offsetOf(req))));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(server.requests).toHaveLength(1);
+      expect(out).toHaveLength(2);
+      expect(err).toEqual([]);
+    });
+
+    it("lists a service whose status line carries a reason phrase outside Latin-1", async () => {
+      // node:http refuses to send such a phrase, so the answer is written on the socket by hand
+      const body = Buffer.from(page([entry(0)], 1));
+      const raw = createNetServer((socket) => {
+        socket.once("data", () => {
+          const head = `HTTP/1.1 200 OK \u2713\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n`;
+          socket.end(Buffer.concat([Buffer.from(head, "utf8"), body]));
+        });
+      });
+      await new Promise<void>((ready) => raw.listen(0, "127.0.0.1", ready));
+      try {
+        const { io, out, err } = capture();
+        const url = `http://127.0.0.1:${(raw.address() as AddressInfo).port}`;
+
+        expect(await discoverMain(["--discovery", url], io)).toBe(0);
+        expect(out).toHaveLength(1);
+        expect(err).toEqual([]);
+      } finally {
+        await new Promise<void>((done) => raw.close(() => done()));
+      }
+    });
+
     it("warns that the list is short when the service repeats its first page below its total", async () => {
       const first = Array.from({ length: 100 }, (_, i) => entry(i));
       const server = await fake((_req, res) => reply(res, 200, page(first, 250, 0)));
@@ -759,8 +793,26 @@ describe("an endpoint that is hostile or broken", () => {
         const { io, out, err } = capture();
         expect(await discoverMain(["--discovery", server.url, ...extra], io)).toBe(1);
         expect(out).toEqual([]);
-        expect(err).toEqual([`${server.url}/discovery/resources returned a list with entry 1 nested deeper than 64 levels`]);
+        expect(err).toEqual([`${server.url}/discovery/resources sent JSON nested deeper than 64 levels`]);
       }
+    });
+
+    it("refuses deep nesting from the raw text, before the stock client parses it", async () => {
+      const server = await fake((_req, res) => reply(res, 200, `${"[".repeat(1_000_000)}${"]".repeat(1_000_000)}`));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(1);
+      expect(out).toEqual([]);
+      expect(err).toEqual([`${server.url}/discovery/resources sent JSON nested deeper than 64 levels`]);
+    });
+
+    it("counts brackets inside strings as text when it measures nesting", () => {
+      const text = (s: string): Uint8Array => new TextEncoder().encode(s);
+      expect(nestingDepth(text('{"a":[1,{"b":2}]}'))).toBe(3);
+      expect(nestingDepth(text('{"a":"[[[[{{{{"}'))).toBe(1);
+      expect(nestingDepth(text('{"a":"\\"}'))).toBe(1);
+      expect(nestingDepth(text('{"a":"\\\"[[[","b":[]}'))).toBe(2);
+      expect(nestingDepth(text('"[[[["'))).toBe(0);
     });
 
     it("takes an entry that nests as deeply as the declarations of the starter services do", async () => {
