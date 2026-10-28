@@ -1,6 +1,6 @@
 # z402 multi-provider facilitator (design)
 
-Date: 2026-10-28 · Owner: facilitator agent (`z402-b1`) · Status: **draft, awaiting review** · Deadline: 2026-10-28 23:59 UTC
+Date: 2026-10-28 · Owner: facilitator agent (`z402-b1`) · Status: **approved 2026-10-28, implemented on dev** (final review fixes 6b6992a; live two-provider run in docs/research/live-run.md §9) · Deadline: 2026-10-28 23:59 UTC
 
 z402 becomes what x402 facilitators are: one hosted payment rail that many independent resource servers connect to. Each provider, us included, sets its own `payTo` and its own price per route, connects with its own API key, and never runs a facilitator. The facilitator also hosts the x402 Bazaar, the public catalog of every provider's paid resources.
 
