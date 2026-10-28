@@ -1,0 +1,1301 @@
+/*
+ * The page is one 1360px column between two hairline rails that run from the nav to the footer. Every section is a
+ * full bleed band whose bottom rule crosses the rails, bands stack with no gap, and a checkerboard seam opens each band
+ * below the hero. The rails are drawn outside the column so its inner width stays exactly 1360. Radii are 0, 4px or
+ * 6px only, every line is 1px, and the one shadow on the page belongs to the tooltip.
+ */
+
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-ubuntu-mono), ui-monospace, monospace;
+  --color-ground: var(--bg);
+  --color-ink: var(--ink);
+  --color-dim: var(--dim);
+  --color-faint: var(--faint);
+}
+
+:root {
+  color-scheme: dark;
+
+  --bg: #161616;
+  --surface: #1c1c1c;
+  --code: #121212;
+  --chip: #272727;
+  --ink: #ededeb;
+  --dim: #9a9a97;
+  --faint: #8a8a87;
+  --ghost: #565654;
+  --ink-inverse: #131313;
+  --rail: #272727;
+  --hair: #202020;
+  --line: #3a3a3a;
+  --line-hover: #575754;
+  --focus: #deded9;
+  --up: #70b58c;
+  --starting: #d6b868;
+  --down: #d97878;
+
+  --frame: 1360px;
+  --pad: clamp(20px, 3.4vw, 46px);
+  --band: clamp(44px, 4.4vw, 72px);
+  --nav-h: 62px;
+  --row-h: 56px;
+  --cell-x: 24px;
+  --r-sm: 4px;
+  --r-ctl: 6px;
+  --t-hover: 160ms;
+  --t-cell: 120ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --sans: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+  --mono: var(--font-ubuntu-mono), ui-monospace, monospace;
+  --display: var(--font-akt), var(--font-manrope), sans-serif;
+  --heading: var(--font-lexend-deca), var(--font-manrope), sans-serif;
+}
+
+/* Base */
+
+html {
+  background: var(--bg);
+}
+/* The footer takes whatever height is left, so the rails reach the bottom of a short page */
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  font-kerning: normal;
+  text-rendering: optimizeLegibility;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+a,
+button {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  transition:
+    color var(--t-hover),
+    background-color var(--t-hover),
+    border-color var(--t-hover),
+    opacity var(--t-hover);
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+}
+::selection {
+  background: var(--focus);
+  color: var(--bg);
+}
+h1,
+h2,
+h3,
+p,
+figure,
+pre {
+  margin: 0;
+}
+code,
+pre {
+  font-family: var(--mono);
+}
+
+/* Frame */
+
+/* The sticky header is its 62px bar plus its own 1px rule */
+.band {
+  border-bottom: 1px solid var(--rail);
+  scroll-margin-top: calc(var(--nav-h) + 1px);
+}
+/* A seam is the boundary wherever one follows, so the rule above it would only double the line */
+.band:has(+ .band > .frame > .wall:first-child) {
+  border-bottom: 0;
+}
+.frame {
+  position: relative;
+  max-width: var(--frame);
+  margin-inline: auto;
+  box-shadow:
+    -1px 0 0 var(--rail),
+    1px 0 0 var(--rail);
+}
+.wall {
+  height: 16px;
+  background-image: conic-gradient(#fff 25%, #0000 0 50%, #fff 0 75%, #0000 0);
+  background-size: 16px 16px;
+  opacity: 0.13;
+}
+
+/* Type */
+
+h2,
+.page-head h1,
+.lost h1 {
+  font-family: var(--heading);
+  font-size: clamp(27px, 3.3vw, 44px);
+  font-weight: 300;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+.lead {
+  max-width: 62ch;
+  font-size: clamp(15px, 1.15vw, 16px);
+  line-height: 1.65;
+  color: var(--dim);
+  text-wrap: pretty;
+}
+
+/* Header */
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: var(--bg);
+}
+.nav-frame {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  height: var(--nav-h);
+  padding-inline: var(--pad);
+  background: var(--bg);
+}
+.wordmark {
+  justify-self: start;
+  font-family: var(--display);
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+}
+.nav-links {
+  display: flex;
+  gap: 26px;
+  font-size: 13.5px;
+  color: var(--dim);
+}
+.nav-links a:hover,
+.foot-links a:hover,
+.nav-links a[aria-current="page"],
+.foot-links a[aria-current="page"] {
+  color: var(--ink);
+}
+.nav-cta {
+  justify-self: end;
+}
+
+/* Buttons */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 34px;
+  padding-inline: 15px;
+  border: 1px solid #3a3a38;
+  border-radius: var(--r-ctl);
+  background: linear-gradient(#212121, #1a1a1a);
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+.btn:hover {
+  border-color: var(--line-hover);
+  background: linear-gradient(#282828, #202020);
+}
+.btn-solid {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--ink-inverse);
+  font-weight: 600;
+}
+.btn-solid:hover {
+  border-color: #fff;
+  background: #fff;
+}
+.btn-lg {
+  height: 46px;
+  padding-inline: 22px;
+  font-size: 14px;
+}
+
+/* Hero */
+
+.hero {
+  padding: clamp(56px, 7vw, 108px) var(--pad) 0;
+  text-align: center;
+}
+.hero h1 {
+  font-family: var(--display);
+  font-size: clamp(36px, 6vw, 78px);
+  font-weight: 400;
+  line-height: 1.04;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+.hero h1 span {
+  display: block;
+  font-weight: 500;
+  letter-spacing: -0.038em;
+}
+.hero .lead {
+  max-width: 54ch;
+  margin: 24px auto 0;
+  text-wrap: balance;
+}
+/* Above the veil, which tucks under the row and would otherwise take the clicks there */
+.hero-cta {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 32px;
+}
+
+/* Install command, the whole pill copies and the cell inside it is the visible affordance */
+
+/* Edged like the ghost button beside it, so the primary action is not the faintest control */
+.cmd {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 100%;
+  height: 46px;
+  padding: 0 10px 0 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--code);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1;
+  text-align: left;
+}
+.cmd code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmd-verb {
+  color: var(--dim);
+}
+.cmd:hover {
+  border-color: var(--line-hover);
+  background: #171717;
+}
+.cmd[data-copied] {
+  border-color: var(--ink);
+}
+.copy-cell {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-sm);
+  color: var(--dim);
+  transition:
+    color var(--t-cell),
+    background-color var(--t-cell);
+}
+.cmd:hover .copy-cell,
+.cmd[data-copied] .copy-cell {
+  background: var(--ink);
+  color: var(--ink-inverse);
+}
+
+/* Veil */
+
+/* The picture's top margin is empty ground, so the box starts under the buttons and the coin sits close to them */
+.veil {
+  --veil-h: clamp(300px, 36vw, 500px);
+  position: relative;
+  width: min(880px, 100%);
+  height: var(--veil-h);
+  margin: -16px auto 0;
+}
+.veil-art {
+  position: absolute;
+  inset: 0;
+  mask-image: linear-gradient(to bottom, #000 66%, #0000 100%);
+}
+/* The picture always fills the box height, which puts the coin's right rim 0.35 box heights right of centre */
+.veil-tip {
+  position: absolute;
+  top: calc(50% - 8px);
+  left: calc(50% + 0.35 * var(--veil-h) + 16px);
+  line-height: 0;
+}
+
+/* Section heads */
+
+.head {
+  padding: var(--band) var(--pad) 40px;
+}
+.head h2 {
+  margin-top: 20px;
+}
+.chip {
+  display: flex;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 20px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.chip span {
+  padding-inline: 6px;
+  background: var(--chip);
+}
+.chip span:first-child {
+  border-radius: var(--r-sm) 0 0 var(--r-sm);
+}
+.chip span:last-child {
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.chip span:only-child {
+  border-radius: var(--r-sm);
+}
+
+/* How it works */
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--rail);
+}
+.step {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 40px var(--pad) 48px;
+}
+.step + .step {
+  border-left: 1px solid var(--hair);
+}
+.step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 32px;
+}
+.step h3 {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+.step p {
+  max-width: 36ch;
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--dim);
+  text-wrap: balance;
+}
+
+/* Motifs, six pixel slots on a ten pixel pitch so all three share one grid */
+
+/* One ink box for all three, whole slots across and 64px down, so their edges line up across the row */
+.motif {
+  display: flex;
+  align-items: flex-end;
+  width: calc(round(down, 100% + 4px, 10px) - 4px);
+  max-width: 356px;
+  height: 64px;
+}
+.motif i {
+  display: block;
+}
+.m-coin {
+  flex: none;
+  width: 64px;
+  height: 64px;
+  background: repeating-conic-gradient(var(--ink) 0 25%, #0000 0 50%) 0 0 / 4px 4px;
+}
+.m-link {
+  flex: none;
+  width: 16px;
+  height: 1px;
+  margin-bottom: 32px;
+  background: var(--ghost);
+}
+/* Whole slots only, the ones that do not fit wrap into a row the height clips */
+.m-strip,
+.m-ramp,
+.m-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 6px);
+  column-gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.m-strip,
+.m-ramp {
+  flex: 1;
+  grid-auto-rows: 64px;
+  row-gap: 64px;
+  height: 64px;
+}
+.m-strip i {
+  border: 1px solid var(--dim);
+  background: var(--dim);
+}
+/* Lit up to the current call from the left, the rest held at a fifth */
+.m-ramp {
+  align-items: end;
+  direction: rtl;
+  mask-image: linear-gradient(to right, #000 calc(var(--step) * 10px - 2px), #0003 0);
+}
+.m-ramp i {
+  background: var(--ink);
+}
+.m-credit {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.m-row {
+  grid-auto-rows: 16px;
+  row-gap: 16px;
+  height: 16px;
+}
+.m-row .paid {
+  background: var(--ink);
+}
+.m-row .credit {
+  background: repeating-conic-gradient(var(--ink) 0 25%, #0000 0 50%) 0 0 / 4px 4px;
+}
+.m-row .refused {
+  background: var(--ink);
+  opacity: 0.2;
+}
+/* The limit takes a slot of its own, as a rule two pixels in */
+.m-row b {
+  width: 1px;
+  margin-left: 2px;
+  background: var(--dim);
+}
+
+/* Agent */
+
+.agent {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.agent-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 16px;
+  padding: var(--band) var(--pad);
+}
+.agent-code {
+  min-width: 0;
+  padding: var(--band) var(--pad);
+  border-left: 1px solid var(--rail);
+}
+.code {
+  border: 1px solid var(--rail);
+  background: var(--code);
+}
+.code-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hair);
+}
+.code-bar i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ghost);
+}
+.code-bar span {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--faint);
+}
+.code pre {
+  padding: 18px 0 22px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.75;
+  tab-size: 2;
+}
+/* As wide as the longest line, so a scrolled line keeps its right padding and its highlight */
+.code code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+}
+.code .ln {
+  display: block;
+  padding-inline: 16px;
+  white-space: pre;
+}
+.code .ln-mark {
+  background: var(--surface);
+}
+.t-key {
+  color: #c586c0;
+}
+.t-fn {
+  color: #dcdcaa;
+}
+.t-id {
+  color: #9cdcfe;
+}
+.t-str {
+  color: #ce9178;
+}
+.t-punc {
+  color: #a9a9a6;
+}
+
+/* Services table */
+
+.svc-wrap {
+  border-top: 1px solid var(--rail);
+}
+.svc-pending {
+  height: calc(var(--row-h) * 5);
+}
+.svc {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--dim);
+}
+.svc .w-price {
+  width: calc(88px + 2 * var(--cell-x));
+}
+.svc .w-per {
+  width: calc(96px + 2 * var(--cell-x));
+}
+.svc .w-status {
+  width: calc(80px + 2 * var(--cell-x));
+}
+.svc .w-today {
+  width: calc(48px + 2 * var(--cell-x));
+}
+.svc .w-copy {
+  width: calc(64px + var(--cell-x) + var(--pad));
+}
+.svc[data-compact] .w-name,
+.svc[data-compact] .w-endpoint {
+  width: 26%;
+}
+.svc[data-compact] .w-price {
+  width: 15%;
+}
+.svc[data-compact] .w-per {
+  width: 17%;
+}
+.svc[data-compact] .w-status {
+  width: 16%;
+}
+.svc th,
+.svc td {
+  height: var(--row-h);
+  padding: 0 var(--cell-x);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.svc th:first-child,
+.svc td:first-child {
+  padding-left: var(--pad);
+}
+.svc th:last-child,
+.svc td:last-child {
+  padding-right: var(--pad);
+}
+.svc thead th {
+  border-bottom: 1px solid var(--hair);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.svc-group > tr:last-child > td {
+  border-bottom: 1px solid var(--hair);
+}
+.svc-group:last-child > tr:last-child > td {
+  border-bottom: 0;
+}
+.svc td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  transition:
+    background-color var(--t-cell),
+    color var(--t-cell);
+}
+.svc-group:hover > tr > td {
+  background: var(--surface);
+  color: var(--ink);
+}
+.svc .c-name,
+.svc .c-copy {
+  overflow: visible;
+}
+.svc .c-copy {
+  text-align: right;
+}
+.name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+  letter-spacing: 0.06em;
+}
+.endpoint {
+  display: inline-flex;
+  gap: 8px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.endpoint .verb {
+  color: var(--faint);
+}
+.endpoint .path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.status i,
+.count-up i {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.status[data-health="up"] i,
+.count-up i {
+  background: var(--up);
+}
+.status[data-health="starting"] i {
+  background: var(--starting);
+}
+.status[data-health="down"] i {
+  background: var(--down);
+}
+.svc .svc-quiet {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--faint);
+}
+.svc-group:has(.svc-quiet):hover > tr > td {
+  background: none;
+  color: var(--dim);
+}
+
+.copy-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: 64px;
+  height: 24px;
+  padding-inline: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim);
+  vertical-align: middle;
+}
+.copy-btn:hover,
+.copy-btn[data-copied] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--ink-inverse);
+}
+
+.more-row {
+  display: flex;
+  align-items: center;
+  height: var(--row-h);
+  padding-inline: var(--pad);
+  border-top: 1px solid var(--rail);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim);
+  transition:
+    background-color var(--t-cell),
+    color var(--t-cell);
+}
+.more-row:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+.more-row:focus-visible {
+  outline-offset: -4px;
+}
+
+/* Services page */
+
+.page-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px 24px;
+  margin-top: 20px;
+}
+.count {
+  display: flex;
+  gap: 20px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.count-up {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.bazaar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row-h);
+  padding-inline: var(--pad);
+  border-top: 1px solid var(--rail);
+  background: var(--code);
+}
+.bazaar-cmd {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13.5px;
+}
+.bazaar-cmd .verb {
+  color: var(--faint);
+}
+.bazaar-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+}
+.bazaar .copy-btn {
+  margin-left: auto;
+}
+
+/* Tooltip, whose note sits in the top layer and so inherits nothing from the cell it belongs to */
+
+.tip {
+  display: inline-flex;
+  flex: none;
+}
+.tip-q {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--faint);
+}
+.tip-q::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+}
+.tip-q:hover,
+.tip-q[data-open] {
+  border-color: var(--line-hover);
+  color: var(--ink);
+}
+.tip-pop {
+  position: fixed;
+  inset: auto;
+  display: none;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 24px));
+  margin: 0;
+  padding: 12px 16px;
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--surface);
+  box-shadow: 0 16px 40px #00000080;
+  color: var(--dim);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.55;
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+  text-wrap: pretty;
+}
+.tip-pop:is(:popover-open, [data-open]) {
+  display: block;
+}
+.tip-pop::before {
+  content: "";
+  position: absolute;
+  left: var(--arrow-x, 50%);
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  transform: translateX(-50%) rotate(45deg);
+}
+.tip-pop[data-side="top"]::before {
+  bottom: -6px;
+  border-top: 0;
+  border-left: 0;
+}
+.tip-pop[data-side="bottom"]::before {
+  top: -6px;
+  border-right: 0;
+  border-bottom: 0;
+}
+.tip-line {
+  display: block;
+}
+.tip-line + .tip-line {
+  margin-top: 8px;
+}
+.tip-note {
+  color: var(--faint);
+}
+
+/* Footer */
+
+.foot {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  border-bottom: 0;
+}
+.foot-frame {
+  display: flex;
+  flex: 1;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 32px;
+  width: 100%;
+  padding: 48px var(--pad) 64px;
+}
+.foot-brand p {
+  max-width: 34ch;
+  margin-top: 16px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--dim);
+}
+.foot-links {
+  display: flex;
+  gap: 26px;
+  font-size: 13.5px;
+  line-height: 22px;
+  color: var(--dim);
+}
+
+/* Not found */
+
+.lost {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 20px;
+  padding-bottom: var(--band);
+}
+
+/* Motion */
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+  .rise {
+    animation: rise 760ms var(--ease-out) both;
+  }
+  .rise-1 {
+    animation-delay: 60ms;
+  }
+  .rise-2 {
+    animation-delay: 130ms;
+  }
+  .rise-3 {
+    animation-delay: 210ms;
+  }
+  .rise-4 {
+    animation-delay: 300ms;
+  }
+  .cmd .check {
+    animation: check-pop 340ms var(--ease-out) both;
+  }
+  .m-strip i {
+    animation: fund 4.8s steps(1, end) infinite;
+  }
+  .m-ramp {
+    animation: calls 4.8s infinite;
+  }
+  .m-row-1 {
+    animation: second 4.8s steps(1, end) infinite;
+  }
+  .m-row-2 {
+    animation: third 4.8s steps(1, end) infinite;
+  }
+  .m-row .credit {
+    animation: tone 1.6s ease-in-out infinite alternate;
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes check-pop {
+  0% {
+    transform: scale(0.58) rotate(-18deg);
+  }
+  60% {
+    transform: scale(1.16) rotate(0);
+  }
+  100% {
+    transform: none;
+  }
+}
+/* The window is funded in one step, never slot by slot */
+@keyframes fund {
+  0% {
+    border-color: var(--line);
+    background-color: transparent;
+  }
+  25%,
+  100% {
+    border-color: var(--dim);
+    background-color: var(--dim);
+  }
+}
+@property --step {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 36;
+}
+/* One bar per call, then every bar resets together */
+@keyframes calls {
+  0% {
+    --step: 0;
+    animation-timing-function: steps(36, end);
+  }
+  75%,
+  100% {
+    --step: 36;
+  }
+}
+@keyframes second {
+  0% {
+    opacity: 0.16;
+  }
+  33%,
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes third {
+  0% {
+    opacity: 0.16;
+  }
+  66%,
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes tone {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Responsive */
+
+@media (max-width: 1200px) {
+  :root {
+    --cell-x: 16px;
+  }
+}
+@media (max-width: 1080px) {
+  .nav {
+    position: static;
+  }
+  .nav-frame {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    height: auto;
+    padding-block: 12px;
+    gap: 0 24px;
+  }
+  .wordmark {
+    line-height: 34px;
+  }
+  .nav-cta {
+    margin-left: auto;
+  }
+  /* Scrolling makes this a clipping box, so it carries the room the focus ring needs */
+  .nav-links {
+    order: 3;
+    width: 100%;
+    gap: 18px;
+    margin: 6px -6px -6px;
+    padding: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    white-space: nowrap;
+  }
+  .band {
+    scroll-margin-top: 0;
+  }
+  .agent {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .agent-code {
+    padding-top: 0;
+    border-left: 0;
+  }
+  .agent-copy {
+    padding-bottom: 32px;
+  }
+}
+@media (max-width: 1024px) {
+  .svc,
+  .svc tbody,
+  .svc tr,
+  .svc td {
+    display: block;
+  }
+  .svc colgroup,
+  .svc thead {
+    display: none;
+  }
+  .svc-group {
+    padding: 20px var(--pad);
+    border-bottom: 1px solid var(--hair);
+    transition: background-color var(--t-cell);
+  }
+  .svc-group:last-child {
+    border-bottom: 0;
+  }
+  .svc-group:hover {
+    background: var(--surface);
+  }
+  .svc-group:has(.svc-quiet):hover {
+    background: none;
+  }
+  .svc tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "name copy"
+      "endpoint endpoint"
+      "price per"
+      "status today";
+    align-items: center;
+    gap: 16px;
+  }
+  /* The landing list has no copy cell, so its status takes that corner */
+  .svc[data-compact] tr {
+    grid-template-areas:
+      "name status"
+      "endpoint endpoint"
+      "price per";
+  }
+  .svc tr.sub {
+    grid-template-areas:
+      "endpoint copy"
+      "price per";
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--hair);
+  }
+  .svc .svc-group > tr:has(.svc-quiet) {
+    display: block;
+  }
+  .svc .svc-group > tr > td,
+  .svc .svc-group:hover > tr > td {
+    height: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+    line-height: 20px;
+    white-space: normal;
+  }
+  .bazaar {
+    height: auto;
+    min-height: var(--row-h);
+    padding-block: 12px;
+  }
+  .bazaar-cmd {
+    flex: 1;
+    line-height: 20px;
+  }
+  .bazaar-url {
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .svc td:empty {
+    display: none;
+  }
+  .svc .c-name {
+    grid-area: name;
+  }
+  .svc .c-endpoint {
+    grid-area: endpoint;
+  }
+  .svc .c-price {
+    grid-area: price;
+  }
+  .svc .c-per {
+    grid-area: per;
+  }
+  .svc .c-status {
+    grid-area: status;
+  }
+  .svc[data-compact] .c-status {
+    justify-self: end;
+  }
+  .svc .c-today {
+    grid-area: today;
+  }
+  .svc .c-copy {
+    grid-area: copy;
+    align-self: center;
+    justify-self: end;
+  }
+  /* Centred on the 20px value line under the caption, not on the caption and value together */
+  .svc tr.sub .c-copy {
+    align-self: end;
+    margin-bottom: -2px;
+  }
+  .svc td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    font-size: 11px;
+    line-height: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .endpoint {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 8px;
+  }
+  .endpoint .path {
+    overflow-wrap: anywhere;
+  }
+}
+@media (max-width: 860px) {
+  .steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .step + .step {
+    border-top: 1px solid var(--hair);
+    border-left: 0;
+  }
+}
+@media (max-width: 720px) {
+  :root {
+    --frame: 100%;
+  }
+  .frame {
+    box-shadow: none;
+  }
+  .foot-frame {
+    flex-direction: column;
+  }
+  .foot-links {
+    flex-wrap: wrap;
+    gap: 8px 24px;
+  }
+}
