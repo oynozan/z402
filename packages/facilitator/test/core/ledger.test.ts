@@ -5,10 +5,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { Ledger, LedgerRefusal, type LedgerEvent } from "../../src/core/ledger.js";
 import { depositEvent, statusEvent, unreadableEvents, voucherEvent } from "./events.js";
 
-// The ledger imports appendFileSync by name, so only a module mock can make one write fail part-way
+// The ledger imports fs functions by name, so only a module mock can make a write fail part-way or a read refuse
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
-  return { ...fs, appendFileSync: vi.fn(fs.appendFileSync) };
+  return { ...fs, appendFileSync: vi.fn(fs.appendFileSync), readFileSync: vi.fn(fs.readFileSync) };
 });
 
 const SHAPE_REFUSAL = /^event 2( \((deposit|voucher|status)\))? is not a ledger event$/;
@@ -279,5 +279,95 @@ describe("Ledger in memory", () => {
     event.cumulativeZat = "999999";
     ledger.replay()[0] = depositEvent();
     expect(ledger.replay()).toEqual([voucherEvent()]);
+  });
+});
+
+describe.each([1, 7, 65536])("Ledger replay read %i bytes at a time", (chunkBytes) => {
+  const open = () => new Ledger(file(), { chunkBytes });
+  /** A session key of multi-byte characters, so that a chunk boundary can fall inside one */
+  const wide = voucherEvent({ sessionKey: "ключ-🔑-鍵" });
+
+  test("events round trip, multi-byte characters included", () => {
+    const events = [depositEvent(), wide, statusEvent()];
+    writeFileSync(file(), events.map(line).join(""));
+    expect(open().replay()).toEqual(events);
+  });
+
+  test("blank lines are ignored", () => {
+    writeFileSync(file(), `\n${line(depositEvent())}  \n\n${line(wide)}\n`);
+    expect(open().replay()).toEqual([depositEvent(), wide]);
+  });
+
+  test("a truncated last line is cut off with one warning, and the next append lines up", () => {
+    const warn = quietWarn();
+    const kept = line(depositEvent()) + line(wide);
+    writeFileSync(file(), `${kept}{"t":"status","txid":"00`);
+
+    const ledger = open();
+    expect(ledger.replay()).toEqual([depositEvent(), wide]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(readFileSync(file(), "utf8")).toBe(kept);
+    ledger.appendSync([statusEvent()]);
+    expect(open().replay()).toEqual([depositEvent(), wide, statusEvent()]);
+  });
+
+  test("a truncated last line that ends in a newline, followed by blank lines, is cut off too", () => {
+    const warn = quietWarn();
+    writeFileSync(file(), `${line(depositEvent())}{"t":"voucher","sessionK\n\n  \n`);
+    expect(open().replay()).toEqual([depositEvent()]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(readFileSync(file(), "utf8")).toBe(line(depositEvent()));
+  });
+
+  test("a complete last line without its newline is kept, and gets one", () => {
+    writeFileSync(file(), line(depositEvent()) + JSON.stringify(wide));
+    expect(open().replay()).toEqual([depositEvent(), wide]);
+    expect(readFileSync(file(), "utf8")).toBe(line(depositEvent()) + line(wide));
+  });
+
+  test("a malformed middle line throws naming its line, and the file is left as it was", () => {
+    const text = `${line(depositEvent())}\nnot json\n${line(wide)}`;
+    writeFileSync(file(), text);
+    expect(() => open().replay()).toThrow("ledger line 3 is not valid JSON");
+    expect(readFileSync(file(), "utf8")).toBe(text);
+  });
+
+  test("an event of an unknown type throws naming its line, even as the last line", () => {
+    writeFileSync(file(), line(depositEvent()) + line({ t: "bogus" }));
+    expect(() => open().replay()).toThrow("ledger line 2 is not a ledger event");
+  });
+
+  test("a line over 1 MiB counts as torn when it is the last one", () => {
+    const warn = quietWarn();
+    writeFileSync(file(), `${line(depositEvent())}${"x".repeat(1024 * 1024 + 10)}`);
+    expect(open().replay()).toEqual([depositEvent()]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(readFileSync(file(), "utf8")).toBe(line(depositEvent()));
+  });
+
+  test("a line over 1 MiB in the middle is not valid JSON", () => {
+    writeFileSync(file(), `${line(depositEvent())}${"x".repeat(1024 * 1024 + 10)}\n${line(wide)}`);
+    expect(() => open().replay()).toThrow("ledger line 2 is not valid JSON");
+  });
+});
+
+describe("Ledger replay of a large file", () => {
+  test("200,000 lines replay one event at a time, without reading the whole file at once", async () => {
+    const real = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const count = 200_000;
+    real.writeFileSync(file(), line(voucherEvent()).repeat(count));
+    vi.mocked(readFileSync).mockImplementation(() => {
+      throw new Error("the ledger must not read its whole file at once");
+    });
+    try {
+      let seen = 0;
+      for (const event of new Ledger(file()).events()) {
+        expect(event.t).toBe("voucher");
+        seen++;
+      }
+      expect(seen).toBe(count);
+    } finally {
+      vi.mocked(readFileSync).mockImplementation(real.readFileSync);
+    }
   });
 });

@@ -358,7 +358,8 @@ function replayed(path: string): { ledger: Ledger; state: FacilitatorState } {
   try {
     const ledger = new Ledger(path);
     const state = new FacilitatorState();
-    for (const event of ledger.replay()) state.apply(event);
+    // Each event is applied as it is read, so a long ledger is never held whole
+    for (const event of ledger.events()) state.apply(event);
     return { ledger, state };
   } catch (e) {
     throw new Error(`ledgerPath: cannot replay ${path}: ${text(e)}`, { cause: e });

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, statSync, truncateSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readSync, statSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
 import { DEPOSIT_STATUSES, MAX_MONEY_ZAT, ZAT_RE, type DepositStatus } from "@z402/protocol";
 
@@ -36,12 +36,15 @@ export class LedgerRefusal extends Error {
 /** Append-only JSON Lines log (in memory without a path), unsynced, so appends outlive a crash but not a power loss */
 export class Ledger {
   readonly #path: string | undefined;
+  readonly #chunkBytes: number;
   readonly #memory: LedgerEvent[] = [];
   /** The failed write after which every append is refused, since the file and the live state may disagree */
   #broken: { cause: unknown } | undefined;
 
-  constructor(path?: string) {
+  /** `chunkBytes` is how much replay reads at a time, for tests */
+  constructor(path?: string, o: { chunkBytes?: number } = {}) {
     this.#path = path;
+    this.#chunkBytes = o.chunkBytes ?? CHUNK_BYTES;
     if (path !== undefined) mkdirSync(dirname(path), { recursive: true });
   }
 
@@ -74,51 +77,118 @@ export class Ledger {
 
   /** Must run before the first append to an existing file, since it cuts a torn last line an append would glue onto */
   replay(): LedgerEvent[] {
-    if (this.#path === undefined) return structuredClone(this.#memory);
-    const text = readText(this.#path);
-    if (text === null) return [];
+    return [...this.events()];
+  }
 
-    const lines = text.split("\n");
-    const last = lines.findLastIndex((l) => l.trim() !== "");
-    const events: LedgerEvent[] = [];
-    for (let i = 0; i <= last; i++) {
-      const raw = lines[i] ?? "";
-      if (raw.trim() === "") continue;
-
-      let value: unknown;
-      try {
-        value = JSON.parse(raw);
-      } catch {
-        if (i < last) throw new Error(`ledger line ${i + 1} is not valid JSON`);
-        this.#dropTail(this.#path, lines, i);
-        return events;
-      }
-      if (!isEvent(value)) throw new Error(`ledger line ${i + 1} is not a ledger event`);
-      events.push(value);
+  /** The events one at a time, read in chunks so that neither the file nor its events are ever held whole */
+  *events(): Generator<LedgerEvent> {
+    if (this.#path === undefined) {
+      yield* structuredClone(this.#memory);
+      return;
     }
-    if (last >= 0 && !text.endsWith("\n")) appendFileSync(this.#path, "\n");
-    return events;
+    const path = this.#path;
+    const fd = openIfThere(path);
+    if (fd === undefined) return;
+    let torn: { number: number; start: number } | undefined;
+    let any = false;
+    let ended = true;
+    try {
+      for (const line of linesOf(fd, this.#chunkBytes)) {
+        ended = line.ended;
+        if (line.text !== undefined && line.text.trim() === "") continue;
+        // A bad line that anything but blank lines follows is damage, not a write cut short
+        if (torn !== undefined) throw new Error(`ledger line ${torn.number} is not valid JSON`);
+        any = true;
+        const value = parsed(line.text);
+        if (value === NOT_JSON) {
+          torn = { number: line.number, start: line.start };
+          continue;
+        }
+        if (!isEvent(value)) throw new Error(`ledger line ${line.number} is not a ledger event`);
+        yield value;
+      }
+    } finally {
+      closeSync(fd);
+    }
+    if (torn !== undefined) this.#dropTail(path, torn);
+    else if (any && !ended) appendFileSync(path, "\n");
   }
 
   // Cut the torn bytes off, or the next append would glue onto them
-  #dropTail(path: string, lines: string[], index: number): void {
-    console.warn(`ledger ${path}: dropped a truncated last line (line ${index + 1})`);
-    const kept = lines.slice(0, index).map((l) => `${l}\n`).join("");
-    truncateSync(path, Buffer.byteLength(kept));
+  #dropTail(path: string, torn: { number: number; start: number }): void {
+    console.warn(`ledger ${path}: dropped a truncated last line (line ${torn.number})`);
+    truncateSync(path, torn.start);
+  }
+}
+
+const CHUNK_BYTES = 64 * 1024;
+/** A line longer than this is no event, so its bytes are not kept */
+const MAX_LINE_BYTES = 1024 * 1024;
+const NEWLINE = 0x0a;
+const NOT_JSON = Symbol("not JSON");
+
+interface Line {
+  /** Undefined when the line is over MAX_LINE_BYTES */
+  text: string | undefined;
+  number: number;
+  /** The byte the line starts at, where a torn tail is cut */
+  start: number;
+  /** False only for a last line with no newline after it */
+  ended: boolean;
+}
+
+/** Splits on the newline byte, so a multi-byte character across two chunks is decoded whole */
+function* linesOf(fd: number, chunkBytes: number): Generator<Line> {
+  const chunk = Buffer.alloc(chunkBytes);
+  let parts: Buffer[] = [];
+  let size = 0;
+  let number = 0;
+  let start = 0;
+  let offset = 0;
+  const keep = (piece: Buffer): void => {
+    if (size + piece.length <= MAX_LINE_BYTES) parts.push(Buffer.from(piece));
+    size += piece.length;
+  };
+  const text = (): string | undefined => (size > MAX_LINE_BYTES ? undefined : Buffer.concat(parts).toString("utf8"));
+  for (;;) {
+    const read = readSync(fd, chunk, 0, chunkBytes, offset);
+    if (read === 0) break;
+    let from = 0;
+    for (let i = 0; i < read; i++) {
+      if (chunk[i] !== NEWLINE) continue;
+      keep(chunk.subarray(from, i));
+      yield { text: text(), number: ++number, start, ended: true };
+      parts = [];
+      size = 0;
+      start = offset + i + 1;
+      from = i + 1;
+    }
+    keep(chunk.subarray(from, read));
+    offset += read;
+  }
+  if (size > 0) yield { text: text(), number: ++number, start, ended: false };
+}
+
+function parsed(text: string | undefined): unknown {
+  if (text === undefined) return NOT_JSON;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return NOT_JSON;
+  }
+}
+
+function openIfThere(path: string): number | undefined {
+  try {
+    return openSync(path, "r");
+  } catch (e) {
+    if (isMissing(e)) return undefined;
+    throw e;
   }
 }
 
 function isMissing(e: unknown): boolean {
   return typeof e === "object" && e !== null && "code" in e && e.code === "ENOENT";
-}
-
-function readText(path: string): string | null {
-  try {
-    return readFileSync(path, "utf8");
-  } catch (e) {
-    if (isMissing(e)) return null;
-    throw e;
-  }
 }
 
 function sizeOf(path: string): number {
