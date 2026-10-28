@@ -51,7 +51,7 @@ www.{$Z402_DOMAIN:z402.net} {
 }
 
 # The facilitator is public on purpose: providers register here and call /verify and /settle with their API keys, and
-# the catalog is public. POST /providers needs Z402_REGISTRATION_TOKEN, which compose.vps.yaml requires.
+# the catalog is public. POST /providers needs Z402_REGISTRATION_TOKEN, which scripts/vps.sh up will not start without.
 facilitator.{$Z402_DOMAIN:z402.net} {
 	import site
 	reverse_proxy facilitator:4022

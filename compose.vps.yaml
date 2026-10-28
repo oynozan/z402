@@ -175,6 +175,7 @@ services:
       - -c
       - |
         set -eu
+        echo "api: waiting for $$Z402_FACILITATOR_URL, which answers once Caddy has its certificate (DNS, ports 80 and 443)" >&2
         node docker/wait-facilitator.mjs
         exec node --import tsx apps/api/src/main.ts
     environment:

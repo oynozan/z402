@@ -425,7 +425,7 @@ cmd_status() {
   if [ "$pending_count" = 0 ] && [ "$bad_count" = 0 ]; then
     printf 'All %s services are healthy.\n' "$ok_count"
   else
-    printf '%s healthy, %s starting, %s failing.\n' "$ok_count" "$pending_count" "$bad_count"
+    printf '%s healthy, %s starting or missing, %s failing.\n' "$ok_count" "$pending_count" "$bad_count"
     return 1
   fi
 }

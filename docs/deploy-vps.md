@@ -320,7 +320,7 @@ removes everything it made.
 
 | What you see | Why, and what to do |
 |---|---|
-| `api` stays `starting` | It waits for `https://facilitator.<domain>`, which needs Caddy's certificate. `scripts/vps.sh logs caddy` shows the ACME errors. Usually a DNS record that does not resolve yet, or port 80 or 443 blocked |
+| `api` stays `starting`, and its log says `api: waiting for https://facilitator.<domain>` | It waits for that name to answer, which needs Caddy's certificate. `scripts/vps.sh logs caddy` shows the ACME errors. Usually a DNS record that does not resolve yet, or port 80 or 443 blocked |
 | Caddy logs `rateLimited` | Let's Encrypt allows only a few certificates for the same names each week. Wait, and keep the `caddy-data` volume |
 | `facilitator` exits at once | `scripts/vps.sh logs --no-follow facilitator` names the variable. Typical: `Z402_REGISTRATION_TOKEN` under 32 characters, or `Z402_PAY_TO` and `Z402_UIVK` that do not match each other |
 | `facilitator` waits for `testnet.zec.rocks` | It is a shared public server and may be down. The facilitator waits up to 10 minutes and tries again on its own |
