@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, test } from "vitest";
-import { loadConfig } from "../src/config.js";
+import { afterAll, describe, expect, test, vi } from "vitest";
+import { ConfigError, loadConfig } from "../src/config.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const PAY_TO = `uregtest1${"q".repeat(60)}`;
@@ -139,6 +139,71 @@ describe("payTo from Z402_MERCHANT_KEYS_FILE", () => {
 
   test("Z402_PAY_TO wins and the file is then never opened", () => {
     expect(loadConfig(env({ Z402_MERCHANT_KEYS_FILE: join(scratch, "missing.json") })).payTo).toBe(PAY_TO);
+  });
+
+  describe("that holds more than the address", () => {
+    const MAINNET_PAY_TO = `u1${"q".repeat(60)}`;
+    const mainnet = (file: string) => ({
+      Z402_NETWORK: "mainnet",
+      Z402_FACILITATOR_URL: "https://facilitator.example:8443",
+      Z402_MERCHANT_KEYS_FILE: file,
+    });
+
+    test("is refused on mainnet when it holds the spending seed", () => {
+      const path = keysFile("mainnet-seed.json", keys(MAINNET_PAY_TO));
+      expect(() => loadConfig(mainnet(path), () => undefined)).toThrow(
+        new ConfigError(`Z402_MERCHANT_KEYS_FILE: ${path} holds the spending seed; the API needs only Z402_PAY_TO`),
+      );
+    });
+
+    test("is refused on mainnet when it holds the full viewing key", () => {
+      const content = JSON.stringify({ ufvk: "uview1fixture", orchardOnlyAddress: MAINNET_PAY_TO });
+      const path = keysFile("mainnet-ufvk.json", content);
+      expect(() => loadConfig(mainnet(path), () => undefined)).toThrow(
+        new ConfigError(`Z402_MERCHANT_KEYS_FILE: ${path} holds the full viewing key; the API needs only Z402_PAY_TO`),
+      );
+    });
+
+    test("loads on regtest with one warning", () => {
+      const path = keysFile("regtest-seed.json", keys(PAY_TO));
+      const warn = vi.fn<(message: string) => void>();
+      expect(loadConfig(noPayTo(path), warn).payTo).toBe(PAY_TO);
+      expect(warn.mock.calls).toEqual([
+        [`Z402_MERCHANT_KEYS_FILE: ${path} holds the spending seed; the API needs only Z402_PAY_TO`],
+      ]);
+    });
+
+    test("is warned about on stderr unless told otherwise", () => {
+      const path = keysFile("default-warn.json", keys(PAY_TO));
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        loadConfig(noPayTo(path));
+        expect(stderr).toHaveBeenCalledTimes(1);
+        expect(String(stderr.mock.calls[0]?.[0])).toMatch(/holds the spending seed/);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    test("is neither opened nor warned about when Z402_PAY_TO is set, as the demo does", () => {
+      const warn = vi.fn<(message: string) => void>();
+      const seedFile = keysFile("demo-seed.json", keys(PAY_TO));
+      expect(loadConfig(env({ Z402_MERCHANT_KEYS_FILE: seedFile }), warn).payTo).toBe(PAY_TO);
+      expect(loadConfig(env({ Z402_MERCHANT_KEYS_FILE: join(scratch, "missing.json") }), warn).payTo).toBe(PAY_TO);
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
+  test("a file of only the address gives no warning, on mainnet too", () => {
+    const address = `u1${"q".repeat(60)}`;
+    const path = keysFile("address-only.json", JSON.stringify({ orchardOnlyAddress: address, uivk: "uivk1fixture" }));
+    const warn = vi.fn<(message: string) => void>();
+    const config = loadConfig(
+      { Z402_NETWORK: "mainnet", Z402_FACILITATOR_URL: "https://f.example", Z402_MERCHANT_KEYS_FILE: path },
+      warn,
+    );
+    expect(config.payTo).toBe(address);
+    expect(warn).not.toHaveBeenCalled();
   });
 
   test("without either one, payTo is required", () => {
