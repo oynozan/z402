@@ -27,7 +27,7 @@ import {
   ZCASH_NETWORKS,
   type ZcashNetwork,
 } from "@z402/protocol";
-import { PrepaidVoucherServerScheme } from "@z402/server";
+import { checkProvider, PrepaidVoucherServerScheme, ProviderCheckError } from "@z402/server";
 import express, { type Express, type Request, type RequestHandler, type Response } from "express";
 
 export interface ApiOptions {
@@ -129,6 +129,22 @@ function causes(e: unknown): string {
   return parts.length > 0 ? parts.join(": ") : text(e);
 }
 
+/** Refuses to start unless the facilitator knows this key as the provider paid at this payTo */
+async function checkKey(o: ApiOptions): Promise<void> {
+  try {
+    await checkProvider({
+      facilitatorUrl: o.facilitatorUrl,
+      token: o.facilitatorToken,
+      payTo: o.payTo,
+      network: o.network,
+    });
+  } catch (e) {
+    // A retryable error fails the start too, since the API has no wait of its own
+    if (e instanceof ProviderCheckError) throw new Error(e.message, { cause: e });
+    throw e;
+  }
+}
+
 /** Names the option an initialize() failure points at, keeping the SDK's error as the cause */
 function startupError(e: unknown, server: x402ResourceServer, o: ApiOptions): Error {
   const at = `the facilitator at ${o.facilitatorUrl}`;
@@ -167,6 +183,8 @@ function chunk(priceZat: bigint): RequestHandler {
 /** The Express app with the paid route, once the facilitator's /supported has been loaded and checked */
 export async function createApiApp(o: ApiOptions): Promise<Express> {
   checkOptions(o);
+  // Before the first /supported, so a refused key or another payTo is named for what it is
+  await checkKey(o);
   // One payTo and one network feed both the scheme and the route, since nothing compares the two later
   const { network, payTo, priceZat } = o;
   const server = new x402ResourceServer(facilitatorClient(o)).register(
