@@ -5,8 +5,8 @@ import { CLOSE_TIMEOUT_MS, paidSnapshot, PAY_TO, PAY_TO_2, startRail, type Rail 
 
 const LONG = 30_000;
 const UIVK_2 = `uivkregtest1${"q".repeat(80)}`;
-// Until the per-route amount rule lands (design §4.2), the facilitator holds every provider to the operator's price
-const PRICES = [500, 500] as const;
+// Each provider prices its own route (protocol §2), so the facilitator holds each session to its own call's price
+const PRICES = [500, 800] as const;
 
 let rail: Rail | undefined;
 afterEach(async () => {
