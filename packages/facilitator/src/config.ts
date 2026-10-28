@@ -17,6 +17,7 @@ import {
   type Terms,
   type ZcashNetwork,
 } from "@z402/protocol";
+import { MAX_PAY_TO_LENGTH } from "./payTo.js";
 
 /** The repository root, found from this file and never from the working directory, which `pnpm --filter` changes */
 export const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -282,6 +283,9 @@ export function loadConfig(env: Env): FacilitatorEnv {
   };
 
   const pay = keyed("Z402_PAY_TO", "orchardOnlyAddress", "the shielded-only unified address deposits go to");
+  if (pay.value.length > MAX_PAY_TO_LENGTH) {
+    throw new ConfigError(`Z402_PAY_TO${pay.origin}: must be at most ${MAX_PAY_TO_LENGTH} characters`);
+  }
   if (!isValidPayTo(pay.value, network)) {
     throw new ConfigError(
       `Z402_PAY_TO${pay.origin}: not a shielded-only unified address for ${network} (expected ${profile.payToHint})`,

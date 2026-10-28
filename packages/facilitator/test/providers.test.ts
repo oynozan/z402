@@ -718,6 +718,16 @@ describe("POST /providers", () => {
       ["no payTo", { body: { uivk: A.uivk } }, /^payTo: /],
       ["a payTo that is no address", { body: { payTo: "nope", uivk: A.uivk } }, /^payTo: /],
       ["a payTo of another network", { body: { payTo: `utest1${"q".repeat(60)}`, uivk: A.uivk } }, /^payTo: /],
+      [
+        "a payTo of 1025 characters",
+        { body: { payTo: `uregtest1${"q".repeat(1016)}`, uivk: A.uivk } },
+        /^payTo: .*1024/,
+      ],
+      [
+        "a payTo of 59000 characters",
+        { body: { payTo: `uregtest1${"q".repeat(58_991)}`, uivk: A.uivk } },
+        /^payTo: .*1024/,
+      ],
       ["no uivk", { body: { payTo: A.payTo } }, /^uivk: /],
       ["a uivk of another network", { body: { payTo: A.payTo, uivk: `uivktest1${"q".repeat(90)}` } }, /^uivk: /],
       ["another network", { body: { payTo: A.payTo, uivk: A.uivk, network: NETWORK_TESTNET } }, /^network: /],
@@ -1159,6 +1169,14 @@ describe("start-up", () => {
       const rig = newRig();
       writeRegistry(rig, [entry(A, KEY_A, { id: ID_B })]);
       expect((await refusal(rig))?.message).toBe(`providersDir: registry entry ${ID_B} does not match its payTo`);
+    });
+
+    test("holds an entry whose payTo is over 1024 characters, before any viewing key is asked about it", async () => {
+      const rig = newRig();
+      writeRegistry(rig, [entry({ payTo: `uregtest1${"q".repeat(1016)}`, uivk: A.uivk }, KEY_A)]);
+      const error = await refusal(rig);
+      expect(error?.message).toMatch(/^providersDir: .*registry\.json is not a valid provider registry /);
+      expect(error?.message).toMatch(/\(entry 1: payTo is over 1024 characters\)$/);
     });
 
     test("holds the operator's payTo", async () => {

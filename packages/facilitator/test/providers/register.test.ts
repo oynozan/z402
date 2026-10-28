@@ -198,6 +198,14 @@ describe("a new provider", () => {
     await expect(r.register({ ...A, network: NETWORK })).resolves.toMatchObject({ status: 201 });
   });
 
+  test("may have a payTo of exactly 1024 characters", async () => {
+    const r = await rig();
+    const payTo = `uregtest1${"q".repeat(1015)}`;
+    expect(payTo).toHaveLength(1024);
+    await expect(r.register({ payTo, uivk: A.uivk })).resolves.toMatchObject({ status: 201, body: { payTo } });
+    expect(r.registry.get(payTo)).toBeDefined();
+  });
+
   test("whose runtime cannot be opened leaves nothing stored and nothing admitted", async () => {
     const r = await rig();
     r.deps.open.mockRejectedValueOnce(new Error("ledgerPath: the ledger is not writable (EACCES)"));
@@ -349,6 +357,8 @@ describe("a request that is refused", () => {
     bad("a payTo of another network", { payTo: `utest1${"q".repeat(60)}`, uivk: A.uivk }, /^payTo: /),
     bad("a payTo with a transparent receiver", { payTo: `turegtest1${"q".repeat(60)}`, uivk: A.uivk }, /^payTo: /),
     bad("a payTo that is not an address", { payTo: "not-an-address", uivk: A.uivk }, /^payTo: /),
+    bad("a payTo of 1025 characters", { payTo: `uregtest1${"q".repeat(1016)}`, uivk: A.uivk }, /^payTo: .*1024/),
+    bad("a payTo of 59000 characters", { payTo: `uregtest1${"q".repeat(58_991)}`, uivk: A.uivk }, /^payTo: .*1024/),
     bad("no uivk", { payTo: A.payTo }, /^uivk: /),
     bad("a uivk that is a number", { payTo: A.payTo, uivk: 7 }, /^uivk: /),
     bad("a uivk of another network", { payTo: A.payTo, uivk: `uivktest1${"q".repeat(100)}` }, /^uivk: /),
@@ -372,6 +382,7 @@ describe("a request that is refused", () => {
     const r = await rig();
     for (const body of [
       { payTo: "payto-do-not-echo", uivk: A.uivk },
+      { payTo: `uregtest1${"do-not-echo".repeat(100)}`, uivk: A.uivk },
       { payTo: A.payTo, uivk: "uivk-do-not-echo" },
       { ...A, network: "network-do-not-echo" },
     ]) {

@@ -20,6 +20,7 @@ import {
 import { join } from "node:path";
 import { isValidPayTo, isZcashNetwork, type ZcashNetwork } from "@z402/protocol";
 import { lockLedger, type HeldLock } from "../core/ledgerLock.js";
+import { MAX_PAY_TO_LENGTH } from "../payTo.js";
 
 /** One registered provider, as the registry file holds it */
 export interface ProviderEntry {
@@ -227,6 +228,9 @@ function entryProblem(x: unknown, network: ZcashNetwork): string | undefined {
   if (!isRecord(x)) return "not an object";
   if (Object.keys(x).some((key) => !(FIELDS as readonly string[]).includes(key))) return EXTRA_FIELDS;
   if (typeof x.id !== "string" || !ID_RE.test(x.id)) return "id is not 16 lowercase hex";
+  if (typeof x.payTo === "string" && x.payTo.length > MAX_PAY_TO_LENGTH) {
+    return `payTo is over ${MAX_PAY_TO_LENGTH} characters`;
+  }
   if (typeof x.payTo !== "string" || !isValidPayTo(x.payTo, network)) return `payTo is not valid for ${network}`;
   if (typeof x.uivk !== "string" || !isUivk(x.uivk)) return "uivk is not 1 to 1024 characters without whitespace";
   if (typeof x.keyHash !== "string" || !KEY_HASH_RE.test(x.keyHash)) return "keyHash is not 64 lowercase hex";

@@ -1259,6 +1259,18 @@ describe("createFacilitatorApp", () => {
     expect((await call(url, "/discovery/search?query=chunk")).json.resources).toHaveLength(1);
   });
 
+  test("answers a declaration past the byte budget of the catalog with 400 invalid_request and no index", async () => {
+    const catalog = Catalog.load({ maxBytes: 1 });
+    const url = await serve(createFacilitatorApp({ operator, tenantOf: () => operator, catalog }));
+    const accepts = [requirementsOf(OP, { termsVersion: "0123456789abcdef" })];
+
+    const res = await declare(url, undefined, [route(OP, { accepts })]);
+
+    expect(res).toMatchObject({ status: 400, json: { error: "invalid_request", message: "the catalog is full" } });
+    expect(res.json).not.toHaveProperty("index");
+    expect(await listing(url)).toEqual([]);
+  });
+
   test("counts a payment that settled even when its answer cannot be sent", async () => {
     // JSON has no BigInt, so the answer of this scheme cannot go out
     const unsendable: SchemeNetworkFacilitator = {

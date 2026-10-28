@@ -2477,6 +2477,256 @@ describe("persistence", () => {
   });
 });
 
+describe("the byte budget", () => {
+  const sizeOf = (item: unknown): number => Buffer.byteLength(JSON.stringify(item));
+  const text = (n: number) => "d".repeat(n);
+  /** The default resource of decl, which pay names too */
+  const chunk = (n = 200) => decl({ description: text(n) });
+  const named = (name: string, n = 200, p: CatalogProvider = P1) =>
+    decl({ resource: `http://h/${name}`, description: text(n) }, p);
+  let probes = 0;
+
+  /** The bytes the stored items take as JSON once `fill` has run, measured on a throwaway catalog's own file */
+  async function measure(fill: (c: Catalog) => void): Promise<number> {
+    const path = join(dir, `probe-${probes++}.json`);
+    const probe = make({ file: path });
+    fill(probe);
+    await probe.flush();
+    const { items } = JSON.parse(readFileSync(path, "utf8")) as { items: unknown[] };
+    return items.reduce<number>((n, item) => n + sizeOf(item), 0);
+  }
+  const weigh = (...items: Array<Record<string, unknown>>) => measure((c) => c.declare(P1, body(...items)));
+
+  describe("a declaration", () => {
+    test("that fills the budget exactly is taken, and the next new item is refused", async () => {
+      const c = make({ maxBytes: await weigh(named("a"), named("b")) });
+      expect(() => c.declare(P1, body(named("a"), named("b")))).not.toThrow();
+      expect(refusal(() => c.declare(P1, body(named("c")))).message).toBe("the catalog is full");
+      expect(resources(c)).toStrictEqual(["http://h/a", "http://h/b"]);
+    });
+
+    test("that passes the budget by one byte is refused whole, as the catalog is full, naming no item", async () => {
+      const c = make({ maxBytes: (await weigh(named("a"), named("b"))) - 1 });
+      const err = refusal(() => c.declare(P1, body(named("a"), named("b"))));
+      expect(err.message).toBe("the catalog is full");
+      expect(err.index).toBeUndefined();
+      expect(everything(c)).toStrictEqual([]);
+    });
+
+    test("that is refused applies none of its items, even one that would fit", async () => {
+      const c = make({ maxBytes: await weigh(named("a"), named("b")) });
+      c.declare(P1, body(named("a")));
+      refusal(() => c.declare(P1, body(named("a", 300), named("b"))));
+      expect(one(everything(c))).toMatchObject({ resource: "http://h/a", description: text(200) });
+    });
+
+    test("is logged once however often it is refused, and never names a URL", async () => {
+      const c = make({ maxBytes: (await weigh(named("a"))) - 1 });
+      for (let i = 0; i < 3; i++) refusal(() => c.declare(P1, body(named("secret-path"))));
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(String(log.mock.calls[0]?.[0])).not.toContain("secret-path");
+    });
+
+    test("counts the item it replaces, so a heartbeat of a catalog at the budget still passes", async () => {
+      const c = make({ maxBytes: await weigh(named("a"), named("b")) });
+      c.declare(P1, body(named("a"), named("b")));
+      advance(30_000);
+      expect(() => c.declare(P1, body(named("a"), named("b")))).not.toThrow();
+      expect(everything(c).map((i) => i.lastSeen)).toStrictEqual(Array(2).fill("2026-10-28T12:00:30.000Z"));
+    });
+
+    test("that makes an item larger by more than the room left is refused, and by less is taken", async () => {
+      const c = make({ maxBytes: (await weigh(named("a"))) + 10 });
+      c.declare(P1, body(named("a")));
+      expect(() => c.declare(P1, body(named("a", 210)))).not.toThrow();
+      expect(refusal(() => c.declare(P1, body(named("a", 211)))).message).toBe("the catalog is full");
+      expect(one(everything(c)).description).toBe(text(210));
+    });
+
+    test("that makes an item smaller frees room for another provider's", async () => {
+      const heavy = decl({ resource: "http://h/a", extensions: sized(3000) });
+      const c = make({ maxBytes: await weigh(heavy) });
+      c.declare(P1, body(heavy));
+      refusal(() => c.declare(P2, body(named("b", 0, P2))));
+      c.declare(P1, body(named("a", 0)));
+      expect(() => c.declare(P2, body(named("b", 0, P2)))).not.toThrow();
+      expect(resources(c)).toStrictEqual(["http://h/a", "http://h/b"]);
+    });
+
+    test("counts the bytes of the payment-sourced items its first declaration drops", async () => {
+      const declared = await weigh(named("a", 400));
+      const c = make({ maxBytes: declared });
+      c.recordPaid(P1, pay({ resource: { url: "http://h/before" } }), accept());
+      expect(resources(c)).toStrictEqual(["http://h/before"]);
+      expect(() => c.declare(P1, body(named("a", 400)))).not.toThrow();
+      expect(resources(c)).toStrictEqual(["http://h/a"]);
+    });
+
+    test("is judged after the item caps, which name the item that breaks them", async () => {
+      const c = make({ maxBytes: 1, maxPerProvider: 1 });
+      expect(refusal(() => c.declare(P1, body(named("a"), named("b")))).message).toMatch(/^items\[1\]: /);
+    });
+  });
+
+  describe("a payment", () => {
+    const paidFor = (url: string) => pay({ resource: { url } });
+
+    test("that would pass the budget creates nothing, and that is logged once however often it repeats", async () => {
+      const one = await measure((c) => c.recordPaid(P1, paidFor("http://h/a"), accept()));
+      const c = make({ maxBytes: one });
+      c.recordPaid(P1, paidFor("http://h/a"), accept());
+      for (let i = 0; i < 3; i++) c.recordPaid(P1, paidFor("http://h/b"), accept());
+      expect(resources(c)).toStrictEqual(["http://h/a"]);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(String(log.mock.calls[0]?.[0])).not.toContain("h/b");
+    });
+
+    test("that fills the budget exactly creates its item", async () => {
+      const both = await measure((c) => {
+        c.recordPaid(P1, paidFor("http://h/a"), accept());
+        c.recordPaid(P1, paidFor("http://h/b"), accept());
+      });
+      const c = make({ maxBytes: both });
+      c.recordPaid(P1, paidFor("http://h/a"), accept());
+      c.recordPaid(P1, paidFor("http://h/b"), accept());
+      expect(resources(c)).toStrictEqual(["http://h/a", "http://h/b"]);
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    test("is logged once for the budget, whether a declaration or a payment hit it", () => {
+      const c = make({ maxBytes: 1 });
+      refusal(() => c.declare(P1, body(named("a"))));
+      c.recordPaid(P2, paidFor("http://h/b"), accept({}, P2));
+      c.recordPaid(P1, paidFor("http://h/c"), accept());
+      expect(log).toHaveBeenCalledTimes(1);
+    });
+
+    test("that only counts an item is never refused, and neither is the heartbeat after it", async () => {
+      const c = make({ maxBytes: await weigh(chunk()) });
+      c.declare(P1, body(chunk()));
+      advance(MINUTE);
+      c.recordPaid(P1, pay(), accept());
+      // The count added lastPaid and paidDay, which takes the stored bytes a few over the budget
+      expect(one(everything(c)).paidCallsToday).toBe(1);
+      advance(MINUTE);
+      expect(() => c.declare(P1, body(chunk()))).not.toThrow();
+      expect(one(everything(c))).toMatchObject({ paidCallsToday: 1, lastSeen: "2026-10-28T12:02:00.000Z" });
+    });
+
+    test("that is refused takes no room, so the next one that fits is created", async () => {
+      const c = make({ maxBytes: await measure((m) => m.recordPaid(P1, paidFor("http://h/a"), accept())) });
+      const padded = { bazaar: { ...bazaar("GET"), pad: text(2000) } };
+      c.recordPaid(P2, pay({ resource: { url: "http://h/big" }, extensions: padded }), accept({}, P2));
+      expect(everything(c)).toStrictEqual([]);
+      c.recordPaid(P1, paidFor("http://h/a"), accept());
+      expect(resources(c)).toStrictEqual(["http://h/a"]);
+    });
+  });
+
+  describe("at load", () => {
+    /** Four declared items of known age, the oldest of which is paid last, so that it is the newest to be seen */
+    async function seeded(): Promise<Map<string, number>> {
+      const first = make({ file: file() });
+      first.declare(P1, body(named("a")));
+      advance(MINUTE);
+      first.declare(P1, body(named("b")));
+      advance(MINUTE);
+      first.declare(P1, body(named("c")));
+      advance(MINUTE);
+      first.declare(P1, body(named("d")));
+      first.recordPaid(P1, pay({ resource: { url: "http://h/a" } }), accept());
+      await first.close();
+      const { items } = JSON.parse(readFileSync(file(), "utf8")) as { items: Array<{ resource: string }> };
+      return new Map(items.map((item) => [item.resource.slice("http://h/".length), sizeOf(item)]));
+    }
+    const room = (sizes: Map<string, number>, ...names: string[]) => names.reduce((n, name) => n + sizes.get(name)!, 0);
+
+    test("keeps a file that fits as it is, and says nothing", async () => {
+      const sizes = await seeded();
+      const c = make({ file: file(), maxBytes: room(sizes, "a", "b", "c", "d") });
+      expect(resources(c)).toStrictEqual(["http://h/a", "http://h/b", "http://h/c", "http://h/d"]);
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    test("drops the oldest items until the rest fit, and says so once, naming the file and no item", async () => {
+      const sizes = await seeded();
+      const c = make({ file: file(), maxBytes: room(sizes, "a", "c", "d") });
+      // b was seen at 12:01, the oldest sign of life of the four, while a was paid at 12:03
+      expect(resources(c)).toStrictEqual(["http://h/a", "http://h/c", "http://h/d"]);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(String(log.mock.calls[0]?.[0])).toContain(file());
+      expect(String(log.mock.calls[0]?.[0])).not.toContain("h/b");
+    });
+
+    test("judges age by the newest of lastSeen, lastPaid and firstListed", async () => {
+      const sizes = await seeded();
+      const c = make({ file: file(), maxBytes: room(sizes, "a", "d") });
+      // a was declared first and paid at 12:03, which counts as newer than b and c
+      expect(resources(c)).toStrictEqual(["http://h/a", "http://h/d"]);
+    });
+
+    test("drops down to the item that does fit, when only one does", async () => {
+      const sizes = await seeded();
+      const c = make({ file: file(), maxBytes: room(sizes, "d") });
+      expect(resources(c)).toStrictEqual(["http://h/d"]);
+      expect(log).toHaveBeenCalledTimes(1);
+    });
+
+    test("drops everything when no item fits, and still starts", async () => {
+      await seeded();
+      const c = make({ file: file(), maxBytes: 1 });
+      expect(everything(c)).toStrictEqual([]);
+      expect(log).toHaveBeenCalledTimes(1);
+    });
+
+    test("drops equally old items in a fixed order", async () => {
+      const first = make({ file: file() });
+      first.declare(P1, body(named("a"), named("b")));
+      await first.close();
+      const { items } = JSON.parse(readFileSync(file(), "utf8")) as { items: unknown[] };
+      const c = make({ file: file(), maxBytes: sizeOf(items[0]) });
+      expect(resources(c)).toStrictEqual(["http://h/b"]);
+    });
+
+    test("keeps a provider that declared closed to payment listings, whatever of its items is dropped", async () => {
+      const room = await measure((m) => m.recordPaid(P1, pay(), accept()));
+      const first = make({ file: file() });
+      first.declare(P1, body(named("a", 512)));
+      await first.close();
+      const c = make({ file: file(), maxBytes: room });
+      expect(everything(c)).toStrictEqual([]);
+      c.recordPaid(P1, pay(), accept());
+      expect(everything(c)).toStrictEqual([]);
+    });
+
+    test("counts the items it keeps, so a declaration is judged against what the file left", async () => {
+      const sizes = await seeded();
+      const c = make({ file: file(), maxBytes: room(sizes, "a", "c", "d") });
+      refusal(() => c.declare(P1, body(named("e"))));
+      expect(() => c.declare(P1, body(named("c"), named("d")))).not.toThrow();
+    });
+  });
+
+  test("is 16 MiB unless told otherwise", async () => {
+    const big = (n: number) => decl({ resource: `http://h/${String(n).padStart(5, "0")}`, extensions: sized(8192) });
+    const stored = await weigh(big(0));
+    const c = make();
+    let accepted = 0;
+    for (let n = 0; ; n++) {
+      const provider = { ...P1, id: String(Math.floor(n / 128)).padStart(16, "0") };
+      try {
+        c.declare(provider, body(big(n)));
+      } catch (e) {
+        expect(e).toBeInstanceOf(CatalogError);
+        expect((e as CatalogError).message).toBe("the catalog is full");
+        break;
+      }
+      accepted++;
+    }
+    expect(accepted).toBe(Math.floor((16 * 1024 * 1024) / stored));
+  });
+});
+
 describe("options", () => {
   test.each<[string, CatalogOptions, RegExp]>([
     ["a blank file", { file: "  " }, /^file: /],
@@ -2484,6 +2734,8 @@ describe("options", () => {
     ["a maxPerProvider of 0", { maxPerProvider: 0 }, /^maxPerProvider: /],
     ["a fractional maxPerProvider", { maxPerProvider: 1.5 }, /^maxPerProvider: /],
     ["a maxTotal of 0", { maxTotal: 0 }, /^maxTotal: /],
+    ["a maxBytes of 0", { maxBytes: 0 }, /^maxBytes: /],
+    ["a fractional maxBytes", { maxBytes: 1.5 }, /^maxBytes: /],
     ["a maxPaymentItemsPerProvider of 0", { maxPaymentItemsPerProvider: 0 }, /^maxPaymentItemsPerProvider: /],
     ["a fractional maxPaymentItemsPerProvider", { maxPaymentItemsPerProvider: 1.5 }, /^maxPaymentItemsPerProvider: /],
     ["a negative writeDelayMs", { writeDelayMs: -1 }, /^writeDelayMs: /],

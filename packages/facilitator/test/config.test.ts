@@ -143,6 +143,25 @@ describe("Z402_PAY_TO", () => {
     expect(refusal(env({ Z402_PAY_TO: undefined })).message).toMatch(/Z402_PAY_TO/);
   });
 
+  test("an address of exactly 1024 characters is accepted", () => {
+    const payTo = bech32("uregtest", 1015);
+    expect(payTo).toHaveLength(1024);
+    expect(loadConfig(env({ Z402_PAY_TO: payTo })).payTo).toBe(payTo);
+  });
+
+  test.each([1025, 59_000])("an address of %d characters is refused, naming the variable and not quoting it", (n) => {
+    const payTo = bech32("uregtest", n - 9);
+    const error = refusal(env({ Z402_PAY_TO: payTo }));
+    expect(error.message).toBe("Z402_PAY_TO: must be at most 1024 characters");
+    expect(error.message).not.toContain(payTo);
+  });
+
+  test("an address of 1025 characters in the keys file is refused, naming the variable and the file", () => {
+    const path = keysFile({ orchardOnlyAddress: bech32("uregtest", 1016), uivk: UIVK }, "long-address.json");
+    const error = refusal({ Z402_FACILITATOR_TOKEN: "t", Z402_MERCHANT_KEYS_FILE: path });
+    expect(error.message).toBe("Z402_PAY_TO (from Z402_MERCHANT_KEYS_FILE): must be at most 1024 characters");
+  });
+
   test("the revision 2 shielded-only address is accepted", () => {
     expect(loadConfig(env({ Z402_PAY_TO: bech32("zuregtest") })).payTo).toBe(bech32("zuregtest"));
   });

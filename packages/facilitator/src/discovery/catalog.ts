@@ -9,6 +9,9 @@
  * not declare itself, and is written to the file before declare returns, so that a crash cannot reopen a declaring
  * provider to payment listings. Every other change is written after a short delay (temp file, fsync, rename). If the
  * file is lost, a provider can be listed from payments only until its next declaration, which removes those items.
+ *
+ * The items together take at most a byte budget, counted as the JSON of each stored item. A declaration that would pass
+ * it is refused whole, a payment that would pass it lists nothing, and a file that holds more drops its oldest items.
  */
 import { randomBytes } from "node:crypto";
 import {
@@ -71,6 +74,8 @@ export interface CatalogOptions {
   maxTotal?: number;
   /** Items one provider may have that its payments listed, default 8 */
   maxPaymentItemsPerProvider?: number;
+  /** The bytes the stored items may take as JSON, default 16 MiB */
+  maxBytes?: number;
   /** How long after a change the file is written, default 2000 */
   writeDelayMs?: number;
 }
@@ -108,6 +113,7 @@ export interface SearchResult {
 const DEFAULT_MAX_PER_PROVIDER = 128;
 const DEFAULT_MAX_TOTAL = 4096;
 const DEFAULT_MAX_PAYMENT_ITEMS_PER_PROVIDER = 8;
+const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
 const DEFAULT_WRITE_DELAY_MS = 2000;
 /** The longest delay setTimeout honours, past which Node fires it after 1 ms */
 const MAX_TIMER_MS = 2_147_483_647;
@@ -128,6 +134,7 @@ function checkOptions(o: CatalogOptions): void {
   wholeNumber("maxPerProvider", o.maxPerProvider, 1);
   wholeNumber("maxTotal", o.maxTotal, 1);
   wholeNumber("maxPaymentItemsPerProvider", o.maxPaymentItemsPerProvider, 1);
+  wholeNumber("maxBytes", o.maxBytes, 1);
   wholeNumber("writeDelayMs", o.writeDelayMs, 0, MAX_TIMER_MS);
 }
 
@@ -136,6 +143,8 @@ const byPosition = (a: Stored, b: Stored): number =>
   cmp(a.resource, b.resource) || cmp(a.method, b.method) || cmp(a.providerId, b.providerId);
 
 const copyJson = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
+
+const byteSize = (item: Stored): number => Buffer.byteLength(JSON.stringify(item), "utf8");
 
 const isMissing = (e: unknown): boolean => typeof e === "object" && e !== null && "code" in e && e.code === "ENOENT";
 
@@ -192,8 +201,12 @@ export class Catalog {
   readonly #maxPerProvider: number;
   readonly #maxTotal: number;
   readonly #maxPaymentItemsPerProvider: number;
+  readonly #maxBytes: number;
   readonly #writeDelayMs: number;
   readonly #items = new Map<string, Stored>();
+  /** The JSON size of each stored item, and their sum, which the byte budget counts */
+  readonly #sizes = new Map<string, number>();
+  #bytes = 0;
   /** Providers that ever declared, whose payments therefore never create an item */
   readonly #declaring = new Set<string>();
   /** The caps already reported, so that a full catalog logs once and not on every heartbeat */
@@ -210,6 +223,7 @@ export class Catalog {
     this.#maxPerProvider = o.maxPerProvider ?? DEFAULT_MAX_PER_PROVIDER;
     this.#maxTotal = o.maxTotal ?? DEFAULT_MAX_TOTAL;
     this.#maxPaymentItemsPerProvider = o.maxPaymentItemsPerProvider ?? DEFAULT_MAX_PAYMENT_ITEMS_PER_PROVIDER;
+    this.#maxBytes = o.maxBytes ?? DEFAULT_MAX_BYTES;
     this.#writeDelayMs = o.writeDelayMs ?? DEFAULT_WRITE_DELAY_MS;
   }
 
@@ -228,7 +242,6 @@ export class Catalog {
     // A provider that enters the declaring set loses the payment-sourced items it does not declare itself
     const dropped = entering ? this.#unclaimed(p, declared) : [];
     this.#checkRoom(p, declared, dropped.length);
-    for (const key of dropped) this.#items.delete(key);
     const at = this.#now().toISOString();
     const touched = new Map<string, Stored>();
     for (const d of declared) {
@@ -244,9 +257,11 @@ export class Catalog {
       };
       if (before?.lastPaid !== undefined) item.lastPaid = before.lastPaid;
       if (before?.paidDay !== undefined) item.paidDay = before.paidDay;
-      this.#items.set(key, item);
       touched.set(key, item);
     }
+    this.#checkBytes(p, touched, dropped);
+    for (const key of dropped) this.#forget(key);
+    for (const [key, item] of touched) this.#store(key, item);
     this.#sorted = undefined;
     this.#declaring.add(p.id);
     this.#changed();
@@ -314,6 +329,8 @@ export class Catalog {
     const found = this.#items.get(key);
     if (found !== undefined) {
       count(found, at);
+      // Never refused, since the count adds a few bytes at most and a settle has already happened
+      this.#store(key, found);
       this.#changed();
       return;
     }
@@ -330,8 +347,7 @@ export class Catalog {
       this.#warnOnce(p, full);
       return;
     }
-    const day = at.slice(0, 10);
-    this.#items.set(key, {
+    const created: Stored = {
       ...fields,
       providerId: p.id,
       resource: payment.resource,
@@ -339,9 +355,14 @@ export class Catalog {
       source: "payment",
       firstListed: at,
       lastPaid: at,
-      paidDay: day,
+      paidDay: at.slice(0, 10),
       paidCount: 1,
-    });
+    };
+    if (this.#bytes + byteSize(created) > this.#maxBytes) {
+      this.#warnOnce(p, "bytes");
+      return;
+    }
+    this.#store(key, created);
     this.#sorted = undefined;
     this.#changed();
   }
@@ -368,6 +389,31 @@ export class Catalog {
     let n = 0;
     for (const item of this.#items.values()) if (item.providerId === p.id && item.source === "payment") n++;
     return n;
+  }
+
+  /** Keeps an item under its key, counting its bytes in place of the ones of the item it replaces */
+  #store(key: string, item: Stored): void {
+    const bytes = byteSize(item);
+    this.#bytes += bytes - (this.#sizes.get(key) ?? 0);
+    this.#sizes.set(key, bytes);
+    this.#items.set(key, item);
+  }
+
+  #forget(key: string): void {
+    this.#bytes -= this.#sizes.get(key) ?? 0;
+    this.#sizes.delete(key);
+    this.#items.delete(key);
+  }
+
+  /** Refuses a declaration that would grow the stored items past the byte budget, whole */
+  #checkBytes(p: CatalogProvider, next: Map<string, Stored>, dropped: string[]): void {
+    let growth = 0;
+    for (const [key, item] of next) growth += byteSize(item) - (this.#sizes.get(key) ?? 0);
+    for (const key of dropped) growth -= this.#sizes.get(key) ?? 0;
+    // A declaration that does not grow the items passes, so that a catalog at its budget still takes heartbeats
+    if (growth <= 0 || this.#bytes + growth <= this.#maxBytes) return;
+    this.#warnOnce(p, "bytes");
+    throw new CatalogError("the catalog is full");
   }
 
   /** Which cap one more item of this provider would break, if any */
@@ -410,8 +456,8 @@ export class Catalog {
     }
   }
 
-  #warnOnce(p: CatalogProvider, cap: "provider" | "total" | "payments"): void {
-    const scope = cap === "total" ? cap : `${cap} ${p.id}`;
+  #warnOnce(p: CatalogProvider, cap: "provider" | "total" | "payments" | "bytes"): void {
+    const scope = cap === "total" || cap === "bytes" ? cap : `${cap} ${p.id}`;
     if (this.#warned.has(scope)) return;
     this.#warned.add(scope);
     const limit = {
@@ -420,6 +466,7 @@ export class Catalog {
         `provider ${p.id} is at its limit of ${this.#maxPaymentItemsPerProvider} items listed from payments, ` +
         "so new ones are not listed",
       total: `the catalog is at its limit of ${this.#maxTotal} items, so new items are not listed`,
+      bytes: `the catalog is at its limit of ${this.#maxBytes} bytes, so new items are not listed`,
     }[cap];
     this.#say(`catalog: ${limit}`);
   }
@@ -450,9 +497,23 @@ export class Catalog {
     }
     const cutoff = this.#now().getTime() - KEEP_MS;
     for (const item of store.items) {
-      if (newest(item) >= cutoff) this.#items.set(keyOf(item.providerId, item.resource, item.method), item);
+      if (newest(item) >= cutoff) this.#store(keyOf(item.providerId, item.resource, item.method), item);
     }
     for (const id of store.declared) this.#declaring.add(id);
+    this.#fit(file);
+  }
+
+  /** Drops the oldest items until the rest fit the byte budget, and says so once */
+  #fit(file: string): void {
+    if (this.#bytes <= this.#maxBytes) return;
+    const oldest = [...this.#items].sort(([ka, a], [kb, b]) => newest(a) - newest(b) || cmp(ka, kb));
+    let dropped = 0;
+    for (const [key] of oldest) {
+      if (this.#bytes <= this.#maxBytes) break;
+      this.#forget(key);
+      dropped++;
+    }
+    this.#say(`catalog: ${file} holds more than ${this.#maxBytes} bytes, so its ${dropped} oldest items were dropped`);
   }
 
   #setAside(file: string, cause: unknown): void {

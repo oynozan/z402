@@ -77,6 +77,7 @@ const REASON = {
   extraFields: "fields other than id, payTo, uivk, keyHash, createdAt and keyIssuedAt",
   id: "id is not 16 lowercase hex",
   payTo: "payTo is not valid for zcash:regtest",
+  payToLength: "payTo is over 1024 characters",
   uivk: "uivk is not 1 to 1024 characters without whitespace",
   keyHash: "keyHash is not 64 lowercase hex",
   createdAt: `createdAt is not ${TIMESTAMP}`,
@@ -360,6 +361,13 @@ describe("a registry file", () => {
     await expect(open()).resolves.toBeInstanceOf(ProviderRegistry);
   });
 
+  test("accepts a payTo of exactly 1024 characters", async () => {
+    const payTo = `uregtest1${"q".repeat(1015)}`;
+    seed(JSON.stringify(doc([{ ...A, payTo }])));
+    const registry = await open();
+    expect(registry.get(payTo)).toEqual({ ...A, payTo });
+  });
+
   test.each(["1970-01-01T00:00:00.000Z", "2026-02-28T23:59:59.999Z", "9999-12-31T23:59:59.999Z"])(
     "accepts the timestamp %s",
     async (stamp) => {
@@ -440,6 +448,9 @@ describe("a registry file", () => {
     ["a payTo with a trailing space", { ...A, payTo: `${A.payTo} ` }, REASON.payTo],
     ["a payTo that is no address", { ...A, payTo: "treasury" }, REASON.payTo],
     ["an empty payTo", { ...A, payTo: "" }, REASON.payTo],
+    ["a payTo of 1025 characters", { ...A, payTo: `uregtest1${"q".repeat(1016)}` }, REASON.payToLength],
+    ["a payTo of 59000 characters", { ...A, payTo: `uregtest1${"q".repeat(58_991)}` }, REASON.payToLength],
+    ["a payTo of 1025 characters that is no address", { ...A, payTo: "Q".repeat(1025) }, REASON.payToLength],
     ["an empty uivk", { ...A, uivk: "" }, REASON.uivk],
     ["a uivk of 1025 characters", { ...A, uivk: "u".repeat(1025) }, REASON.uivk],
     ["a uivk with a space inside", { ...A, uivk: "uivkregtest1SECRET BAD" }, REASON.uivk],
@@ -539,6 +550,7 @@ const BAD_PUTS: Array<[string, unknown, string]> = [
   ["an id in capitals", { ...B, id: B.id.toUpperCase() }, REASON.id],
   ["a payTo of testnet", { ...B, payTo: REAL_TESTNET_A }, REASON.payTo],
   ["a payTo of mainnet", { ...B, payTo: `u1${"q".repeat(60)}` }, REASON.payTo],
+  ["a payTo of 1025 characters", { ...B, payTo: `uregtest1${"q".repeat(1016)}` }, REASON.payToLength],
   ["a uivk with a space inside", { ...B, uivk: "uivkregtest1SECRET BAD" }, REASON.uivk],
   ["a uivk of 1025 characters", { ...B, uivk: "u".repeat(1025) }, REASON.uivk],
   ["a keyHash in capitals", { ...B, keyHash: B.keyHash.toUpperCase() }, REASON.keyHash],
