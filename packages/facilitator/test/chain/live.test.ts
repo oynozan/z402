@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LightwalletdClient } from "@z402/lightwalletd";
-import { NETWORK_REGTEST } from "@z402/protocol";
+import type { LightwalletdClient } from "@z402-net/lightwalletd";
+import { NETWORK_REGTEST } from "@z402-net/protocol";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { LightwalletdChainView } from "../../src/chain/lightwalletdChainView.js";
 import { REPO_ROOT, ZDECRYPT_BIN } from "../support/fixtures.js";
@@ -17,7 +17,7 @@ describe.skipIf(!process.env.Z402_LIVE || !existsSync(SECRETS))("live regtest de
   let view: LightwalletdChainView;
 
   beforeAll(async () => {
-    const { createLightwalletdClient } = await import("@z402/lightwalletd");
+    const { createLightwalletdClient } = await import("@z402-net/lightwalletd");
     const merchant = JSON.parse(readFileSync(SECRETS, "utf8")) as { uivk: string; orchardOnlyAddress: string };
     lwd = createLightwalletdClient({ url: LWD_URL });
     view = new LightwalletdChainView({

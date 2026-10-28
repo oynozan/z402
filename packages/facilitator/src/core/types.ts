@@ -1,4 +1,4 @@
-import type { DepositStatus, REASON } from "@z402/protocol";
+import type { DepositStatus, REASON } from "@z402-net/protocol";
 
 /** A credited deposit, bound to exactly one session */
 export interface DepositRecord {

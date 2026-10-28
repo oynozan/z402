@@ -22,7 +22,7 @@ import {
   REASON,
   SCHEME,
   type SessionSnapshot,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { beforeEach, describe, expect, it } from "vitest";
 import { PrepaidVoucherServerScheme, TERM_KEYS } from "../src/index.js";
 

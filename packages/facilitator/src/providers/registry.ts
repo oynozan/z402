@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { isValidPayTo, isZcashNetwork, type ZcashNetwork } from "@z402/protocol";
+import { isValidPayTo, isZcashNetwork, type ZcashNetwork } from "@z402-net/protocol";
 import { lockLedger, type HeldLock } from "../core/ledgerLock.js";
 import { MAX_PAY_TO_LENGTH } from "../payTo.js";
 

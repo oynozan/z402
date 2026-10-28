@@ -11,7 +11,7 @@ import {
   TEST_TOKEN,
   type TestStack,
   type TestStackOptions,
-} from "@z402/service-kit/testing";
+} from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadMarkdownConfig, type MarkdownConfig } from "../src/config.js";
 import { safeFetch } from "../src/fetch.js";

@@ -1,4 +1,4 @@
-import { computeLimit, type SessionSnapshot, type SnapshotDeposit, type Terms } from "@z402/protocol";
+import { computeLimit, type SessionSnapshot, type SnapshotDeposit, type Terms } from "@z402-net/protocol";
 import { SNAPSHOT_FINAL_KEEP, type DepositRecord } from "./types.js";
 
 export function buildSnapshot(a: {

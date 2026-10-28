@@ -163,7 +163,7 @@ A failed declaration never stops the API, and the next beat tries again. A line 
 
 ## Startup failures
 
-Each one names the option to fix, and none quotes a token. The first three rows are checks that run before the facilitator is contacted, so a password in the URL is refused before any message could print it. Then the API asks the facilitator `GET /providers/me` with its token (`checkProvider` of `@z402/server`), which must answer with this API's payTo and network. That check comes before `/supported` is read, it fails the start on any problem, and it does not wait for a facilitator that is down. Its outcomes are the rows from `cannot reach` to `serves` below:
+Each one names the option to fix, and none quotes a token. The first three rows are checks that run before the facilitator is contacted, so a password in the URL is refused before any message could print it. Then the API asks the facilitator `GET /providers/me` with its token (`checkProvider` of `@z402-net/server`), which must answer with this API's payTo and network. That check comes before `/supported` is read, it fails the start on any problem, and it does not wait for a facilitator that is down. Its outcomes are the rows from `cannot reach` to `serves` below:
 
 | Message | Cause |
 | --- | --- |

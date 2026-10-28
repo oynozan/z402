@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { isZcashNetwork, NETWORK_REGTEST, ZCASH_NETWORKS, type ZcashNetwork } from "@z402/protocol";
+import { isZcashNetwork, NETWORK_REGTEST, ZCASH_NETWORKS, type ZcashNetwork } from "@z402-net/protocol";
 
 /** In the order the flow checks them */
 export const SERVICE_NAMES = ["llm", "markdown", "embeddings", "dropbox"] as const;

@@ -1,6 +1,6 @@
 import type { PaymentResponseContext } from "@x402/core/client";
 import type { SettleResponse } from "@x402/core/types";
-import { REASON, type SessionSnapshot, type Terms, type TxStatusSource } from "@z402/protocol";
+import { REASON, type SessionSnapshot, type Terms, type TxStatusSource } from "@z402-net/protocol";
 import type { Clock } from "./clock.js";
 import type { ClientEvent } from "./events.js";
 import type { Mutex } from "./mutex.js";

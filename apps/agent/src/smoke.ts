@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
-import { ZalletRpcWallet } from "@z402/client";
-import { depositMemo, generateSeed, publicKeyFromSeed } from "@z402/protocol";
+import { ZalletRpcWallet } from "@z402-net/client";
+import { depositMemo, generateSeed, publicKeyFromSeed } from "@z402-net/protocol";
 import { zainoTxStatus } from "./chain.js";
 import { loadZ3Rpc, pollUntil, Z3_DEFAULTS } from "./z3.js";
 

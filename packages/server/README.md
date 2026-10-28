@@ -1,20 +1,20 @@
-# @z402/server
+# @z402-net/server
 
 Documentation: https://z402.net/docs/reference/server (all z402 docs: https://z402.net/docs)
 
 The provider side of z402 for x402 resource servers: `PrepaidVoucherServerScheme`, the `prepaid-voucher` scheme you register with the stock `x402ResourceServer`, and `checkProvider`, the start-up check that an API key and a pay-to address belong together.
 
 ```bash
-pnpm add @z402/server @z402/protocol
+pnpm add @z402-net/server @z402-net/protocol
 pnpm add --save-exact @x402/core@2.28.0
 ```
 
-`@x402/core` is a peer dependency, pinned to exactly 2.28.0 (the declarations use its types). The example also imports `NETWORK_REGTEST` from `@z402/protocol`.
+`@x402/core` is a peer dependency, pinned to exactly 2.28.0 (the declarations use its types). The example also imports `NETWORK_REGTEST` from `@z402-net/protocol`.
 
 ```ts
 import { HTTPFacilitatorClient, x402ResourceServer } from "@x402/core/server";
-import { NETWORK_REGTEST } from "@z402/protocol";
-import { PrepaidVoucherServerScheme } from "@z402/server";
+import { NETWORK_REGTEST } from "@z402-net/protocol";
+import { PrepaidVoucherServerScheme } from "@z402-net/server";
 
 const payTo = "uregtest1...";
 const server = new x402ResourceServer(new HTTPFacilitatorClient({ url: "https://facilitator.example" })).register(

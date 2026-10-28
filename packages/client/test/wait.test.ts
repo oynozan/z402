@@ -1,4 +1,4 @@
-import { ChainUnavailableError, type TxStatus, type TxStatusSource } from "@z402/protocol";
+import { ChainUnavailableError, type TxStatus, type TxStatusSource } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { describe, expect, it } from "vitest";
 import { waitForConfirmation } from "../src/wait.js";

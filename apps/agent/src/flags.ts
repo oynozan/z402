@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { isZcashNetwork, NETWORK_REGTEST, ZCASH_NETWORKS, type ZcashNetwork } from "@z402/protocol";
+import { isZcashNetwork, NETWORK_REGTEST, ZCASH_NETWORKS, type ZcashNetwork } from "@z402-net/protocol";
 import { Z3_DEFAULTS } from "./z3.js";
 
 export type WalletKind = "zallet" | "zingo";

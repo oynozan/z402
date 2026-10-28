@@ -1,5 +1,5 @@
 // Generates test/vectors.json with @noble/curves, independent of src/voucher.ts.
-// Run: pnpm --filter @z402/protocol exec tsx scripts/make-vectors.ts > test/vectors.json
+// Run: pnpm --filter @z402-net/protocol exec tsx scripts/make-vectors.ts > test/vectors.json
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/curves/utils.js";
 

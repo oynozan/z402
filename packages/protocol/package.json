@@ -1,5 +1,5 @@
 {
-  "name": "@z402/protocol",
+  "name": "@z402-net/protocol",
   "version": "0.1.0",
   "description": "The z402 prepaid-voucher wire format for x402 on Zcash: payment terms, voucher signatures, deposit memos and the trust ramp",
   "keywords": [

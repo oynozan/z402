@@ -9,7 +9,7 @@ import {
   type PaidService,
   type ServiceDefinition,
   type ServiceEnv,
-} from "@z402/service-kit";
+} from "@z402-net/service-kit";
 import express, { type RequestHandler, type Response } from "express";
 import type { EmbeddingsConfig } from "./config.js";
 import { createOpenAiProvider, type EmbeddingsProvider, type EmbedResult, type Usage } from "./provider.js";

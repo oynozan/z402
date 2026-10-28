@@ -20,7 +20,7 @@ v1.2.1 changes nothing on the wire. It records the facilitator's Wave B rules:
 
 Drafted by the client agent and reviewed by the facilitator agent. Code may rely on every value here; changes need a message, both ACKs, and a version bump.
 
-This is the one contract the client library (`@z402/client`) and the merchant side (`@z402/facilitator`, `@z402/server`, `apps/api`) both build against. It refines [mvp-build-doc.md](mvp-build-doc.md) with what research found; where they disagree, this file wins.
+This is the one contract the client library (`@z402-net/client`) and the merchant side (`@z402/facilitator`, `@z402-net/server`, `apps/api`) both build against. It refines [mvp-build-doc.md](mvp-build-doc.md) with what research found; where they disagree, this file wins.
 
 **Change process.** Propose the change by message, both agents ACK, then edit this file and bump the version line. `v0-*` drafts may change; from `v1` on, code may rely on every value in the current version.
 
@@ -170,7 +170,7 @@ accept  ⇔ c_new − c_last ≥ amount  ∧  c_new ≤ limit           (c_last 
 - `amount` is the price of the call being paid (v2.0). Routes of one provider with different prices share one session, and each voucher must advance by its own call's price.
 - The increment rule is lenient (`≥`): a client that overshoots by one price is still accepted, which absorbs lost responses.
 - A new session has `c_last = 0` and limit 0, so its first voucher must carry a deposit.
-- One implementation, `computeLimit()` in `@z402/protocol`, is imported by both sides.
+- One implementation, `computeLimit()` in `@z402-net/protocol`, is imported by both sides.
 - Worst-case merchant loss per session is `min(W, Σ live pending) + min(C_max, r·D_conf)`, plus the value of any credited deposit that a reorg removes before it is final. The MVP accepts that reorg term; see facilitator design §4.2.
 
 Reference values (W = 100,000, 2500 bps, cap 200,000):
@@ -217,7 +217,7 @@ Reference values (W = 100,000, 2500 bps, cap 200,000):
 - `deposits` holds every non-final entry plus the last 4 final ones, so the header stays well under 16 KB.
 - It is present in every post-signature `SettleResponse.extra.session`, success or failure, and in every post-signature corrective 402 (§7.1 lists when it is absent).
 - **Corrective 402:** on every verify refusal, `PAYMENT-REQUIRED.accepts[0].extra.session` carries the snapshot. The server scheme does this with an `onAfterVerify` WeakMap plus `enrichPaymentRequiredResponse`; the pattern was proven in the e2e spike. Without it, a verify refusal exposes only the bare `invalidReason`.
-- Both sides validate snapshots with `parseSessionSnapshot()` from `@z402/protocol`.
+- Both sides validate snapshots with `parseSessionSnapshot()` from `@z402-net/protocol`.
 
 ### 7.3 Deposit acknowledgement
 - `SettleResponse.transaction = depositTxid` whenever the payload's `depositTxid` is credited to this session. That covers a new credit and a re-presentation, so a lost ack can be re-acked. Otherwise `""`.
@@ -320,7 +320,7 @@ From v2.0 the price is per route (§2), and each service sets its own (the start
 
 W = 100,000, 2500 bps, C_max = 200,000 and `zeroConfMinExpiryBlocks` = 20 in both options.
 
-## 13. Shared code: `@z402/protocol`
+## 13. Shared code: `@z402-net/protocol`
 
 The client agent drafts it; both agents own it from v1. Pure TypeScript, no network. Exports:
 
@@ -375,7 +375,7 @@ REASON: { awaitingConfirmation: "z402_awaiting_confirmation", … }   // the clo
 type ReasonCode; isReasonCode(s: string): s is ReasonCode
 class ProtocolError extends Error { readonly code: ReasonCode }
 class ChainUnavailableError extends Error { constructor(message: string, options?: { cause?: unknown }) }
-  // thrown by every chain reader on transport errors: FakeChain, @z402/lightwalletd, the client's TxStatusSource
+  // thrown by every chain reader on transport errors: FakeChain, @z402-net/lightwalletd, the client's TxStatusSource
 // raw tx + chain seam (facilitator owns these shapes)
 expiryHeightFromRawTx(raw: Uint8Array): number                 // v5/v6 only, else throws
 type TxInspection = { found: false } | { found: true; txid: string; location: "mempool" | "mined" | "orphaned";
@@ -400,12 +400,12 @@ pnpm workspace, ESM (`"type": "module"`), TypeScript strict with `NodeNext` (rel
 | Path | Package | Owner |
 |---|---|---|
 | `/` root config (`package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, `.gitignore`) | — | client agent (scaffolds first) |
-| `packages/protocol` | `@z402/protocol` | client agent drafts; shared from v1 |
-| `packages/client` | `@z402/client` | client agent |
+| `packages/protocol` | `@z402-net/protocol` | client agent drafts; shared from v1 |
+| `packages/client` | `@z402-net/client` | client agent |
 | `packages/testkit` | `@z402/testkit` (FakeChain, MockWallet) | client agent; `ChainView` shape owned by the facilitator agent |
-| `packages/lightwalletd` | `@z402/lightwalletd` | facilitator agent |
+| `packages/lightwalletd` | `@z402-net/lightwalletd` | facilitator agent |
 | `packages/facilitator` | `@z402/facilitator` | facilitator agent |
-| `packages/server` | `@z402/server` | facilitator agent |
+| `packages/server` | `@z402-net/server` | facilitator agent |
 | `apps/api` | `@z402/api` | facilitator agent |
 | `apps/agent` | `@z402/agent` (demo loop) | client agent |
 | `apps/e2e` | `@z402/e2e` (single-process harness) | client agent |
@@ -419,7 +419,7 @@ No agent edits another's paths; requests go by message.
 ## 15. Integration seams (owned by the facilitator agent; consumed by the client agent's e2e harness and status check, and by the services agent's kit)
 
 ```ts
-// @z402/lightwalletd
+// @z402-net/lightwalletd
 type RawTx = { found: false }
            | { found: true; raw: Uint8Array; location: "mempool" | "mined" | "orphaned"; height: number | null };
 createLightwalletdClient(opts: { url: string /* http:// = plaintext, https:// = TLS */; rpcDeadlineMs?: number /* 5000 */ }): {
@@ -464,7 +464,7 @@ interface ApiOptions { network: ZcashNetwork; facilitatorUrl: string /* "" throw
 startApi(o: ApiOptions): Promise<{ url: string; close(): Promise<void> }>
 // both throw unless isValidPayTo(payTo, network); apps/e2e passes NETWORK_REGTEST
 
-// @z402/server
+// @z402-net/server
 checkProvider(o: { facilitatorUrl: string; token?: string /* the API key, sent as a bearer */; payTo: string; network: string;
   fetch?: typeof fetch; timeoutMs?: number /* 5000 */ }): Promise<void>   // calls GET /providers/me (§16)
 class ProviderCheckError extends Error { readonly field: "facilitatorToken" | "payTo" | "facilitatorUrl"; readonly retryable: boolean }

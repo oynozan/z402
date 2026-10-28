@@ -1,6 +1,6 @@
 /** A real kit-based paid service on the in-process test stack, with a POST route and a GET route with a parameter */
-import { createPaidService, onDelivered, type ServiceDefinition, type ServiceEnv } from "@z402/service-kit";
-import { startTestStack, type TestStack } from "@z402/service-kit/testing";
+import { createPaidService, onDelivered, type ServiceDefinition, type ServiceEnv } from "@z402-net/service-kit";
+import { startTestStack, type TestStack } from "@z402-net/service-kit/testing";
 import express, { type NextFunction, type Request, type Response } from "express";
 
 /** Refuses an empty body, which is what a discovery probe sends */

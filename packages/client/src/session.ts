@@ -1,5 +1,5 @@
 import type { SettleResponse } from "@x402/core/types";
-import { publicKeyFromSeed, type SessionSnapshot } from "@z402/protocol";
+import { publicKeyFromSeed, type SessionSnapshot } from "@z402-net/protocol";
 import { snapshotFromExtra } from "./outcome.js";
 
 export interface LocalDeposit {

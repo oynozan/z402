@@ -1,4 +1,4 @@
-import { ChainUnavailableError, type ChainView, type FoundInspection, type TxInspection } from "@z402/protocol";
+import { ChainUnavailableError, type ChainView, type FoundInspection, type TxInspection } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { DepositResolver, type Lookup } from "../../src/core/resolver.js";

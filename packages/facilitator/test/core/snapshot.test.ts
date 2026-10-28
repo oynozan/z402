@@ -1,4 +1,4 @@
-import { DEMO_TERMS, parseSessionSnapshot, type DepositStatus } from "@z402/protocol";
+import { DEMO_TERMS, parseSessionSnapshot, type DepositStatus } from "@z402-net/protocol";
 import { describe, expect, test } from "vitest";
 import { buildSnapshot } from "../../src/core/snapshot.js";
 import type { DepositRecord } from "../../src/core/types.js";

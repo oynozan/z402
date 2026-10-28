@@ -4,8 +4,8 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LightdInfo, LightwalletdClient } from "@z402/lightwalletd";
-import { NETWORK_MAINNET, NETWORK_TESTNET, type ZcashNetwork } from "@z402/protocol";
+import type { LightdInfo, LightwalletdClient } from "@z402-net/lightwalletd";
+import { NETWORK_MAINNET, NETWORK_TESTNET, type ZcashNetwork } from "@z402-net/protocol";
 import { ZdecryptError, zdecryptDecrypt, zdecryptNetwork, zdecryptOwns } from "./chain/zdecrypt.js";
 import { REPO_ROOT } from "./config.js";
 

@@ -2,7 +2,7 @@
  * A scripted OpenAI-compatible provider on a local port: GET /v1/models and POST /v1/chat/completions, which streams
  * the deltas of a script in the event format Ollama sends.
  */
-import { serve } from "@z402/service-kit";
+import { serve } from "@z402-net/service-kit";
 import express from "express";
 
 export interface Gate {

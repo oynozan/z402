@@ -1,5 +1,5 @@
 import { validateDiscoveryExtension, type DiscoveryExtension } from "@x402/extensions/bazaar";
-import { PROBE_HEADER } from "@z402/service-kit";
+import { PROBE_HEADER } from "@z402-net/service-kit";
 import {
   declarationRefusal,
   paymentRequiredOf,
@@ -10,7 +10,7 @@ import {
   TEST_TOKEN,
   type TestStack,
   type TestStackOptions,
-} from "@z402/service-kit/testing";
+} from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadEmbeddingsConfig, type EmbeddingsConfig } from "../src/index.js";
 import { createEmbeddingsService } from "../src/service.js";

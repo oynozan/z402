@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET, type ZcashNetwork } from "@z402/protocol";
+import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET, type ZcashNetwork } from "@z402-net/protocol";
 import { checkLedgerHeader, Ledger, LedgerRefusal, type LedgerEvent } from "../../src/core/ledger.js";
 import { depositEvent, statusEvent, unreadableEvents, voucherEvent } from "./events.js";
 

@@ -14,12 +14,12 @@ import {
   type PaymentRequired,
 } from "@x402/fetch";
 import { startApi, type ApiHandle } from "@z402/api";
-import { PrepaidVoucherScheme, type ClientEvent } from "@z402/client";
+import { PrepaidVoucherScheme, type ClientEvent } from "@z402-net/client";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startFacilitator, type FacilitatorHandle } from "@z402/facilitator";
-import { DEMO_TERMS, NETWORK_REGTEST, parseSessionSnapshot, type SessionSnapshot } from "@z402/protocol";
+import { DEMO_TERMS, NETWORK_REGTEST, parseSessionSnapshot, type SessionSnapshot } from "@z402-net/protocol";
 import { FakeChain, MockWallet } from "@z402/testkit";
 
 export const NETWORK = NETWORK_REGTEST;

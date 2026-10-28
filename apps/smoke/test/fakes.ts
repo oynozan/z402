@@ -5,7 +5,7 @@
  * what runs before it, `unpaid` takes a route out from behind the paywall and `paywalled` puts a free route behind it.
  */
 import { randomBytes } from "node:crypto";
-import { createPaidService, type PaidRoute, type ServiceEnv } from "@z402/service-kit";
+import { createPaidService, type PaidRoute, type ServiceEnv } from "@z402-net/service-kit";
 import express, { type Express, type Request, type RequestHandler, type Response } from "express";
 import { ageRefusal } from "./age-shape.js";
 

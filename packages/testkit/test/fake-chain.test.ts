@@ -1,4 +1,4 @@
-import { ChainUnavailableError, type FoundInspection } from "@z402/protocol";
+import { ChainUnavailableError, type FoundInspection } from "@z402-net/protocol";
 import { describe, expect, it } from "vitest";
 import { FakeChain } from "../src/index.js";
 

@@ -1,4 +1,4 @@
-import { ConfigError } from "@z402/service-kit";
+import { ConfigError } from "@z402-net/service-kit";
 import { describe, expect, test } from "vitest";
 import { loadMarkdownConfig } from "../src/config.js";
 

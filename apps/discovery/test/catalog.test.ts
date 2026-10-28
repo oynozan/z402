@@ -1,4 +1,4 @@
-import { TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
+import { TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { Catalog, type CatalogOptions } from "../src/catalog.js";
 import { echoStack, post } from "./support/echo.js";

@@ -14,7 +14,7 @@ import {
   parseZat,
   ProtocolError,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import type { ApiOptions } from "./app.js";
 import { publicUrlProblem, serviceNameProblem } from "./declare.js";
 

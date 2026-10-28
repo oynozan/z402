@@ -1,4 +1,4 @@
-import { DEMO_TERMS, type FoundInspection } from "@z402/protocol";
+import { DEMO_TERMS, type FoundInspection } from "@z402-net/protocol";
 import { describe, expect, test } from "vitest";
 import { evaluateDeposit } from "../../src/core/evaluate.js";
 

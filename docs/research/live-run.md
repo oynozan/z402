@@ -7,7 +7,7 @@
 | Fact | Observed |
 |---|---|
 | Merchant keys | `.secrets/merchant-regtest.json` already existed (file mode 600, directory mode 700), so step 1 was not repeated. `zdecrypt owns` answers `ownedByKey: true`, `hasTransparent: false` |
-| `@z402/lightwalletd` live test | 3 live tests pass against Zaino (branch id `37a5165b`, a tip, an unknown txid is a definitive not-found), 1 testnet-only test is skipped. Whole package: 63 passed, 1 skipped |
+| `@z402-net/lightwalletd` live test | 3 live tests pass against Zaino (branch id `37a5165b`, a tip, an unknown txid is a definitive not-found), 1 testnet-only test is skipped. Whole package: 63 passed, 1 skipped |
 | Facilitator start (port 4098) | The ready line appeared within 1 s of `pnpm --filter @z402/facilitator start`, after the self-test, ownership and branch checks passed |
 | API start (port 4097) | About 1 s after the facilitator, having loaded `/supported` from it |
 | Unpaid `GET /chunk` | **402** with a `PAYMENT-REQUIRED` header. `accepts[0]` is `prepaid-voucher` on `zcash:regtest` with `amount "500"` (zat) and `asset "ZEC"`, `payTo` the merchant and `windowZat` 100000 |
@@ -15,7 +15,7 @@
 | Facilitator `GET /supported` | 401 without the bearer token, 200 with it |
 | First real deposit | `98e84dab...0eaf`, mined at height 115, expiry 155, one external Ironwood output of 100000 zat to the merchant, memo `<sessionKey>:1`, no transparent part, fee 10,000 zat |
 | Zallet `z_sendmany` for it | 5.1 s from the call to `success` (tip 114 at send) |
-| Chain visibility | First deposit: after the block, Zebra reported height 115 with 1 confirmation at once, while Zaino answered the old tip and height `"0"` for a few seconds. Later deposit `0fcb6eae...54df`, through `@z402/lightwalletd`: seen in the mempool 523 ms after broadcast, and mined 1359 ms after `mineNow(1)` |
+| Chain visibility | First deposit: after the block, Zebra reported height 115 with 1 confirmation at once, while Zaino answered the old tip and height `"0"` for a few seconds. Later deposit `0fcb6eae...54df`, through `@z402-net/lightwalletd`: seen in the mempool 523 ms after broadcast, and mined 1359 ms after `mineNow(1)` |
 | Decrypting that transaction | `parseMicros` 61 to 91, `decryptMicros` 926 to 1707 over three runs, for 9,166 bytes and 2 Ironwood actions |
 | Two providers on one facilitator (§9, 2026-10-28) | Provider 2 registered through `POST /providers` (201, providerId `119de65c18324856`). One agent paid `:4021/chunk` at 500 and `:4023/chunk` at 800: 80 of 80 calls answered 200. Each provider's ledger holds only its own session (20,000 with 1 deposit; 32,000 with 2). The Bazaar lists both with `paidCallsToday` 40. Provider 2's key with provider 1's `payTo` got `invalid_payment_requirements` |
 
@@ -46,10 +46,10 @@ $ ZDECRYPT_KEY=$(jq -r .uivk .secrets/merchant-regtest.json) crates/zdecrypt/tar
 {"hasTransparent":false,"orchardOwned":true,"ownedByKey":true,"saplingOwned":null}
 ```
 
-## 3. `@z402/lightwalletd` against Zaino (step 3)
+## 3. `@z402-net/lightwalletd` against Zaino (step 3)
 
 ```
-$ Z402_LIVE=1 Z402_LWD_URL=http://127.0.0.1:28137 pnpm --filter @z402/lightwalletd exec vitest run --reporter=verbose test/live.test.ts
+$ Z402_LIVE=1 Z402_LWD_URL=http://127.0.0.1:28137 pnpm --filter @z402-net/lightwalletd exec vitest run --reporter=verbose test/live.test.ts
 ```
 
 | Test | Result | Time |
@@ -238,7 +238,7 @@ Fees seen for deposits of this shape:
 
 All three fit ZIP-317's conventional fee: 5,000 zat per logical action, with a minimum of 2 actions.
 
-Later deposits from the client's live tests, all harmless. On `0fcb6eae...54df` the client measured, through `@z402/lightwalletd`, 523 ms from broadcast to the first sighting in the mempool (about 0.5 s) and 1359 ms from `mineNow(1)` until Zaino showed it mined (about 1.4 s). Those two figures belong to that deposit, not to `98e84dab`, where Zaino lagged by a few seconds.
+Later deposits from the client's live tests, all harmless. On `0fcb6eae...54df` the client measured, through `@z402-net/lightwalletd`, 523 ms from broadcast to the first sighting in the mempool (about 0.5 s) and 1359 ms from `mineNow(1)` until Zaino showed it mined (about 1.4 s). Those two figures belong to that deposit, not to `98e84dab`, where Zaino lagged by a few seconds.
 
 | Txid | Value | Mined | Expiry |
 |---|---|---|---|
@@ -274,7 +274,7 @@ ZDECRYPT_KEY=$(jq -r .uivk .secrets/merchant-regtest.json) crates/zdecrypt/targe
   --network regtest --address $(jq -r .orchardOnlyAddress .secrets/merchant-regtest.json)
 
 # step 3: the live tests (read-only, Z3 stack up)
-Z402_LIVE=1 Z402_LWD_URL=http://127.0.0.1:28137 pnpm --filter @z402/lightwalletd exec vitest run --reporter=verbose test/live.test.ts
+Z402_LIVE=1 Z402_LWD_URL=http://127.0.0.1:28137 pnpm --filter @z402-net/lightwalletd exec vitest run --reporter=verbose test/live.test.ts
 Z402_LIVE=1 pnpm --filter @z402/facilitator exec vitest run test/chain/live.test.ts
 
 # step 4: facilitator and API on spare ports (see packages/facilitator/README.md and apps/api/README.md), then

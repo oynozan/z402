@@ -8,7 +8,7 @@ import {
   ZAT_RE,
   type DepositStatus,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 
 export type LedgerEvent =
   /** The first line of a ledger, naming the facilitator that created it */

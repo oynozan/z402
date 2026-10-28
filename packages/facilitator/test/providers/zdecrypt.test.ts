@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEMO_TERMS, isValidPayTo, NETWORK_TESTNET } from "@z402/protocol";
+import { DEMO_TERMS, isValidPayTo, NETWORK_TESTNET } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterAll, afterEach, describe, expect, test } from "vitest";
 import { startFacilitator } from "../../src/app.js";

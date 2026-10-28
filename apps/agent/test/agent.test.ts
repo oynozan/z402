@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
 import type { PaymentRequired, PaymentRequirements, SchemeNetworkClient } from "@x402/core/types";
-import { ASSET, NETWORK_REGTEST, REASON, SCHEME, ZEC_DECIMALS, type SessionSnapshot } from "@z402/protocol";
+import { ASSET, NETWORK_REGTEST, REASON, SCHEME, ZEC_DECIMALS, type SessionSnapshot } from "@z402-net/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/agent.js";
 import { FLAG_DEFAULTS, type Flags } from "../src/flags.js";

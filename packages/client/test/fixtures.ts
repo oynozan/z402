@@ -8,7 +8,7 @@ import {
   type DepositStatus,
   type SessionSnapshot,
   type SnapshotDeposit,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import type { LocalDeposit } from "../src/session.js";
 
 export const PAY_TO = "uregtest1" + "q".repeat(60);

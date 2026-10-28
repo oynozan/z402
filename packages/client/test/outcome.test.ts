@@ -1,4 +1,4 @@
-import { REASON } from "@z402/protocol";
+import { REASON } from "@z402-net/protocol";
 import { describe, expect, it } from "vitest";
 import { actionFor, classifyOutcome, type Action } from "../src/outcome.js";
 import { context, NETWORK, requirements, snapshot, snapshotDeposit, txid } from "./fixtures.js";

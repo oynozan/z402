@@ -1,4 +1,4 @@
-import type { DepositRequest, ZcashWallet } from "@z402/protocol";
+import type { DepositRequest, ZcashWallet } from "@z402-net/protocol";
 import type { FakeChain } from "./fake-chain.js";
 
 /**

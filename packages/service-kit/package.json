@@ -1,5 +1,5 @@
 {
-  "name": "@z402/service-kit",
+  "name": "@z402-net/service-kit",
   "version": "0.1.0",
   "description": "Build a paid HTTP service for z402: the x402 Express middleware wired to the prepaid-voucher scheme, with start-up checks and Bazaar listing",
   "keywords": [
@@ -49,14 +49,14 @@
     "@x402/core": "2.28.0",
     "@x402/express": "2.28.0",
     "@x402/extensions": "2.28.0",
-    "@z402/protocol": "workspace:*",
-    "@z402/server": "workspace:*",
+    "@z402-net/protocol": "workspace:*",
+    "@z402-net/server": "workspace:*",
     "express": "5.3.0"
   },
   "devDependencies": {
     "@types/express": "5.0.6",
     "@x402/fetch": "2.28.0",
-    "@z402/client": "workspace:*",
+    "@z402-net/client": "workspace:*",
     "@z402/facilitator": "workspace:*",
     "@z402/testkit": "workspace:*"
   }

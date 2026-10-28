@@ -5,7 +5,7 @@
  * nothing is refused. Messages name a field and a rule and never a value, since a value may carry a query string.
  */
 import type { Network } from "@x402/core/types";
-import { encodeTerms, parseTerms, parseZat, ASSET, SCHEME, type Terms } from "@z402/protocol";
+import { encodeTerms, parseTerms, parseZat, ASSET, SCHEME, type Terms } from "@z402-net/protocol";
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] as const;
 export type Method = (typeof METHODS)[number];

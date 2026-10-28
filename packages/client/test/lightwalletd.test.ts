@@ -1,4 +1,4 @@
-import { ChainUnavailableError, ProtocolError } from "@z402/protocol";
+import { ChainUnavailableError, ProtocolError } from "@z402-net/protocol";
 import { describe, expect, it } from "vitest";
 import { LightwalletdTxStatus, type LightwalletdLike, type RawTx } from "../src/index.js";
 

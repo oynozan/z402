@@ -1,4 +1,4 @@
-import type { ZcashWallet } from "@z402/protocol";
+import type { ZcashWallet } from "@z402-net/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeChain, MockWallet } from "../src/index.js";
 

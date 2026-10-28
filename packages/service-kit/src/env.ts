@@ -11,7 +11,7 @@ import {
   parseZat,
   ProtocolError,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 
 export class ConfigError extends Error {
   constructor(message: string) {

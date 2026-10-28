@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { decodePaymentSignatureHeader, encodePaymentSignatureHeader } from "@x402/core/http";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { startTestStack, TEST_NETWORK, TEST_PAY_TO, type TestStack } from "@z402/service-kit/testing";
+import { startTestStack, TEST_NETWORK, TEST_PAY_TO, type TestStack } from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SERVICE_NAMES, type ServiceName } from "../src/flags.js";
 import { runFlow, type FlowOptions, type FlowResult } from "../src/flow.js";

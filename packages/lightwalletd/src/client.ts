@@ -10,7 +10,7 @@ import {
   type ServiceError,
 } from "@grpc/grpc-js";
 import { loadSync } from "@grpc/proto-loader";
-import { ChainUnavailableError } from "@z402/protocol";
+import { ChainUnavailableError } from "@z402-net/protocol";
 import { txidToFilterHash } from "./txid.js";
 
 /** height is set only when location is mined */

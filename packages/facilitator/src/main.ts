@@ -1,5 +1,5 @@
 // Prints one ready line on stdout and logs only to stderr, so scripts can wait for the line
-import { createLightwalletdClient } from "@z402/lightwalletd";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
 import { startFacilitator, type FacilitatorHandle } from "./app.js";
 import { cachedTip, LightwalletdChainView } from "./chain/lightwalletdChainView.js";
 import { zdecryptNetwork, zdecryptOwnsShielded } from "./chain/zdecrypt.js";

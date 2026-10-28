@@ -6,7 +6,7 @@ import {
   type TxInspection,
   type TxStatus,
   type TxStatusSource,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 
 export interface FakeTxOutput {
   to: string;

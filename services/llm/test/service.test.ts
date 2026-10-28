@@ -1,6 +1,6 @@
 import { validateDiscoveryExtension, type DiscoveryExtension } from "@x402/extensions/bazaar";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { serve } from "@z402/service-kit";
+import { serve } from "@z402-net/service-kit";
 import {
   declarationRefusal,
   paymentRequiredOf,
@@ -12,7 +12,7 @@ import {
   TEST_TOKEN,
   type TestStack,
   type TestStackOptions,
-} from "@z402/service-kit/testing";
+} from "@z402-net/service-kit/testing";
 import express from "express";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { LlmConfig } from "../src/config.js";

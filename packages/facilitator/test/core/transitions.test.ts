@@ -1,4 +1,4 @@
-import type { FoundInspection, TxInspection } from "@z402/protocol";
+import type { FoundInspection, TxInspection } from "@z402-net/protocol";
 import { describe, expect, test } from "vitest";
 import { asOfTip, observe } from "../../src/core/transitions.js";
 import type { DepositRecord } from "../../src/core/types.js";

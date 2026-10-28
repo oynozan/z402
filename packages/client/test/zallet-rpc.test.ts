@@ -1,5 +1,5 @@
 import type { PaymentRequirements } from "@x402/core/types";
-import { DEMO_TERMS, encodeTerms, NETWORK_REGTEST, SCHEME } from "@z402/protocol";
+import { DEMO_TERMS, encodeTerms, NETWORK_REGTEST, SCHEME } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DepositStatusUnknownError, ZalletRpcError } from "../src/errors.js";

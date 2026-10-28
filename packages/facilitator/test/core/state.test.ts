@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEMO_TERMS, type DepositStatus, type FoundInspection, type TxInspection } from "@z402/protocol";
+import { DEMO_TERMS, type DepositStatus, type FoundInspection, type TxInspection } from "@z402-net/protocol";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { Ledger, LedgerRefusal, type LedgerEvent } from "../../src/core/ledger.js";
 import { buildSnapshot } from "../../src/core/snapshot.js";

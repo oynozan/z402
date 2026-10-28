@@ -13,7 +13,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import { ASSET, DEMO_TERMS, NETWORK_REGTEST, NETWORK_TESTNET, REASON, SCHEME, type ChainView } from "@z402/protocol";
+import { ASSET, DEMO_TERMS, NETWORK_REGTEST, NETWORK_TESTNET, REASON, SCHEME, type ChainView } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import { startFacilitator, type FacilitatorHandle, type FacilitatorOptions } from "../src/app.js";

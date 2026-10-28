@@ -4,7 +4,7 @@
  * that no entry names, and only then is the entry stored and the key put in force. A rotation stores the new key hash
  * before the old key stops working. Registrations run one at a time, since each reads the registry and then changes it.
  */
-import { isValidPayTo, type ZcashNetwork } from "@z402/protocol";
+import { isValidPayTo, type ZcashNetwork } from "@z402-net/protocol";
 import { isValidUivk } from "../config.js";
 import { MAX_PAY_TO_LENGTH } from "../payTo.js";
 import type { Log, ProviderRuntime } from "../runtime.js";

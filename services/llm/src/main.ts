@@ -1,5 +1,5 @@
 // Prints one ready line on stdout and logs only to stderr, so scripts can wait for the line
-import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402/service-kit";
+import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402-net/service-kit";
 import { loadLlmConfig } from "./config.js";
 import { createLlmService } from "./service.js";
 

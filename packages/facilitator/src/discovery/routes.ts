@@ -1,4 +1,4 @@
-import { parseTerms } from "@z402/protocol";
+import { parseTerms } from "@z402-net/protocol";
 import type { Express, Request, RequestHandler, Response } from "express";
 import type { Log, ProviderRuntime } from "../runtime.js";
 import {

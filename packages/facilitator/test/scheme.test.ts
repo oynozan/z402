@@ -13,7 +13,7 @@ import {
   type ReasonCode,
   type SessionSnapshot,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { Ledger, LedgerRefusal, type LedgerEvent } from "../src/core/ledger.js";

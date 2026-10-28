@@ -1,5 +1,5 @@
 import { status, type ServiceClientConstructor } from "@grpc/grpc-js";
-import { ChainUnavailableError } from "@z402/protocol";
+import { ChainUnavailableError } from "@z402-net/protocol";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   createLightwalletdClient,

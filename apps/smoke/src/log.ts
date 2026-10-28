@@ -1,4 +1,4 @@
-import type { ClientEvent } from "@z402/client";
+import type { ClientEvent } from "@z402-net/client";
 import { clean } from "./http.js";
 
 /** First 4 and last 2 characters, 3f2a…c1 */

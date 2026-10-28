@@ -5,7 +5,7 @@
  */
 import { closeSync, openSync } from "node:fs";
 import { x402Facilitator } from "@x402/core/facilitator";
-import type { ChainView, Terms, ZcashNetwork } from "@z402/protocol";
+import type { ChainView, Terms, ZcashNetwork } from "@z402-net/protocol";
 import {
   checkLedgerHeader,
   Ledger,

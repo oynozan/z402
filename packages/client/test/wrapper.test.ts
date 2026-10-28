@@ -1,7 +1,7 @@
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { PaymentPayload } from "@x402/core/types";
 import { decodePaymentResponseHeader, wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { NETWORK_REGTEST, parseSessionSnapshot, REASON, type SessionSnapshot, type SnapshotDeposit } from "@z402/protocol";
+import { NETWORK_REGTEST, parseSessionSnapshot, REASON, type SessionSnapshot, type SnapshotDeposit } from "@z402-net/protocol";
 import { FakeChain, MockWallet } from "@z402/testkit";
 import { afterEach, describe, expect, it } from "vitest";
 import { PrepaidVoucherScheme, type ClientEvent, type PrepaidVoucherSchemeOptions } from "../src/index.js";

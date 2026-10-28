@@ -1,4 +1,4 @@
-import type { ChainView, TxInspection } from "@z402/protocol";
+import type { ChainView, TxInspection } from "@z402-net/protocol";
 import type { LedgerEvent } from "./ledger.js";
 import type { FacilitatorState } from "./state.js";
 import { observe } from "./transitions.js";

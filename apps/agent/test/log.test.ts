@@ -1,7 +1,7 @@
 import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
 import type { PaymentRequired, SettleResponse } from "@x402/core/types";
-import type { ClientEvent } from "@z402/client";
-import { NETWORK_REGTEST, REASON, SCHEME, type SessionSnapshot } from "@z402/protocol";
+import type { ClientEvent } from "@z402-net/client";
+import { NETWORK_REGTEST, REASON, SCHEME, type SessionSnapshot } from "@z402-net/protocol";
 import { describe, expect, it } from "vitest";
 import { FLAG_DEFAULTS } from "../src/flags.js";
 import {

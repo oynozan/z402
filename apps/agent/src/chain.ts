@@ -1,5 +1,5 @@
-import { LightwalletdTxStatus } from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
+import { LightwalletdTxStatus } from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
 
 /** Chain status reads through the facilitator agent's lightwalletd client, pointed at a local Zaino. */
 export function zainoTxStatus(url: string): { status: LightwalletdTxStatus; close(): void } {

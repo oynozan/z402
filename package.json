@@ -9,7 +9,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "pnpm -r exec tsc --noEmit",
-    "build:packages": "rm -rf packages/protocol/dist packages/lightwalletd/dist packages/server/dist packages/client/dist packages/service-kit/dist && pnpm --filter @z402/protocol run build && pnpm --filter @z402/lightwalletd run build && pnpm --filter @z402/server run build && pnpm --filter @z402/client run build && pnpm --filter @z402/service-kit run build"
+    "build:packages": "rm -rf packages/protocol/dist packages/lightwalletd/dist packages/server/dist packages/client/dist packages/service-kit/dist && pnpm --filter @z402-net/protocol run build && pnpm --filter @z402-net/lightwalletd run build && pnpm --filter @z402-net/server run build && pnpm --filter @z402-net/client run build && pnpm --filter @z402-net/service-kit run build"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

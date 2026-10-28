@@ -19,7 +19,7 @@ import {
   ZCASH_NETWORKS,
   ZEC_DECIMALS,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 
 /** The facilitator-owned fields of an `accepts` entry's `extra` (protocol.md section 2) */
 export const TERM_KEYS = [
