@@ -809,7 +809,11 @@ describe("a settled payment", () => {
     const paid = vi.spyOn(Catalog.prototype, "recordPaid");
     const txid = rig.chainOf(A.payTo).broadcast({ outputs: [{ to: A.payTo, valueZat: W, memo: `${K}:1` }] });
     const r = requirementsOf(A);
-    const sent = { ...payment(r, 500n, { txid }), note: "a field no schema knows" } as PaymentPayload;
+    const sent = {
+      ...payment(r, 500n, { txid }),
+      accepted: { ...r, amount: "1", maxTimeoutSeconds: 999 },
+      note: "a field no schema knows",
+    } as PaymentPayload;
     expect((await verify(url, keyA, sent, r)).json.isValid).toBe(true);
     expect(paid).not.toHaveBeenCalled();
 
@@ -887,6 +891,24 @@ describe("a settled payment", () => {
       extensions: { bazaar: BAZAAR_GET },
       paidCallsToday: 1,
     });
+  });
+
+  test("lists a provider that never declared from the server's requirements, not the payer's accepted", async () => {
+    const rig = newRig();
+    const { url } = await boot(rig);
+    const keyB = await enroll(url, B);
+    const txid = rig.chainOf(B.payTo).broadcast({ outputs: [{ to: B.payTo, valueZat: W, memo: `${K}:1` }] });
+    const r = requirementsOf(B);
+    // The scheme compares only accepted.scheme and accepted.network, so a payer may echo the rest as it likes
+    const echoed: PaymentPayload = {
+      ...payment(r, 500n, { txid }),
+      accepted: { ...r, amount: "1", maxTimeoutSeconds: 999 },
+    };
+    expect((await verify(url, keyB, echoed, r)).json.isValid).toBe(true);
+    expect((await settle(url, keyB, echoed, r)).json.success).toBe(true);
+
+    const [item] = await listing(url);
+    expect(item.accepts).toEqual([r]);
   });
 
   test("never lists a payment of a provider that declared, and never rewrites what it declared", async () => {
