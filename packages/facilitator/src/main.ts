@@ -55,7 +55,6 @@ async function main(): Promise<void> {
       network: config.network,
       chain: viewOf({ payTo: config.payTo, uivk: config.uivk }),
       payTo: config.payTo,
-      priceZat: config.priceZat,
       terms: config.terms,
       authToken: config.authToken,
       ledgerPath: config.ledgerPath,

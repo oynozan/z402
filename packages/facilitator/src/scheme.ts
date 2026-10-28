@@ -1,5 +1,5 @@
 /**
- * The x402 facilitator scheme for prepaid-voucher (design §4.3 and §4.4, protocol.md v1.1).
+ * The x402 facilitator scheme for prepaid-voucher (design §4.3 and §4.4, protocol.md v2.0).
  *
  * verify authenticates the voucher, waits at most for one lookup of a deposit the voucher needs and
  * one refresh of the session before refusing, and never writes payment state (its refresh may record
@@ -25,6 +25,7 @@ import {
   isZcashNetwork,
   parseTerms,
   parseVoucherPayload,
+  parseZat,
   ProtocolError,
   REASON,
   SCHEME,
@@ -49,7 +50,6 @@ import { termsVersion } from "./termsVersion.js";
 export interface SchemeConfig {
   network: ZcashNetwork;
   payTo: string;
-  priceZat: bigint;
   terms: Terms;
   /** How long verify waits for the lookup of a deposit the voucher needs */
   depositWaitMs: number;
@@ -76,6 +76,8 @@ interface Voucher {
   cumulativeZat: string;
   cNew: bigint;
   depositTxid: string | undefined;
+  /** The amount of the requirements, which the provider sets per route */
+  priceZat: bigint;
 }
 
 interface Refusal {
@@ -153,8 +155,9 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     this.#commit = d.commit;
     this.#onFatal = d.onFatal ?? (() => undefined);
     this.#log = d.log ?? ((msg, err) => (err === undefined ? console.error(msg) : console.error(msg, err)));
-    const { payTo, priceZat, terms } = this.#config;
-    this.#extra = { ...encodeTerms(terms), termsVersion: termsVersion(payTo, priceZat, terms), payTo };
+    const { terms } = this.#config;
+    // The rail's terms only, since the payTo is each provider's own and the price each route's
+    this.#extra = { ...encodeTerms(terms), termsVersion: termsVersion(terms) };
   }
 
   getExtra(_network: Network): Record<string, unknown> {
@@ -295,13 +298,16 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       return refuse(REASON.invalidSignature, "the voucher signature does not verify");
     }
     const { sessionKey, cumulativeZat, depositTxid } = p;
-    return { ok: true, voucher: { sessionKey, cumulativeZat, cNew: BigInt(cumulativeZat), depositTxid } };
+    // #matches has checked that the amount is a canonical zat from 1 to the window
+    const priceZat = BigInt(requirements.amount);
+    return { ok: true, voucher: { sessionKey, cumulativeZat, cNew: BigInt(cumulativeZat), depositTxid, priceZat } };
   }
 
+  /** True when the requirements name this payTo and the rail's terms, at a price of 1 zat up to the window */
   #matches(r: PaymentRequirements): boolean {
     const c = this.#config;
     if (!isRecord(r) || r.scheme !== SCHEME || r.network !== c.network || r.asset !== ASSET) return false;
-    if (r.payTo !== c.payTo || r.amount !== c.priceZat.toString()) return false;
+    if (r.payTo !== c.payTo || !isPrice(r.amount, c.terms.windowZat)) return false;
     try {
       return sameTerms(parseTerms(r.extra), c.terms);
     } catch {
@@ -311,7 +317,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
 
   /** Judges the voucher on the current state, reading the presented deposit from `fresh` or else the cache */
   #decide(v: Voucher, fresh?: Lookup, earlier?: Lookup): Verdict {
-    const { priceZat, terms } = this.#config;
+    const { terms } = this.#config;
     const cLast = this.#state.session(v.sessionKey)?.cLast ?? 0n;
     const known = v.depositTxid === undefined ? undefined : (fresh ?? this.#resolver.peek(v.depositTxid));
     // The newest tip any read has seen, so an older lookup cannot keep a deposit alive past its expiry
@@ -325,9 +331,9 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     const snapshot = this.#snapshot(v.sessionKey, cLast, deposits, tip);
     const limit = computeLimit(deposits, terms).limitZat;
 
-    const check = checkVoucher({ cLast, cNew: v.cNew, price: priceZat, limit });
+    const check = checkVoucher({ cLast, cNew: v.cNew, price: v.priceZat, limit });
     if (check === "cumulative_mismatch") {
-      const message = `cumulativeZat must be at least ${cLast + priceZat}`;
+      const message = `cumulativeZat must be at least ${cLast + v.priceZat}`;
       return refused({ code: REASON.cumulativeMismatch, message }, snapshot);
     }
     if (presented.kind === "refused") {
@@ -495,6 +501,17 @@ function depositEvent(d: DepositRecord): LedgerEvent {
   };
 }
 
+/** True for a canonical zat amount from 1 to max, since a price of 0 would let a replayed voucher pass */
+function isPrice(amount: unknown, max: bigint): amount is string {
+  if (typeof amount !== "string") return false;
+  try {
+    const zat = parseZat(amount);
+    return zat >= 1n && zat <= max;
+  } catch {
+    return false;
+  }
+}
+
 function sameTerms(a: Terms, b: Terms): boolean {
   return (
     a.windowZat === b.windowZat &&
@@ -517,8 +534,6 @@ function networkOf(requirements: unknown, fallback: Network): Network {
 function checkedConfig(c: SchemeConfig): Required<SchemeConfig> {
   if (!isZcashNetwork(c.network)) throw new Error(`network: expected one of ${ZCASH_NETWORKS.join(", ")}`);
   if (!isValidPayTo(c.payTo, c.network)) throw new Error(`payTo: not a shielded-only unified address for ${c.network}`);
-  // A price of 0 would let a replayed voucher pass the increment check
-  if (typeof c.priceZat !== "bigint" || c.priceZat < 1n) throw new Error("priceZat: must be at least 1 zat");
   try {
     parseTerms(encodeTerms(c.terms));
   } catch (e) {

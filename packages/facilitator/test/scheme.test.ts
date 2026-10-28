@@ -30,13 +30,12 @@ const PAY_TO = `uregtest1${"q".repeat(60)}`;
 const OTHER_PAY_TO = `uregtest1${"p".repeat(60)}`;
 const W = 100000n;
 const WAIT_MS = 30000;
-/** sha256 of ["uregtest1q…q","500",{the demo terms}] taken with shasum, never with the code under test */
-const TERMS_VERSION = "23e5935a1b39a198";
+/** sha256 of ["z402-terms-v2",{the demo terms}] taken with shasum, never with the code under test */
+const TERMS_VERSION = "cb7f148af0fda19a";
 
 const CONFIG: SchemeConfig = {
   network: NETWORK,
   payTo: PAY_TO,
-  priceZat: 500n,
   terms: DEMO_TERMS,
   depositWaitMs: WAIT_MS,
 };
@@ -245,7 +244,6 @@ function mempoolDeposit(txid: string, expiryHeight: number): FoundInspection {
 describe("requirements and payload checks", () => {
   test.each<[string, Partial<PaymentRequirements>]>([
     ["payTo", { payTo: OTHER_PAY_TO }],
-    ["amount", { amount: "1000" }],
     ["asset", { asset: "TAZ" }],
     ["extra.windowZat", { extra: { ...req().extra, windowZat: "1" } }],
     ["extra without a term", { extra: { windowZat: "100000", creditRatioBps: 2500, creditCapZat: "200000" } }],
@@ -359,6 +357,174 @@ describe("requirements and payload checks", () => {
         network: NETWORK,
       });
     }
+  });
+});
+
+describe("the price of a call", () => {
+  /** The cumulative of each voucher the ledger recorded, in order */
+  const vouchersIn = (ledger: Ledger): string[] =>
+    ledger.replay().flatMap((e) => (e.t === "voucher" ? [e.cumulativeZat] : []));
+
+  test.each<[string, string]>([
+    ["zero", "0"],
+    ["a zat over the window", String(W + 1n)],
+    ["a leading zero", "0500"],
+    ["an exponent", "5e2"],
+    ["a sign", "+500"],
+    ["a negative", "-500"],
+    ["a fraction", "500.5"],
+    ["a trailing zero fraction", "500.0"],
+    ["a space before", " 500"],
+    ["a space after", "500 "],
+    ["a hex number", "0x1f4"],
+    ["a thousands separator", "1,000"],
+    ["an empty string", ""],
+    ["more digits than a zat amount has", "10000000000000000"],
+    ["more than all the money there is", "2100000000000001"],
+  ])("an amount of %s (%j) → invalid_payment_requirements", async (_, amount) => {
+    const r = rig();
+    const requirements = req({ amount });
+
+    expect(await r.s.verify(pay(500n), requirements)).toStrictEqual({
+      isValid: false,
+      invalidReason: REASON.invalidPaymentRequirements,
+      invalidMessage: expect.any(String),
+    });
+    expect(await r.s.settle(pay(500n), requirements)).toStrictEqual({
+      success: false,
+      errorReason: REASON.invalidPaymentRequirements,
+      errorMessage: expect.any(String),
+      transaction: "",
+      network: NETWORK,
+    });
+    expect(r.ledger.replay()).toEqual([]);
+  });
+
+  test.each<[string, unknown]>([
+    ["a number", 500],
+    ["a bigint", 500n],
+    ["null", null],
+    ["nothing", undefined],
+    ["an object", { value: "500" }],
+    ["a list", ["500"]],
+  ])("an amount that is %s → invalid_payment_requirements", async (_, amount) => {
+    const r = rig();
+    const requirements = req({ amount: amount as string });
+
+    expect(await r.s.verify(pay(500n), requirements)).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.invalidPaymentRequirements,
+    });
+    expect(await r.s.settle(pay(500n), requirements)).toMatchObject({
+      success: false,
+      errorReason: REASON.invalidPaymentRequirements,
+    });
+  });
+
+  test.each<[string, bigint]>([
+    ["1", 1n],
+    ["500", 500n],
+    ["800", 800n],
+    ["99999", 99999n],
+    [String(W), W],
+  ])("an amount of %s is the price of the call: verified, settled and charged", async (amount, price) => {
+    const r = rig();
+    const d1 = send(r.chain);
+    const requirements = req({ amount });
+
+    expect(await r.s.verify(pay(price, { txid: d1 }), requirements)).toMatchObject({ isValid: true, payer: K });
+    expect(await r.s.settle(pay(price, { txid: d1 }), requirements)).toMatchObject({
+      success: true,
+      transaction: d1,
+      amount,
+      payer: K,
+    });
+    expect(vouchersIn(r.ledger)).toEqual([amount]);
+  });
+
+  test("two prices in one session are both taken: 500, then 800, then 500 and 1 again", async () => {
+    const r = rig();
+    const d1 = send(r.chain);
+
+    expect(await r.s.verify(pay(500n, { txid: d1 }), req({ amount: "500" }))).toMatchObject({ isValid: true });
+    expect(await r.s.settle(pay(500n, { txid: d1 }), req({ amount: "500" }))).toMatchObject({
+      success: true,
+      amount: "500",
+      transaction: d1,
+    });
+    expect(await r.s.verify(pay(1300n), req({ amount: "800" }))).toMatchObject({ isValid: true, payer: K });
+    expect(await r.s.settle(pay(1300n), req({ amount: "800" }))).toMatchObject({ success: true, amount: "800" });
+    expect(await r.s.settle(pay(1800n), req({ amount: "500" }))).toMatchObject({ success: true, amount: "500" });
+    expect(await r.s.settle(pay(1801n), req({ amount: "1" }))).toMatchObject({ success: true, amount: "1" });
+
+    expect(vouchersIn(r.ledger)).toEqual(["500", "1300", "1800", "1801"]);
+    expect(sessionOf(await r.s.verify(pay(1801n), req({ amount: "1" }))).cumulativeZat).toBe("1801");
+  });
+
+  test("a voucher short of its own call's price → z402_cumulative_mismatch naming cLast plus that price", async () => {
+    const r = rig();
+    await opened(r);
+    const before = r.ledger.replay();
+    const dear = req({ amount: "800" });
+
+    // 500 more than cLast is the price of the first route and 300 short of this one
+    const verdict = await r.s.verify(pay(1000n), dear);
+    expect(verdict).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.cumulativeMismatch,
+      invalidMessage: "cumulativeZat must be at least 1300",
+      payer: K,
+    });
+    expect(sessionOf(verdict).cumulativeZat).toBe("500");
+    const settled = await r.s.settle(pay(1000n), dear);
+    expect(settled).toMatchObject({
+      success: false,
+      errorReason: REASON.cumulativeMismatch,
+      errorMessage: "cumulativeZat must be at least 1300",
+      transaction: "",
+      payer: K,
+    });
+    expect(r.ledger.replay()).toEqual(before);
+
+    // The same voucher pays for a call at 500, since the price is the call's and not the session's
+    expect(await r.s.settle(pay(1000n), req())).toMatchObject({ success: true, amount: "500" });
+    // A voucher that is a replay is short of any price, the least one included
+    expect(await r.s.verify(pay(1000n), req({ amount: "1" }))).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.cumulativeMismatch,
+      invalidMessage: "cumulativeZat must be at least 1001",
+    });
+  });
+
+  test("the mismatch is judged first, so a first voucher short of its price is not a missing deposit", async () => {
+    const r = rig();
+
+    expect(await r.s.verify(pay(500n), req({ amount: "800" }))).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.cumulativeMismatch,
+      invalidMessage: "cumulativeZat must be at least 800",
+    });
+    expect(await r.s.verify(pay(800n), req({ amount: "800" }))).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.depositRequired,
+    });
+  });
+
+  test("a price is checked against the window of the configured terms", async () => {
+    const terms = { ...DEMO_TERMS, windowZat: 1000n };
+    const r = rig(undefined, { terms });
+    const extra = { ...req().extra, windowZat: "1000", termsVersion: termsVersion(terms) };
+
+    const atWindow = req({ amount: "1000", extra });
+    const pastWindow = req({ amount: "1001", extra });
+    expect(await r.s.verify(pay(1000n), atWindow)).toMatchObject({ invalidReason: REASON.depositRequired });
+    expect(await r.s.verify(pay(1001n), pastWindow)).toMatchObject({
+      invalidReason: REASON.invalidPaymentRequirements,
+    });
+    // A price under the window is taken as well
+    expect(await r.s.verify(pay(500n), req({ amount: "500", extra }))).toMatchObject({
+      invalidReason: REASON.depositRequired,
+    });
   });
 });
 
@@ -1474,7 +1640,7 @@ describe("snapshot presence", () => {
 
   test.each<[ReasonCode, () => [PaymentPayload, PaymentRequirements]]>([
     [REASON.invalidPayload, () => [paymentFor(req(), { ...voucherFor(req(), 500n), cumulativeZat: "0500" }), req()]],
-    [REASON.invalidPaymentRequirements, () => [pay(500n), req({ amount: "1000" })]],
+    [REASON.invalidPaymentRequirements, () => [pay(500n), req({ amount: "0" })]],
     [REASON.invalidX402Version, () => [{ ...pay(500n), x402Version: 1 }, req()]],
     [REASON.invalidScheme, () => [{ ...pay(500n), accepted: req({ scheme: "exact" }) }, req()]],
     [REASON.invalidNetwork, () => [{ ...pay(500n), accepted: req({ network: NETWORK_TESTNET }) }, req()]],
@@ -1624,40 +1790,69 @@ describe("unexpected failures", () => {
 });
 
 describe("advertised terms and configuration", () => {
-  test("getExtra advertises terms, payTo and termsVersion", () => {
+  test("getExtra advertises the terms and their version, and no payTo", () => {
     const { s } = rig();
 
     const extra = s.getExtra(NETWORK);
 
-    expect(extra).toEqual({
+    expect(extra).toStrictEqual({
       windowZat: "100000",
       creditRatioBps: 2500,
       creditCapZat: "200000",
       zeroConfMinExpiryBlocks: 20,
       termsVersion: TERMS_VERSION,
-      payTo: PAY_TO,
     });
+    expect(extra).not.toHaveProperty("payTo");
     expect(extra.termsVersion).toMatch(/^[0-9a-f]{16}$/);
     expect(s.getSigners(NETWORK)).toEqual([]);
   });
 
-  test("termsVersion moves with payTo, price and every term", () => {
+  test("getExtra hands out a copy, so a caller cannot change what is advertised", () => {
+    const { s } = rig();
+
+    (s.getExtra(NETWORK) as Record<string, unknown>).windowZat = "1";
+
+    expect(s.getExtra(NETWORK).windowZat).toBe("100000");
+  });
+
+  test("getExtra is the same for every payTo, since it names the rail's terms only", () => {
+    const { s } = rig();
+    const other = wire(new FakeChain().viewFor(OTHER_PAY_TO), { config: { payTo: OTHER_PAY_TO } }).s;
+
+    expect(other.getExtra(NETWORK)).toStrictEqual(s.getExtra(NETWORK));
+  });
+
+  test("termsVersion is the first 16 hex of sha256 over the tag and the terms, pinned", () => {
+    // Pinned from a shasum of the tag and the encoded terms, so it does not depend on this function
+    expect(termsVersion(DEMO_TERMS)).toBe(TERMS_VERSION);
+    expect(termsVersion(DEMO_TERMS)).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  test("termsVersion moves with every term, and with the order of keys in none", () => {
     const versions = [
-      termsVersion(PAY_TO, 500n, DEMO_TERMS),
-      termsVersion(OTHER_PAY_TO, 500n, DEMO_TERMS),
-      termsVersion(PAY_TO, 1000n, DEMO_TERMS),
-      termsVersion(PAY_TO, 500n, { ...DEMO_TERMS, windowZat: 200000n }),
-      termsVersion(PAY_TO, 500n, { ...DEMO_TERMS, creditRatioBps: 5000 }),
-      termsVersion(PAY_TO, 500n, { ...DEMO_TERMS, creditCapZat: 100000n }),
-      termsVersion(PAY_TO, 500n, { ...DEMO_TERMS, zeroConfMinExpiryBlocks: 10 }),
+      termsVersion(DEMO_TERMS),
+      termsVersion({ ...DEMO_TERMS, windowZat: 200000n }),
+      termsVersion({ ...DEMO_TERMS, creditRatioBps: 5000 }),
+      termsVersion({ ...DEMO_TERMS, creditCapZat: 100000n }),
+      termsVersion({ ...DEMO_TERMS, zeroConfMinExpiryBlocks: 10 }),
     ];
 
     expect(versions[0]).toBe(TERMS_VERSION);
     expect(new Set(versions).size).toBe(versions.length);
+    const reordered = { zeroConfMinExpiryBlocks: 20, creditCapZat: 200000n, creditRatioBps: 2500, windowZat: 100000n };
+    expect(termsVersion(reordered)).toBe(TERMS_VERSION);
+  });
+
+  test("termsVersion moves with neither payTo nor price, which it is not given", () => {
+    const a = wire(new FakeChain().viewFor(PAY_TO)).s.getExtra(NETWORK).termsVersion;
+    const b = wire(new FakeChain().viewFor(OTHER_PAY_TO), { config: { payTo: OTHER_PAY_TO } }).s.getExtra(NETWORK);
+
+    expect(b.termsVersion).toBe(a);
+    // The terms are the whole input, so the function takes nothing besides them
+    expect(termsVersion).toHaveLength(1);
   });
 
   test.each<[string, Partial<SchemeConfig>, RegExp]>([
-    ["a price of 0, under which a replayed voucher would pass", { priceZat: 0n }, /priceZat/],
     ["a payTo of another network", { payTo: `utest1${"q".repeat(60)}` }, /payTo/],
     ["a network that is not Zcash", { network: "eip155:1" as ZcashNetwork }, /network/],
     ["terms the wire cannot carry", { terms: { ...DEMO_TERMS, creditRatioBps: 10001 } }, /terms/],

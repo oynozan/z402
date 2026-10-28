@@ -27,7 +27,6 @@ export interface RuntimeOptions {
   network: ZcashNetwork;
   payTo: string;
   chain: ChainView;
-  priceZat: bigint;
   terms: Terms;
   /** JSON Lines ledger replayed at open, left out means an in-memory ledger and no file I/O */
   ledgerPath?: string;
@@ -55,7 +54,7 @@ export interface ProviderRuntime {
   stop(): void;
   /** Frees the ledger file for the next start, and does nothing the second time */
   release(): void;
-  /** What the scheme advertises for this provider, the terms with their version and the payTo */
+  /** What the scheme advertises, the rail's terms with their version, which every provider's runtime shares */
   extra(): Record<string, unknown>;
 }
 
@@ -104,7 +103,6 @@ function assemble(o: RuntimeOptions, { ledger, state, release }: OpenLedger): Pr
     config: {
       network: o.network,
       payTo: o.payTo,
-      priceZat: o.priceZat,
       terms: o.terms,
       depositWaitMs: o.depositWaitMs ?? DEFAULT_DEPOSIT_WAIT_MS,
     },

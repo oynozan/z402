@@ -73,7 +73,6 @@ async function boot(rig: Rig, over: Partial<FacilitatorOptions> = {}): Promise<F
     network: NETWORK,
     chain: rig.chainOf(OPERATOR).viewFor(OPERATOR),
     payTo: OPERATOR,
-    priceZat: 500n,
     terms: DEMO_TERMS,
     authToken: TOKEN,
     port: 0,
@@ -135,7 +134,7 @@ function locksUnder(dir: string): string[] {
     : [];
 }
 
-/** What a provider's resource server sends, with the rail's terms and the version its runtime advertises */
+/** What a provider's resource server sends, with the rail's terms and the one termsVersion every runtime advertises */
 const requirementsOf = (who: Who, extra: Record<string, unknown> = {}): PaymentRequirements => ({
   scheme: SCHEME,
   network: NETWORK,
@@ -143,7 +142,7 @@ const requirementsOf = (who: Who, extra: Record<string, unknown> = {}): PaymentR
   amount: "500",
   payTo: who.payTo,
   maxTimeoutSeconds: 60,
-  extra: { ...encodeTerms(DEMO_TERMS), termsVersion: termsVersion(who.payTo, 500n, DEMO_TERMS), ...extra },
+  extra: { ...encodeTerms(DEMO_TERMS), termsVersion: termsVersion(DEMO_TERMS), ...extra },
 });
 
 /** One declared resource, as the kit builds it from the 402 of a route */
@@ -265,7 +264,8 @@ describe("POST /discovery/resources", () => {
   test("takes the operator's token too, with the rail copied from /supported as a resource server does", async () => {
     const rig = newRig();
     const { url } = await boot(rig);
-    const { payTo: _payTo, ...extra } = (await call(url, "/supported")).json.kinds[0].extra;
+    const { extra } = (await call(url, "/supported")).json.kinds[0];
+    expect(extra).not.toHaveProperty("payTo");
 
     const res = await declare(url, TOKEN, [route(OP, { accepts: [{ ...requirementsOf(OP), extra }] })]);
 
@@ -273,11 +273,46 @@ describe("POST /discovery/resources", () => {
     expect(res.json.items[0].accepts[0]).toMatchObject({ payTo: OPERATOR, extra });
   });
 
+  test("takes a registered provider's declaration with the termsVersion that /supported shows", async () => {
+    const rig = newRig();
+    const { url } = await boot(rig);
+    const keyA = await enroll(url, A);
+    const keyB = await enroll(url, B);
+    const { extra } = (await call(url, "/supported")).json.kinds[0];
+
+    for (const [key, who] of [
+      [keyA, A],
+      [keyB, B],
+    ] as const) {
+      const res = await declare(url, key, [route(who, { accepts: [{ ...requirementsOf(who), extra }] })]);
+      expect(res.status).toBe(200);
+      expect(res.json.items[0].accepts[0]).toMatchObject({ payTo: who.payTo, extra });
+    }
+    // The value is the rail's and not any provider's, so the one the operator's runtime advertises is the one both took
+    expect(extra.termsVersion).toBe(termsVersion(DEMO_TERMS));
+  });
+
+  test("takes a registered provider's price of its own, from 1 zat to the window, and refuses the rest", async () => {
+    const rig = newRig();
+    const { url } = await boot(rig);
+    const keyB = await enroll(url, B);
+    const priced = (amount: string) => route(B, { accepts: [{ ...requirementsOf(B), amount }] });
+
+    for (const amount of ["1", "800", "100000"]) {
+      expect((await declare(url, keyB, [priced(amount)])).status, amount).toBe(200);
+    }
+    for (const amount of ["0", "100001", "0800", "8e2"]) {
+      const res = await declare(url, keyB, [priced(amount)]);
+      expect(res, amount).toMatchObject({ status: 400, json: { error: "invalid_request", index: 0 } });
+      expect(res.json.message, amount).toMatch(/^items\[0\]\.accepts\[0\]\.amount: /);
+    }
+  });
+
   test("holds a declaration to the terms the facilitator is configured with", async () => {
     const terms: Terms = { windowZat: 250000n, creditRatioBps: 1000, creditCapZat: 5n, zeroConfMinExpiryBlocks: 3 };
     const rig = newRig();
     const { url } = await boot(rig, { terms });
-    const { payTo: _payTo, ...extra } = (await call(url, "/supported")).json.kinds[0].extra;
+    const { extra } = (await call(url, "/supported")).json.kinds[0];
 
     const demo = await declare(url, TOKEN, [route(OP)]);
     expect(demo).toMatchObject({ status: 400, json: { error: "invalid_request", index: 0 } });
@@ -826,7 +861,7 @@ describe("a settled payment", () => {
       network: NETWORK,
       payTo: A.payTo,
       terms: DEMO_TERMS,
-      termsVersion: termsVersion(A.payTo, 500n, DEMO_TERMS),
+      termsVersion: termsVersion(DEMO_TERMS),
     });
     expect(payload).toEqual(sent);
     expect(requirements).toEqual(r);
@@ -1130,7 +1165,6 @@ describe("GET /supported", () => {
       network: NETWORK,
       payTo: A.payTo,
       chain: new FakeChain().viewFor(A.payTo),
-      priceZat: 500n,
       terms: DEMO_TERMS,
       onFatal: () => undefined,
       log: () => undefined,
