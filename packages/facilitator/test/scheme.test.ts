@@ -1208,6 +1208,25 @@ describe("unexpected failures", () => {
     expect(await r.s.settle(pay(500n, { txid: d1 }), req())).toMatchObject({ success: true, transaction: d1 });
   });
 
+  test("a settle whose snapshot cannot be built after its commit still reports the committed charge", async () => {
+    const r = rig();
+    const d1 = send(r.chain);
+    expect((await r.s.verify(pay(500n, { txid: d1 }), req())).isValid).toBe(true);
+    const real = r.state.depositsOf.bind(r.state);
+    let reads = 0;
+    vi.spyOn(r.state, "depositsOf").mockImplementation((key) => {
+      if (++reads === 2) throw new Error("snapshot broke");
+      return real(key);
+    });
+
+    const settled = await r.s.settle(pay(500n, { txid: d1 }), req());
+
+    expect(settled).toStrictEqual({ success: true, transaction: d1, network: NETWORK, payer: K, amount: "500" });
+    expect(r.ledger.replay().map((e) => e.t)).toEqual(["deposit", "voucher"]);
+    expect(r.log).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ message: "snapshot broke" }));
+    expect(r.onFatal).not.toHaveBeenCalled();
+  });
+
   test("a verify still waiting on the chain when the ledger fails is refused as well", async () => {
     const gate = gated();
     const r = rig(gate.wrap);
@@ -1272,6 +1291,9 @@ describe("advertised terms and configuration", () => {
     ["a payTo of another network", { payTo: `utest1${"q".repeat(60)}` }, /payTo/],
     ["a network that is not Zcash", { network: "eip155:1" as ZcashNetwork }, /network/],
     ["terms the wire cannot carry", { terms: { ...DEMO_TERMS, creditRatioBps: 10001 } }, /terms/],
+    ["a deposit wait of Infinity, which would poll forever", { depositWaitMs: Infinity }, /^depositWaitMs:/],
+    ["a deposit wait below zero", { depositWaitMs: -1 }, /^depositWaitMs:/],
+    ["a deposit wait past 60 s", { depositWaitMs: 60_001 }, /^depositWaitMs:/],
     ["a refresh wait below zero", { refreshWaitMs: -1 }, /^refreshWaitMs:/],
     ["a refresh wait past 60 s", { refreshWaitMs: 60_001 }, /^refreshWaitMs:/],
   ])("the constructor refuses %s", (_, over, field) => {

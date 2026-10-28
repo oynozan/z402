@@ -2,8 +2,9 @@
  * The x402 facilitator scheme for prepaid-voucher (design §4.3 and §4.4, protocol.md v1.1).
  *
  * verify authenticates the voucher, waits at most for one lookup of a deposit the voucher needs and
- * one refresh of the session before refusing, and never writes. settle reads only what the resolver
- * has cached and never awaits, so its decision and its commit run with no other settle in between.
+ * one refresh of the session before refusing, and never writes payment state (its refresh may record
+ * chain status). settle reads only what the resolver has cached and never awaits, so its decision and
+ * its commit run with no other settle in between.
  * decide() is the single judge of a voucher, always against the state as it is when it runs.
  */
 import type {
@@ -104,6 +105,8 @@ type Verdict =
     }
   | { ok: false; refusal: Refusal; snapshot: SessionSnapshot; needsLookup: boolean; refresh: boolean };
 
+type Accepted = Extract<Verdict, { ok: true }>;
+
 type Authenticated = { ok: true; voucher: Voucher } | { ok: false; refusal: Refusal };
 
 const FATAL_LOG = "ledger write failed — facilitator must restart";
@@ -172,6 +175,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
   async settle(payload: PaymentPayload, requirements: PaymentRequirements): Promise<SettleResponse> {
     const network = networkOf(requirements, this.#config.network);
     if (this.#poisoned) return settleRefused(POISONED_SETTLE, network);
+    let committed: { v: Voucher; verdict: Accepted };
     try {
       const auth = this.#authenticate(payload, requirements);
       if (!auth.ok) return settleRefused(auth.refusal, network);
@@ -191,19 +195,30 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
         }
         return this.#fatal(e, network);
       }
-      if (verdict.credits && v.depositTxid !== undefined) this.#resolver.forget(v.depositTxid);
-      const deposits = this.#state.depositsOf(v.sessionKey).map((d) => asOfTip(d, verdict.tip));
-      return {
-        success: true,
-        transaction: verdict.acks ? (v.depositTxid ?? "") : "",
-        network,
-        payer: v.sessionKey,
-        amount: verdict.amountZat.toString(),
-        extra: { session: this.#snapshot(v.sessionKey, v.cNew, deposits, verdict.tip) },
-      };
+      committed = { v, verdict };
     } catch (e) {
       this.#log("prepaid-voucher settle failed", e);
       return settleRefused(UNEXPECTED_SETTLE, network);
+    }
+    return this.#settled(committed.v, committed.verdict, network);
+  }
+
+  /** The reply to a committed settle, still a success when its snapshot cannot be built, since the charge is written */
+  #settled(v: Voucher, verdict: Accepted, network: Network): SettleResponse {
+    const reply: SettleResponse = {
+      success: true,
+      transaction: verdict.acks ? (v.depositTxid ?? "") : "",
+      network,
+      payer: v.sessionKey,
+      amount: verdict.amountZat.toString(),
+    };
+    try {
+      if (verdict.credits && v.depositTxid !== undefined) this.#resolver.forget(v.depositTxid);
+      const deposits = this.#state.depositsOf(v.sessionKey).map((d) => asOfTip(d, verdict.tip));
+      return { ...reply, extra: { session: this.#snapshot(v.sessionKey, v.cNew, deposits, verdict.tip) } };
+    } catch (e) {
+      this.#log("prepaid-voucher settle committed, but its snapshot failed", e);
+      return reply;
     }
   }
 
@@ -455,6 +470,7 @@ function checkedConfig(c: SchemeConfig): Required<SchemeConfig> {
   } catch (e) {
     throw new Error(`terms: ${e instanceof Error ? e.message : String(e)}`);
   }
+  waitOf("depositWaitMs", c.depositWaitMs);
   if (c.refreshWaitMs !== undefined) waitOf("refreshWaitMs", c.refreshWaitMs);
   return { ...c, terms: { ...c.terms }, refreshWaitMs: c.refreshWaitMs ?? DEFAULT_REFRESH_WAIT_MS };
 }
