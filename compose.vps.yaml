@@ -1,0 +1,282 @@
+# z402 on one VPS, on Zcash testnet, behind Caddy:
+#
+#   scripts/vps.sh up        (docker compose -f compose.vps.yaml --env-file .env.vps up -d --build, then waits)
+#
+# Caddy terminates HTTPS for the website, the facilitator, the demo API and, with the "services" profile, the four
+# starter services, and is the only container that publishes a port. There is no chain here: the facilitator reads
+# testnet deposits through a public lightwalletd (testnet.zec.rocks) with the operator's view-only keys, and the seed
+# stays on the operator's laptop. Runbook: docs/deploy-vps.md. Every setting: .env.vps.example.
+#
+# This file and compose.yaml (the private regtest stack) share nothing but the Dockerfiles. They have their own project
+# name, volumes and image names, so both can exist on one machine.
+
+name: z402-vps
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-hardened: &hardened
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  init: true
+  restart: unless-stopped
+  logging: *logging
+
+# Every Node process runs the one image that the facilitator service builds
+x-node: &node
+  <<: *hardened
+  image: z402-vps-node:local
+  pull_policy: never
+  mem_limit: 256m
+
+# What the starter services share. They reach the facilitator over the compose network, which the service kit accepts
+# on testnet; they are the operator's own provider, with its payTo and its API key
+x-service-env: &service-env
+  HOST: 0.0.0.0
+  Z402_NETWORK: testnet
+  Z402_FACILITATOR_URL: http://facilitator:4022
+  Z402_FACILITATOR_TOKEN: ${Z402_FACILITATOR_TOKEN:-}
+  Z402_PAY_TO: ${Z402_PAY_TO:-}
+
+x-service-health: &service-health
+  test: ["CMD-SHELL", "node docker/healthcheck.mjs http://127.0.0.1:$${PORT}/health"]
+  interval: 15s
+  timeout: 5s
+  retries: 3
+  start_period: 2m
+  start_interval: 3s
+
+services:
+  # The front door -------------------------------------------------------------
+
+  caddy:
+    <<: *hardened
+    build:
+      context: docker/caddy
+    image: z402-vps-caddy:local
+    pull_policy: never
+    # Binds 80 and 443 as root without any other capability
+    cap_add: [NET_BIND_SERVICE]
+    ports:
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_HTTP_PORT:-80}:80"
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_HTTPS_PORT:-443}:443"
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_HTTPS_PORT:-443}:443/udp"
+    environment:
+      Z402_DOMAIN: ${Z402_DOMAIN:-z402.net}
+      # acme, or internal for a trial on localhost (compose.vps.local.yaml)
+      Z402_TLS: ${Z402_TLS:-acme}
+      # The services' sites are part of the Caddyfile only while the profile is on
+      Z402_PROFILES: ${COMPOSE_PROFILES:-}
+      # Empty in production; ":8443" keeps the HTTPS port in the redirect from www
+      Z402_PORT_SUFFIX: ${Z402_HTTPS_PORT:+:${Z402_HTTPS_PORT}}
+    volumes:
+      # The certificates and the ACME account. Deleting it makes Caddy ask Let's Encrypt again, which rate-limits
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      default:
+        # The demo API refuses a plain http:// facilitator off regtest, so it reaches the facilitator at the public
+        # https name, which this alias keeps inside the compose network
+        aliases:
+          - facilitator.${Z402_DOMAIN:-z402.net}
+    mem_limit: 192m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+
+  # The facilitator ------------------------------------------------------------
+
+  facilitator:
+    <<: *node
+    build:
+      context: .
+      dockerfile: docker/node.Dockerfile
+    # The ledger lock records its host, so a recreated container must keep the same name to take over its own lock
+    hostname: facilitator
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        node --import tsx docker/wait-lightwalletd.mjs
+        exec node --import tsx packages/facilitator/src/main.ts
+    environment:
+      Z402_NETWORK: testnet
+      Z402_LWD_URL: ${Z402_LWD_URL:-https://testnet.zec.rocks:443}
+      # Reached only through Caddy and the compose network: no port is published
+      Z402_FACILITATOR_HOST: 0.0.0.0
+      Z402_FACILITATOR_PORT: "4022"
+      # The operator's view-only keys. They can see deposits and cannot spend; the seed is never on this server
+      Z402_PAY_TO: ${Z402_PAY_TO:-}
+      Z402_UIVK: ${Z402_UIVK:-}
+      # The operator's API key, which the demo API and the starter services present
+      Z402_FACILITATOR_TOKEN: ${Z402_FACILITATOR_TOKEN:-}
+      # POST /providers needs it. At least 32 characters, else the facilitator refuses to start
+      Z402_REGISTRATION_TOKEN: ${Z402_REGISTRATION_TOKEN:-}
+      Z402_MAX_PROVIDERS: ${Z402_MAX_PROVIDERS:-32}
+      # The operator's ledger, and the registered providers with their ledgers and the service catalog, on one volume
+      # (the image's /data is the mount point that belongs to the node user): they are backed up and restored together
+      Z402_LEDGER: /data/facilitator-ledger.testnet.jsonl
+      Z402_PROVIDERS_DIR: /data/providers.testnet
+    volumes:
+      - facilitator-data:/data
+    mem_limit: 512m
+    healthcheck:
+      # /supported is public
+      test: ["CMD", "node", "docker/healthcheck.mjs", "http://127.0.0.1:4022/supported"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      # wait-lightwalletd.mjs may wait for the public server, and the start-up checks come after it
+      start_period: 5m
+      start_interval: 3s
+
+  # The website and the demo API -----------------------------------------------
+
+  web:
+    <<: *hardened
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: https://${Z402_DOMAIN:-z402.net}
+    image: z402-vps-web:local
+    pull_policy: never
+    environment:
+      # The facilitator's public catalog routes, which the website serves at /discovery/*
+      DISCOVERY_URL: http://facilitator:4022
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    mem_limit: 512m
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "docker/healthcheck.mjs", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+      start_interval: 3s
+
+  api:
+    <<: *node
+    # Waits for the facilitator's public name to answer, which needs Caddy's certificate for it: after a first start
+    # that is a few seconds, and a restart of everything at once is covered the same way
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        node docker/wait-facilitator.mjs
+        exec node --import tsx apps/api/src/main.ts
+    environment:
+      Z402_NETWORK: testnet
+      Z402_PRICE_ZAT: ${Z402_PRICE_ZAT:-500}
+      Z402_FACILITATOR_URL: https://facilitator.${Z402_DOMAIN:-z402.net}
+      Z402_FACILITATOR_TOKEN: ${Z402_FACILITATOR_TOKEN:-}
+      Z402_PAY_TO: ${Z402_PAY_TO:-}
+      Z402_API_HOST: 0.0.0.0
+      Z402_API_PORT: "4021"
+      # Lists GET /chunk in the catalog under the name agents reach it at
+      Z402_API_PUBLIC_URL: https://api.${Z402_DOMAIN:-z402.net}
+    depends_on:
+      caddy:
+        condition: service_healthy
+      facilitator:
+        condition: service_healthy
+    healthcheck:
+      # Unpaid, /chunk answers 402 without calling the facilitator
+      test: ["CMD", "node", "docker/healthcheck.mjs", "http://127.0.0.1:4021/chunk", "402"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5m
+      start_interval: 3s
+
+  # The starter services, opt-in: COMPOSE_PROFILES=services in .env.vps ----------
+
+  # llm and embeddings call a hosted OpenAI-compatible provider, and no model runs on this server. Each service has its
+  # own name under Z402_DOMAIN, which Caddy serves while the profile is on.
+
+  llm:
+    <<: *node
+    profiles: [services]
+    command: ["node", "--import", "tsx", "services/llm/src/main.ts"]
+    environment:
+      <<: *service-env
+      PORT: "4031"
+      PUBLIC_URL: https://llm.${Z402_DOMAIN:-z402.net}
+      LLM_BASE_URL: ${Z402_LLM_BASE_URL:-}
+      LLM_API_KEY: ${Z402_LLM_API_KEY:-}
+      LLM_MODEL: ${Z402_LLM_MODEL:-}
+    mem_limit: 384m
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck: *service-health
+
+  markdown:
+    <<: *node
+    profiles: [services]
+    command: ["node", "--import", "tsx", "services/markdown/src/main.ts"]
+    environment:
+      <<: *service-env
+      PORT: "4032"
+      PUBLIC_URL: https://markdown.${Z402_DOMAIN:-z402.net}
+      # Its per-client rate limit counts the address that Caddy reports in X-Forwarded-For, not Caddy's own
+      MARKDOWN_TRUST_PROXY: uniquelocal
+    mem_limit: 768m
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck: *service-health
+
+  embeddings:
+    <<: *node
+    profiles: [services]
+    command: ["node", "--import", "tsx", "services/embeddings/src/main.ts"]
+    environment:
+      <<: *service-env
+      PORT: "4033"
+      PUBLIC_URL: https://embeddings.${Z402_DOMAIN:-z402.net}
+      EMBEDDINGS_BASE_URL: ${Z402_EMBEDDINGS_BASE_URL:-}
+      EMBEDDINGS_API_KEY: ${Z402_EMBEDDINGS_API_KEY:-}
+      EMBEDDINGS_MODEL: ${Z402_EMBEDDINGS_MODEL:-}
+    mem_limit: 256m
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck: *service-health
+
+  dropbox:
+    <<: *node
+    profiles: [services]
+    command: ["node", "--import", "tsx", "services/dropbox/src/main.ts"]
+    environment:
+      <<: *service-env
+      PORT: "4034"
+      PUBLIC_URL: https://dropbox.${Z402_DOMAIN:-z402.net}
+      DROPBOX_DIR: /data/dropbox
+      # The chain tip is the drop box's clock, from the same public server as the facilitator's
+      DROPBOX_LWD_URL: ${Z402_LWD_URL:-https://testnet.zec.rocks:443}
+    volumes:
+      - dropbox-data:/data/dropbox
+    mem_limit: 384m
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck: *service-health
+
+volumes:
+  caddy-data:
+  caddy-config:
+  facilitator-data:
+  dropbox-data:

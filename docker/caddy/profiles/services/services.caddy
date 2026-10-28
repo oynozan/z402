@@ -1,0 +1,22 @@
+# The starter services' sites, read only while COMPOSE_PROFILES is "services" (docker/caddy/Caddyfile). Each name needs
+# its own DNS record, or one wildcard record.
+
+llm.{$Z402_DOMAIN:z402.net} {
+	import site
+	reverse_proxy llm:4031
+}
+
+markdown.{$Z402_DOMAIN:z402.net} {
+	import site
+	reverse_proxy markdown:4032
+}
+
+embeddings.{$Z402_DOMAIN:z402.net} {
+	import site
+	reverse_proxy embeddings:4033
+}
+
+dropbox.{$Z402_DOMAIN:z402.net} {
+	import site
+	reverse_proxy dropbox:4034
+}

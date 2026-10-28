@@ -5,6 +5,7 @@ target/
 .secrets/
 .data/
 .env
+.env.vps
 wallets/
 *.log
 coverage/

@@ -26,6 +26,9 @@ docs
 **/.env.*
 !**/.env.example
 compose.yaml
+compose.vps.yaml
+compose.vps.local.yaml
+docker/caddy
 docker/env
 docker/test.env
 docker/test

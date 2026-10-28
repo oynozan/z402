@@ -1,0 +1,67 @@
+# The front door of compose.vps.yaml: HTTPS for the website, the facilitator, the demo API and, with the "services"
+# profile on, the four starter services. Caddy gets and renews its Let's Encrypt certificates by itself, which needs
+# ports 80 and 443 to reach this container and every name below to resolve to this server.
+#
+# The container's environment (compose.vps.yaml) is the only input:
+#   Z402_DOMAIN       the apex name, z402.net by default
+#   Z402_TLS          acme (the default) or internal, where Caddy's own CA signs every site: for a trial on localhost
+#   Z402_PORT_SUFFIX  ":8443" when the HTTPS port is published as something else than 443, so that the redirect from
+#                     www keeps it. Empty in production
+#   Z402_PROFILES     COMPOSE_PROFILES of the stack. "services" adds the sites in profiles/services/
+{
+	# Caddy's admin API stays on localhost inside the container, and only the healthcheck asks it, every 15 s, which
+	# the log has no use for
+	admin localhost:2019
+	log {
+		exclude admin.api
+	}
+}
+
+(tls_acme) {
+}
+
+(tls_internal) {
+	tls internal
+}
+
+# Every site. The cap on a request body is above the largest upload the services take (DROPBOX_MAX_BYTES, 1 MiB), so
+# raise it together with that setting. There is no access log on purpose: a voucher travels in a request header, and a
+# drop's id in the path is all it takes to fetch the drop.
+(site) {
+	import tls_{$Z402_TLS:acme}
+	request_body {
+		max_size 2MiB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+}
+
+{$Z402_DOMAIN:z402.net} {
+	import site
+	encode zstd gzip
+	reverse_proxy web:3000
+}
+
+www.{$Z402_DOMAIN:z402.net} {
+	import site
+	redir https://{$Z402_DOMAIN:z402.net}{$Z402_PORT_SUFFIX}{uri} permanent
+}
+
+# The facilitator is public on purpose: providers register here and call /verify and /settle with their API keys, and
+# the catalog is public. POST /providers needs Z402_REGISTRATION_TOKEN, which compose.vps.yaml requires.
+facilitator.{$Z402_DOMAIN:z402.net} {
+	import site
+	reverse_proxy facilitator:4022
+}
+
+api.{$Z402_DOMAIN:z402.net} {
+	import site
+	reverse_proxy api:4021
+}
+
+# The starter services. While the profile is off the pattern matches no file, so Caddy has no names to ask certificates
+# for and no route to a service that does not run.
+import /etc/caddy/profiles/{$Z402_PROFILES:none}/*.caddy
