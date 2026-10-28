@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { HTTPFacilitatorClient } from "@x402/core/server";
+import { withBazaar } from "@x402/extensions/bazaar";
 import type { SessionSnapshot } from "@z402/protocol";
 import { afterEach, expect, test } from "vitest";
 import { CLOSE_TIMEOUT_MS, paidSnapshot, PAY_TO, PAY_TO_2, startRail, type Rail } from "../src/harness.js";
@@ -67,6 +69,42 @@ test(
       expect(lines.filter((l) => l.t === "deposit").map((l) => l.txid)).toEqual(own.deposits.map((d) => d.txid));
       expect(lines.filter((l) => l.t === "voucher").at(-1)?.cumulativeZat).toBe(String(PRICES[p]! * 20));
     }
+  },
+  LONG,
+);
+
+test(
+  "the stock withBazaar client lists and searches what both providers' paid calls put in the facilitator's Bazaar",
+  async () => {
+    const r = (rail = await startRail({
+      operator: { payTo: PAY_TO, priceZat: BigInt(PRICES[0]) },
+      providers: [{ payTo: PAY_TO_2, uivk: UIVK_2, priceZat: BigInt(PRICES[1]) }],
+    }));
+    for (let round = 1; round <= 2; round++) {
+      for (const provider of r.providers) {
+        const res = await r.paidFetch(`${provider.api.url}/chunk`);
+        expect(res.status).toBe(200);
+        await res.body?.cancel();
+      }
+    }
+
+    // What any x402 agent would do, with no z402 code between it and the facilitator
+    const bazaar = withBazaar(new HTTPFacilitatorClient({ url: r.facilitator.url })).extensions.bazaar;
+    const urls = r.providers.map((p) => `${p.api.url}/chunk`).sort();
+
+    const listed = await bazaar.listResources({ type: "http" });
+    expect(listed.x402Version).toBe(2);
+    expect(listed.pagination).toEqual({ limit: 20, offset: 0, total: 2 });
+    expect(listed.items.map((i) => i.resource).sort()).toEqual(urls);
+    for (const [p, provider] of r.providers.entries()) {
+      const item = listed.items.find((i) => i.resource === `${provider.api.url}/chunk`)!;
+      expect(item.accepts[0]).toMatchObject({ payTo: provider.payTo, amount: String(PRICES[p]) });
+      expect(item).toMatchObject({ type: "http", x402Version: 2, paidCallsToday: 2 });
+    }
+
+    const found = await bazaar.search({ query: "chunk" });
+    expect(found.resources.map((i) => i.resource).sort()).toEqual(urls);
+    expect(found.pagination).toEqual({ limit: 20, cursor: null });
   },
   LONG,
 );
