@@ -7,6 +7,8 @@ const bazaar = withBazaar(new HTTPFacilitatorClient({ url: "http://127.0.0.1:403
 const { items } = await bazaar.listResources({ type: "http" });
 ```
 
+It is being retired: the facilitator hosts the Bazaar now ([multi-provider design §4.4](../../docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md)). Until compose points the website at the facilitator, its items carry the two fields the facilitator adds, `lastSeen` and `paidCallsToday` (below), so the website reads either one.
+
 It is its own process on purpose. It never holds a key, and a service that hangs, lies or dies can only fail its own probe: every request has a deadline, every failure is caught, and nothing a service sends reaches a log line unchecked. There is no `/discovery/search`, because a server that matches intents learns what every agent wants. Agents pull the list and pick on their own machine.
 
 ## Run it
@@ -51,6 +53,8 @@ An empty variable counts as unset. A problem exits 1 with a `discovery: ...` lin
 Answers carry `Access-Control-Allow-Origin: *`, and a browser preflight is answered. The two catalog endpoints send `Cache-Control: max-age=5`, and `/health` and every error send `no-store`.
 
 An item has the shape of the Bazaar's `DiscoveryResource`: `resource` (the URL from the 402), `type: "http"`, `x402Version`, `accepts`, `lastUpdated` (when its last good probe was), `description`, `mimeType`, `serviceName`, `tags`, `iconUrl` and `extensions` (the bazaar declaration and the kit's `z402: { unit, note }`, as received). The order is the order of the configuration, then the order of each service's routes.
+
+Two fields come on top, as the facilitator's Bazaar serves them. `lastSeen` is when the route last answered its probe, the same time as `lastUpdated`, so a route that stops answering, or a service that goes down or stops being ready, keeps its old one and the website shows it stale, then down. `paidCallsToday` is the service's `callsToday` from its `/health` on its first listed item and 0 on its others, so the counts of a service's items add up to its own, and it keeps the last count it was told while the service is down. A target has no `/health`, so it carries no `paidCallsToday`.
 
 A status entry is `{ serviceName, url, up, ready, latencyMs, checkedAt, callsToday, unit, priceZat }`. `url` is the public origin taken from the service's resource URLs, `unit` is what one call to its first route buys, and `callsToday` is the kit's count of paid calls since 00:00 UTC. `up` means `/health` answered 200 or 503 with a kit health, `ready` is what the service says. A service that was never reachable has `null` for everything it has not told, and one that is down keeps its name, `url`, `unit` and `priceZat` with `up: false`, `latencyMs` and `callsToday` null.
 

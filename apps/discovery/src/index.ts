@@ -6,7 +6,14 @@ import { Catalog } from "./catalog.js";
 import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_REFRESH_MS, DEFAULT_TIMEOUT_MS, type Target } from "./config.js";
 
 export { createApp, type AppOptions, type CatalogView } from "./app.js";
-export { Catalog, type CatalogOptions, type ListParams, type ServiceStatus } from "./catalog.js";
+export {
+  Catalog,
+  type CatalogOptions,
+  type ListedResource,
+  type ListParams,
+  type ListResponse,
+  type ServiceStatus,
+} from "./catalog.js";
 export { ConfigError, loadConfig, type DiscoveryConfig, type Env, type Target } from "./config.js";
 
 export interface DiscoveryOptions {

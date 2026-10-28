@@ -96,6 +96,8 @@ describe("the stock Bazaar client", () => {
       x402Version: 2,
       serviceName: "Echo",
       accepts: [{ scheme: "prepaid-voucher", network: "zcash:regtest", amount: "500", payTo: TEST_PAY_TO }],
+      lastSeen: expect.stringMatching(/Z$/),
+      paidCallsToday: 0,
     });
 
     const page = await client.extensions.bazaar.listResources({

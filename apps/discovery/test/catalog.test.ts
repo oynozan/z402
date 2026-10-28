@@ -311,6 +311,89 @@ describe("the catalog over time", () => {
   });
 });
 
+describe("what the facilitator's Bazaar adds to an item", () => {
+  test("lastSeen is when the route last answered its probe, and stays put while it does not", async () => {
+    const failing = new Set<string>();
+    const svc = mutable([{ method: "GET", path: "/a" }, { method: "GET", path: "/b" }], (path) =>
+      failing.has(path) ? (_req, res) => sendJson(res, 500, {}) : undefined,
+    );
+    const o = await origin(svc.handler);
+    const catalog = catalogOf({ services: [o.url] });
+    const before = Date.now();
+    await catalog.refresh();
+    const [a, b] = catalog.list().items;
+    expect(a?.lastSeen).toMatch(ISO);
+    expect(a?.lastSeen).toBe(a?.lastUpdated);
+    expect(Date.parse(a?.lastSeen ?? "")).toBeGreaterThanOrEqual(before);
+
+    failing.add("/b");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await catalog.refresh();
+    const [a2, b2] = catalog.list().items;
+    expect(Date.parse(a2?.lastSeen ?? "")).toBeGreaterThan(Date.parse(a?.lastSeen ?? ""));
+    expect(b2?.lastSeen).toBe(b?.lastSeen);
+  });
+
+  test("paidCallsToday puts the service's calls on its first item and 0 on the others", async () => {
+    const svc = await stack();
+    const catalog = catalogOf({ services: [svc.url] });
+    await catalog.refresh();
+    expect(catalog.list().items.map((i) => i.paidCallsToday)).toEqual([0, 0]);
+
+    const paid = await svc.paidFetch(`${svc.url}/v1/echo`, post({ text: "hi" }));
+    expect(paid.status).toBe(200);
+    await catalog.refresh();
+    expect(catalog.list().items.map((i) => i.paidCallsToday)).toEqual([1, 0]);
+  });
+
+  test("a service that goes down keeps the count it last told, and a target has none", async () => {
+    const state = { calls: 7, down: false };
+    const routes: HealthRouteSpec[] = [{ method: "GET", path: "/a" }, { method: "GET", path: "/b" }];
+    const svc = await origin((req, res) => {
+      const path = pathOf(req);
+      if (state.down) sendJson(res, 500, { error: "boom" });
+      else if (path === "/health") sendHealth(res, routes, { callsToday: state.calls });
+      else send402(res, paymentRequired(`https://svc.example${path}`));
+    });
+    const api = await origin(router({ "GET /chunk": (_req, res) => send402(res, paymentRequired("https://api.example/chunk")) }));
+    const catalog = catalogOf({ services: [svc.url], targets: [{ method: "GET", url: `${api.url}/chunk` }] });
+    const counts = () => catalog.list().items.map((i) => i.paidCallsToday);
+
+    await catalog.refresh();
+    expect(counts()).toEqual([7, 0, undefined]);
+    const target = catalog.list().items[2];
+    expect(target).not.toHaveProperty("paidCallsToday");
+    expect(target?.lastSeen).toBe(target?.lastUpdated);
+
+    state.calls = 9;
+    await catalog.refresh();
+    expect(counts()).toEqual([9, 0, undefined]);
+
+    state.down = true;
+    await catalog.refresh();
+    expect(counts()).toEqual([9, 0, undefined]);
+  });
+
+  test("a count never lands on an item another service lists first, so a service's items still add up to it", async () => {
+    const shared = (calls: number, own: string): Handler =>
+      router({
+        "GET /health": (_req, res) =>
+          sendHealth(res, [{ method: "GET", path: "/x" }, { method: "GET", path: own }], { callsToday: calls }),
+        "GET /x": (_req, res) => send402(res, paymentRequired("https://svc.example/x")),
+        [`GET ${own}`]: (_req, res) => send402(res, paymentRequired(`https://svc.example${own}`)),
+      });
+    const one = await origin(shared(3, "/y"));
+    const two = await origin(shared(5, "/z"));
+    const catalog = catalogOf({ services: [one.url, two.url] });
+    await catalog.refresh();
+    expect(catalog.list().items.map((i) => [i.resource, i.paidCallsToday])).toEqual([
+      ["https://svc.example/x", 3],
+      ["https://svc.example/y", 0],
+      ["https://svc.example/z", 5],
+    ]);
+  });
+});
+
 describe("a 402 that lies", () => {
   /** A service whose route /a can be made to declare the URL of its route /b */
   function liar() {

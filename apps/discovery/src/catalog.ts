@@ -26,6 +26,18 @@ import {
 
 export type ListParams = ListDiscoveryResourcesParams;
 
+/**
+ * An item with the two fields the facilitator's Bazaar adds, so the website reads this catalog and the facilitator's
+ * alike: lastSeen, when the route last answered its probe, and paidCallsToday, the service's count from its /health on
+ * its first listed item and 0 on its others, so the counts of a service's items add up to its own. A target has no
+ * /health, so it carries no count.
+ */
+export type ListedResource = DiscoveryResource & { lastSeen?: string; paidCallsToday?: number };
+
+export interface ListResponse extends DiscoveryResourcesResponse {
+  items: ListedResource[];
+}
+
 export interface ServiceStatus {
   serviceName: string | null;
   /** The public origin, taken from the resource URLs the service declares */
@@ -64,7 +76,7 @@ interface Slot {
   url: string;
   /** What the path of the resource URL in its 402 has to end in, for the 402 to be about this route */
   paths: readonly string[];
-  item: DiscoveryResource | undefined;
+  item: ListedResource | undefined;
   /** Why the last probe of this route failed */
   failure: string | undefined;
 }
@@ -75,6 +87,8 @@ interface ServiceState {
   status: ServiceStatus;
   /** Why the last check of the service failed */
   failure: string | undefined;
+  /** The paid calls since 00:00 UTC that its latest answering /health told, kept while it is down */
+  paidToday: number | null;
 }
 
 function emptyStatus(): ServiceStatus {
@@ -95,19 +109,21 @@ function originOf(url: string): string | null {
   return URL.canParse(url) ? new URL(url).origin : null;
 }
 
-function itemOf(route: ProbedRoute, at: Date): DiscoveryResource {
+function itemOf(route: ProbedRoute, at: Date): ListedResource {
+  const time = at.toISOString();
   return {
     resource: route.url,
     type: "http",
     x402Version: X402_VERSION,
     accepts: route.accepts,
-    lastUpdated: at.toISOString(),
+    lastUpdated: time,
     ...(route.description !== undefined && { description: route.description }),
     ...(route.mimeType !== undefined && { mimeType: route.mimeType }),
     ...(route.serviceName !== undefined && { serviceName: route.serviceName }),
     ...(route.tags !== undefined && { tags: route.tags }),
     ...(route.iconUrl !== undefined && { iconUrl: route.iconUrl }),
     ...(route.extensions !== undefined && { extensions: route.extensions }),
+    lastSeen: time,
   };
 }
 
@@ -137,14 +153,20 @@ export class Catalog {
   readonly #retryMs: number;
   readonly #log: (line: string) => void;
   readonly #stopping = new AbortController();
-  #items: DiscoveryResource[] = [];
+  #items: ListedResource[] = [];
   #running: Promise<void> | undefined;
   #complete = false;
   #started = false;
   #timer: NodeJS.Timeout | undefined;
 
   constructor(o: CatalogOptions) {
-    this.#services = o.services.map((base) => ({ base, slots: [], status: emptyStatus(), failure: undefined }));
+    this.#services = o.services.map((base) => ({
+      base,
+      slots: [],
+      status: emptyStatus(),
+      failure: undefined,
+      paidToday: null,
+    }));
     this.#targets = (o.targets ?? []).map(({ method, url }) => {
       const path = pathnameOf(url);
       const paths = path === undefined ? [] : [path];
@@ -167,7 +189,7 @@ export class Catalog {
     return this.#items.length;
   }
 
-  list(params: ListParams = {}): DiscoveryResourcesResponse {
+  list(params: ListParams = {}): ListResponse {
     const matched = this.#items.filter((item) => matches(item, params));
     const limit = whole(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
     const offset = whole(params.offset, 0, 0, Number.MAX_SAFE_INTEGER);
@@ -274,6 +296,7 @@ export class Catalog {
     const first = slots.find((slot) => slot.item !== undefined)?.item;
     s.failure = undefined;
     s.slots = slots;
+    s.paidToday = health.callsToday;
     s.status = {
       serviceName: health.service ?? first?.serviceName ?? s.status.serviceName,
       url: (first !== undefined ? originOf(first.resource) : null) ?? s.status.url,
@@ -333,18 +356,27 @@ export class Catalog {
     return false;
   }
 
-  /** The services in order, then the targets, and the first of two items for the same method and resource wins */
+  /**
+   * The services in order, then the targets, and the first of two items for the same method and resource wins. A
+   * service's count goes on the first of its items that is listed
+   */
   #rebuild(): void {
     const seen = new Set<string>();
-    const items: DiscoveryResource[] = [];
-    const slots = [...this.#services.flatMap((s) => s.slots), ...this.#targets];
-    for (const { method, item } of slots) {
-      if (item === undefined) continue;
+    const items: ListedResource[] = [];
+    const add = (method: ProbeMethod, item: ListedResource, paidCallsToday: number | null): boolean => {
       const id = `${method} ${item.resource}`;
-      if (seen.has(id)) continue;
+      if (seen.has(id)) return false;
       seen.add(id);
-      items.push(item);
+      items.push(paidCallsToday === null ? item : { ...item, paidCallsToday });
+      return true;
+    };
+    for (const s of this.#services) {
+      let count = s.paidToday;
+      for (const { method, item } of s.slots) {
+        if (item !== undefined && add(method, item, count) && count !== null) count = 0;
+      }
     }
+    for (const { method, item } of this.#targets) if (item !== undefined) add(method, item, null);
     this.#items = items;
   }
 }
