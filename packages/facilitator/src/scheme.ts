@@ -80,13 +80,15 @@ interface Voucher {
 interface Refusal {
   code: ReasonCode;
   message: string;
+  /** The real reason, for the operator's log only and never for the reply */
+  note?: string;
 }
 
 /** What the payload's depositTxid means for this voucher */
 type Presented =
   | { kind: "none" }
   | { kind: "credited" }
-  | { kind: "refused"; refusal: Refusal }
+  | { kind: "refused"; refusal: Refusal; needsLookup: boolean }
   | { kind: "usable"; record: DepositRecord }
   | { kind: "in_flight" }
   | { kind: "unusable"; refusal: Refusal; retry: boolean };
@@ -117,6 +119,9 @@ const UNEXPECTED_VERIFY: Refusal = { code: REASON.unexpectedVerifyError, message
 const UNEXPECTED_SETTLE: Refusal = { code: REASON.unexpectedSettleError, message: "the facilitator failed to settle" };
 const POISONED_VERIFY: Refusal = { code: REASON.unexpectedVerifyError, message: "the facilitator must restart" };
 const POISONED_SETTLE: Refusal = { code: REASON.unexpectedSettleError, message: "the facilitator must restart" };
+/** One answer for every found deposit a session cannot use, so none of them tells what the merchant's key sees */
+const CANNOT_CREDIT: Refusal = { code: REASON.depositMemoMismatch, message: "the deposit cannot be credited" };
+const DEAD: Refusal = { code: REASON.depositDead, message: "the deposit is dead" };
 
 export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator {
   readonly scheme = SCHEME;
@@ -161,7 +166,10 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       const v = auth.voucher;
       const verdict = await this.#prepare(v);
       if (this.#poisoned) return verifyRefused(POISONED_VERIFY);
-      if (!verdict.ok) return verifyRefused(verdict.refusal, { payer: v.sessionKey, snapshot: verdict.snapshot });
+      if (!verdict.ok) {
+        this.#note(verdict.refusal);
+        return verifyRefused(verdict.refusal, { payer: v.sessionKey, snapshot: verdict.snapshot });
+      }
       if (verdict.lookAgain && v.depositTxid !== undefined) {
         this.#resolver.startBackground(v.depositTxid, this.#config.depositWaitMs);
       }
@@ -183,6 +191,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       // Nothing in settle awaits, so no other settle can commit between this decision and the write
       const verdict = this.#decide(v);
       if (!verdict.ok) {
+        this.#note(verdict.refusal);
         return settleRefused(verdict.refusal, network, { payer: v.sessionKey, snapshot: verdict.snapshot });
       }
       try {
@@ -310,7 +319,9 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       const message = `cumulativeZat must be at least ${cLast + priceZat}`;
       return refused({ code: REASON.cumulativeMismatch, message }, snapshot);
     }
-    if (presented.kind === "refused") return refused(presented.refusal, snapshot);
+    if (presented.kind === "refused") {
+      return refused(presented.refusal, snapshot, { needsLookup: presented.needsLookup, refresh: false });
+    }
     if (check === "ok") {
       const events: LedgerEvent[] = presented.kind === "usable" ? [depositEvent(presented.record)] : [];
       events.push({ t: "voucher", sessionKey: v.sessionKey, cumulativeZat: v.cumulativeZat });
@@ -346,22 +357,28 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     if (txid === undefined) return { kind: "none" };
     const record = this.#state.deposit(txid);
     if (record !== undefined && record.sessionKey !== v.sessionKey) {
-      return { kind: "refused", refusal: { code: REASON.depositOtherSession, message: "credited to another session" } };
+      const refusal = { ...CANNOT_CREDIT, note: `the presented deposit ${txid} is credited to another session` };
+      // Read from the chain when an uncredited txid would be, so the answer time tells nothing either
+      return { kind: "refused", refusal, needsLookup: known?.kind !== "found" };
     }
     if (record !== undefined) {
       if (asOfTip(record, tip).status !== "dead") return { kind: "credited" };
-      return { kind: "refused", refusal: { code: REASON.depositDead, message: "the deposit is dead" } };
+      return { kind: "refused", refusal: DEAD, needsLookup: false };
     }
 
     if (known?.kind === "found") {
       const e = evaluateDeposit(known.inspection, v.sessionKey, this.#config.terms, tip, known.tip);
-      if (!e.ok) return unusable(e.code, "the deposit cannot be credited", false);
+      if (!e.ok) return unusable(e.code, CANNOT_CREDIT.message, false);
       return { kind: "usable", record: creditedRecord(txid, v.sessionKey, e, known.tip) };
     }
     if (this.#resolver.inFlight(txid)) return { kind: "in_flight" };
     if (known?.kind === "not_found") return unusable(REASON.depositNotFound, "the chain has no such tx", true);
     // A lookup that rejected unexpectedly or aged out leaves no result, which is as retryable as an outage
     return unusable(REASON.chainUnavailable, known === undefined ? "not looked up" : "the chain is unreadable", true);
+  }
+
+  #note(r: Refusal): void {
+    if (r.note !== undefined) this.#log(r.note);
   }
 
   #snapshot(sessionKey: string, cumulativeZat: bigint, deposits: DepositRecord[], tip: number): SessionSnapshot {

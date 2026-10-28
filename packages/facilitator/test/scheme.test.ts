@@ -495,30 +495,64 @@ describe("lazy crediting", () => {
 });
 
 describe("deposits", () => {
-  test("deposit owned by another session → deposit_other_session", async () => {
+  test("deposit owned by another session → memo_mismatch, as for any found deposit it cannot use", async () => {
     const r = rig();
     const d1 = await opened(r);
 
     const verdict = await r.s.verify(pay(500n, { txid: d1, seed: OTHER_SEED }), req());
     expect(verdict).toMatchObject({
       isValid: false,
-      invalidReason: REASON.depositOtherSession,
+      invalidReason: REASON.depositMemoMismatch,
+      invalidMessage: "the deposit cannot be credited",
       payer: OTHER_SESSION_KEY,
     });
     expect(sessionOf(verdict)).toMatchObject({ sessionKey: OTHER_SESSION_KEY, limitZat: "0", deposits: [] });
     expect(await r.s.settle(pay(500n, { txid: d1, seed: OTHER_SEED }), req())).toMatchObject({
       success: false,
-      errorReason: REASON.depositOtherSession,
+      errorReason: REASON.depositMemoMismatch,
+      errorMessage: "the deposit cannot be credited",
       payer: OTHER_SESSION_KEY,
     });
+    // The operator still learns why, from the log alone
+    expect(r.log).toHaveBeenCalledWith(expect.stringContaining("credited to another session"));
 
     const own = send(r.chain, { memo: `${OTHER_SESSION_KEY}:1` });
     expect((await r.s.verify(pay(500n, { txid: own, seed: OTHER_SEED }), req())).isValid).toBe(true);
     expect(await r.s.settle(pay(500n, { txid: own, seed: OTHER_SEED }), req())).toMatchObject({ success: true });
     expect(await r.s.verify(pay(1000n, { txid: d1, seed: OTHER_SEED }), req())).toMatchObject({
       isValid: false,
-      invalidReason: REASON.depositOtherSession,
+      invalidReason: REASON.depositMemoMismatch,
     });
+    expect(creditedTxids(r.ledger)).toEqual([d1, own]);
+  });
+
+  test("a deposit credited elsewhere, one with another memo and one to another address answer alike", async () => {
+    const r = rig();
+    const elsewhere = await opened(r);
+    const otherMemo = send(r.chain, { memo: `${K}:2` });
+    const otherAddress = send(r.chain, { to: OTHER_PAY_TO, memo: `${OTHER_SESSION_KEY}:1` });
+    const inspect = vi.spyOn(r.view, "inspect");
+
+    /** What a fresh session sees for a txid, and how many chain reads that took */
+    const probe = async (txid: string) => {
+      const before = inspect.mock.calls.length;
+      const verdict = await r.s.verify(pay(500n, { txid, seed: OTHER_SEED }), req());
+      const settled = await r.s.settle(pay(500n, { txid, seed: OTHER_SEED }), req());
+      return {
+        verify: [verdict.invalidReason, verdict.invalidMessage],
+        settle: [settled.errorReason, settled.errorMessage],
+        reads: inspect.mock.calls.length - before,
+      };
+    };
+    const alike = { verify: [REASON.depositMemoMismatch, "the deposit cannot be credited"] };
+
+    for (const txid of [elsewhere, otherMemo, otherAddress]) {
+      expect(await probe(txid)).toEqual({ ...alike, settle: alike.verify, reads: 1 });
+    }
+    // Seen again within the cache, none of them costs a read
+    for (const txid of [elsewhere, otherMemo, otherAddress]) {
+      expect(await probe(txid)).toEqual({ ...alike, settle: alike.verify, reads: 0 });
+    }
   });
 
   test("re-presented credited txid is acked, not re-credited", async () => {
@@ -560,7 +594,7 @@ describe("deposits", () => {
 
   test.each<[string, ReasonCode, (chain: FakeChain) => string]>([
     ["a transparent part", REASON.depositTransparent, (chain) => send(chain, { hasTransparent: true })],
-    ["no output to payTo", REASON.depositNotToMerchant, (chain) => send(chain, { to: OTHER_PAY_TO })],
+    ["no output to payTo", REASON.depositMemoMismatch, (chain) => send(chain, { to: OTHER_PAY_TO })],
     ["another session's memo", REASON.depositMemoMismatch, (chain) => send(chain, { memo: `${OTHER_SESSION_KEY}:1` })],
     ["no memo", REASON.depositMemoMismatch, (chain) => send(chain, { memo: null })],
   ])("a found deposit with %s → the evaluation's code", async (_, code, make) => {
@@ -1050,7 +1084,7 @@ const REFUSALS: Array<[ReasonCode, Scenario]> = [
     },
   ],
   [
-    REASON.depositOtherSession,
+    REASON.depositMemoMismatch,
     async (r) => {
       const d1 = await opened(r);
       return { payer: OTHER_SESSION_KEY, responses: await both(r, pay(500n, { txid: d1, seed: OTHER_SEED })) };
@@ -1080,7 +1114,7 @@ const REFUSALS: Array<[ReasonCode, Scenario]> = [
     async (r) => ({ payer: K, responses: await both(r, pay(500n, { txid: send(r.chain, { hasTransparent: true }) })) }),
   ],
   [
-    REASON.depositNotToMerchant,
+    REASON.depositMemoMismatch,
     async (r) => ({ payer: K, responses: await both(r, pay(500n, { txid: send(r.chain, { to: OTHER_PAY_TO }) })) }),
   ],
   [

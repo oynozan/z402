@@ -35,7 +35,8 @@ export function evaluateDeposit(
   referenceTip = tip,
 ): Evaluation {
   if (insp.hasTransparent) return { ok: false, code: REASON.depositTransparent };
-  if (insp.outputs.length === 0) return { ok: false, code: REASON.depositNotToMerchant };
+  // Answered like a wrong memo, so the code never tells whether a transaction pays the merchant
+  if (insp.outputs.length === 0) return { ok: false, code: REASON.depositMemoMismatch };
 
   const matching = insp.outputs.filter(
     (out) => out.memo !== null && parseDepositMemo(out.memo)?.sessionKey === sessionKey,

@@ -50,12 +50,12 @@ describe("evaluateDeposit refusals", () => {
     });
   });
 
-  test("no outputs to payTo", () => {
-    expect(ev({ outputs: [] })).toEqual({ ok: false, code: "z402_deposit_not_to_merchant" });
+  test("no outputs to payTo answers memo_mismatch, so the code never tells whether a tx pays the merchant", () => {
+    expect(ev({ outputs: [] })).toEqual({ ok: false, code: "z402_deposit_memo_mismatch" });
   });
 
   test("no outputs to payTo is reported before expiry", () => {
-    expect(ev({ outputs: [], expiryHeight: tip })).toEqual({ ok: false, code: "z402_deposit_not_to_merchant" });
+    expect(ev({ outputs: [], expiryHeight: tip })).toEqual({ ok: false, code: "z402_deposit_memo_mismatch" });
   });
 
   test.each([`${OTHER}:1`, `${K}:01`, `${K}:1 `, `${K.toUpperCase()}:1`, K, null])(

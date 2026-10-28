@@ -28,11 +28,7 @@ export type Evaluation =
     }
   | {
       ok: false;
-      code:
-        | typeof REASON.depositTransparent
-        | typeof REASON.depositNotToMerchant
-        | typeof REASON.depositMemoMismatch
-        | typeof REASON.depositDead;
+      code: typeof REASON.depositTransparent | typeof REASON.depositMemoMismatch | typeof REASON.depositDead;
     };
 
 /** A dead deposit is re-inspected for this many blocks after it died */
