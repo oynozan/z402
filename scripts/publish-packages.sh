@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Publishes the five @z402-net packages to npm: protocol, lightwalletd, server, client, service-kit.
 #
-#   pnpm run publish:packages -- --dry-run     everything below, but nothing is published
-#   pnpm run publish:packages -- --otp=123456  publish, with a one-time password
-#   pnpm run publish:packages                  publish; npm asks for the one-time password when it needs one
+#   pnpm run publish:packages --dry-run     everything below, but nothing is published
+#   pnpm run publish:packages --otp=123456  publish, with a one-time password
+#   pnpm run publish:packages               publish; npm asks for the one-time password when it needs one
 #
-# Every argument goes to `pnpm publish`. Log in first with `npm login`; this script never reads or prints a token.
+# Every argument goes to `pnpm publish` (leading `--` arguments are dropped, since `pnpm run script -- args` passes them on). Log in first with `npm login`; this script never reads or prints a token.
 #
 # 1. Refuses to run while the packages, the root package.json or the lockfile have uncommitted changes, so only
 #    committed code is published.
@@ -18,6 +18,10 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+while [ "${1:-}" = "--" ]; do
+  shift
+done
 
 PACKAGES=(protocol lightwalletd server client service-kit)
 FILTER="./packages/{protocol,lightwalletd,server,client,service-kit}"
@@ -81,5 +85,5 @@ for p in "${PACKAGES[@]}"; do
 done
 rm -rf "$tmp"
 
-echo "==> 4/4 Publishing"
+echo "==> 4/4 Publishing (pnpm publish --access public --no-git-checks $*)"
 pnpm -r --filter "$FILTER" publish --access public --no-git-checks "$@"
