@@ -129,6 +129,21 @@ Hence:
 `wrapFetchWithPayment` client paying through `PrepaidVoucherScheme` + `MockWallet`, so every service test makes real
 paid calls in-process.
 
+### 3.6 Hardening rules in the kit (2026-10-28)
+
+- Paid paths are matched in one canonical spelling. A spelling the x402 middleware would fold into a paid route but
+  Express would not route (`//v1/generate`, `/v1/%67enerate`, a trailing slash) is refused `404 not_found` before
+  payment.
+- A copy of a voucher that is already being verified or handled is refused `409 payment_in_flight`, so one payment
+  runs the paid handler once.
+- The HTTP server takes at most 15 s for the request headers and 30 s for the whole request, so a slow upload cannot
+  hold a buffered body for minutes.
+- At start a service waits for a facilitator that does not answer yet (`Z402_FACILITATOR_WAIT_MS`, default 120000,
+  retry every 2 s); a facilitator that answers wrongly is a configuration error and fails at once.
+- `loadDotEnv` reads the service's own `services/<name>/.env`; a variable already in the environment (compose, the
+  shell) wins.
+- Text that is not valid Unicode (a lone surrogate) is refused before payment wherever it would reach a provider.
+
 ## 4. Starter services
 
 All charge `Z402_PRICE_ZAT` per call. A failed call (4xx/5xx) is never charged.
@@ -168,8 +183,10 @@ All charge `Z402_PRICE_ZAT` per call. A failed call (4xx/5xx) is never charged.
 
 - `POST /v1/embeddings` `{ "input": string | string[] }` (≤ 64 non-empty strings) →
   `{ object: "list", model, dimensions, data: [{ object: "embedding", index, embedding }], usage: { prompt_tokens, total_tokens } }`.
-- Cap: about 1,000 tokens per call, enforced before payment by length: total input ≤ `EMBEDDINGS_MAX_CHARS` (4000).
-  The provider's `usage.prompt_tokens` is reported back; a call is never failed after payment for being long.
+- Cap: about 1,000 tokens per call, enforced before payment by length: total input ≤ `EMBEDDINGS_MAX_CHARS` (4000),
+  and each string ≤ `EMBEDDINGS_MAX_INPUT_CHARS` (unlimited by default; compose sets 2000 for its local model, whose
+  window is 2048 tokens per string). The provider's `usage.prompt_tokens` is reported back; a call is never failed
+  after payment for being long.
 - Env: `EMBEDDINGS_BASE_URL` (`http://127.0.0.1:11434/v1`), `EMBEDDINGS_API_KEY`, `EMBEDDINGS_MODEL`
   (`nomic-embed-text`). Ready when the provider lists the model.
 
@@ -185,6 +202,10 @@ All charge `Z402_PRICE_ZAT` per call. A failed call (4xx/5xx) is never charged.
 - The upload is kept, and a hold applied, only in `onDelivered.ok`. Tip from lightwalletd (`DROPBOX_LWD_URL`), swept
   every 10 s; a drop is gone once `tip ≥ expiresAtHeight`. Disk store `DROPBOX_DIR`, total cap
   `DROPBOX_MAX_TOTAL_BYTES` (256 MiB, `507` when full).
+- Unpaid upload attempts are rate-limited per client (`DROPBOX_RATE_PER_MIN`, 30, `429 rate_limited`), compressed
+  request bodies are refused (`415 unsupported_encoding`), and a malformed id is `400 bad_request`. Downloads carry
+  `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`. After a chain reset with the directory kept,
+  every expiry is pulled back to at most the current tip + `DROPBOX_MAX_HOLD_BLOCKS`.
 - Note: only client-side-encrypted blobs; size and time are capped.
 
 ## 5. Discovery (`apps/discovery`, 4030)
@@ -200,7 +221,8 @@ All charge `Z402_PRICE_ZAT` per call. A failed call (4xx/5xx) is never charged.
 - `GET /discovery/resources?type&payTo&scheme&network&extensions&limit&offset` → `{ x402Version: 2, items, pagination:
   { limit, offset, total } }` (limit default 100, max 1000). `GET /discovery/status` → per service
   `{ serviceName, url, up, ready, latencyMs, checkedAt, callsToday, unit, priceZat }`. `GET /health`. CORS `*` on GET.
-- One failed probe never crashes the process (every await is caught).
+- One failed probe never crashes the process (every await is caught). Probes stay under the service's own path, an
+  item whose 402 names another route's URL is dropped, and listed text is sanitised (no control or bidi characters).
 
 ## 6. Website (`apps/web`)
 
@@ -215,4 +237,6 @@ decorative icons.
 `docker compose up` brings up, in order: Zebra (regtest) → chain init (2 blocks) → Zallet init (own marker) → Zallet
 and Zaino → agent funding → block clock; keygen (merchant keys + public pay-to + facilitator token) → facilitator →
 api, services, discovery, web; two small llama.cpp servers (chat and embeddings, models fetched on first start) back
-llm and embeddings unless a service's own `.env` points at a hosted provider. Details in `docs/deploy.md`.
+llm and embeddings unless a service's own `.env` points at a hosted provider. On demand: `docker compose run --rm
+agent` (the demo loop on `/chunk`), `docker compose run --rm discover` (the catalog, no wallet) and `docker compose run
+--rm smoke` (one real paid call on every starter service, `apps/smoke`). Details in `docs/deploy.md`.
