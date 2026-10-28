@@ -24,7 +24,7 @@ export class DepositResolver {
   constructor(o: {
     chain: ChainView;
     maxConcurrent?: number;
-    /** Callers that may wait for a slot, past which a lookup is answered unavailable at once */
+    /** Lookups waiting for a slot, past which a new one is answered unavailable at once */
     maxQueued?: number;
     pollMs?: number;
     negativeTtlMs?: number;
@@ -45,7 +45,7 @@ export class DepositResolver {
     this.#log = o.log ?? ((msg, err) => console.error(msg, err));
   }
 
-  /** Settles within the longest budget in use plus one inspect and one tip, and joins a flight already under way */
+  /** Joins a flight under way, which starts no read past its budget, though its wait for a slot can outlast it */
   lookup(txid: string, budgetMs: number): Promise<Lookup> {
     const running = this.#flights.get(txid);
     if (running !== undefined) return running;
