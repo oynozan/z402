@@ -41,7 +41,7 @@ sequenceDiagram
 ## What you need
 
 - **Node.js 22 or later.**
-- **The z402 repository.** `@z402-net/server` and `@z402-net/protocol` are packages of its pnpm workspace and are not published to npm yet, so a server that uses them is a package in the same workspace, like the ones under `apps/` and `services/`.
+- **The z402 repository, for its scripts.** `scripts/merchant-keygen.mjs` makes your address and runs `zdecrypt`, which the repository builds with a Rust toolchain. `scripts/register-provider.mjs` registers you, and you can make the same call by hand. The server itself installs from npm, so it can live in any project.
 - **A facilitator.** You need its URL, and its registration token if the operator asks for one. The demo stack's facilitator listens on `http://127.0.0.1:4022` after `scripts/demo.sh up`.
 - **A public address for your server**, once you go live. Locally, `http://127.0.0.1` is enough.
 
@@ -196,40 +196,28 @@ An unknown key, or one that was rotated out, gets `401` with `WWW-Authenticate: 
 
 ## Add payment to your server
 
-Create a package for the server, for example `apps/my-api`. Pin the x402 packages to exactly `2.28.0`, the version the protocol was written against.
+Install the packages in your server's project, or in a new folder for this example. Pin the x402 packages to exactly `2.28.0`, the version the protocol was written against. `@z402-net/server` takes `@x402/core` as a peer at that version and installs `@z402-net/protocol` with it. The code below imports from `@z402-net/protocol` as well, which is why the first line names it. The second adds the Express middleware, the Bazaar extension and Express itself.
 
-```json title="apps/my-api/package.json"
-{
-  "name": "@z402/my-api",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "start": "tsx main.ts"
-  },
-  "dependencies": {
-    "@x402/core": "2.28.0",
-    "@x402/express": "2.28.0",
-    "@x402/extensions": "2.28.0",
-    "@z402-net/protocol": "workspace:*",
-    "@z402-net/server": "workspace:*",
-    "express": "5.3.0"
-  },
-  "devDependencies": {
-    "@types/express": "5.0.6"
-  }
-}
+```bash
+npm install --save-exact @z402-net/server @z402-net/protocol @x402/core@2.28.0
+npm install --save-exact @x402/express@2.28.0 @x402/extensions@2.28.0 express@5.3.0
+npm install --save-dev --save-exact @types/express@5.0.6 @types/node tsx typescript
 ```
 
-<Callout type="note">
+The files below are TypeScript in ES modules, so `package.json` needs `"type": "module"`. Run them with `npx tsx main.ts` on Node.js 22 or later. This `tsconfig.json` lets `npx tsc --noEmit` check them:
 
-`@z402-net/server` and `@z402-net/protocol` are not published to npm yet. Until they are, depend on them from the z402 monorepo with `"workspace:*"`, as above, and run with `tsx` on Node 22 or later.
-
-</Callout>
-
-```json title="apps/my-api/tsconfig.json"
+```json title="tsconfig.json"
 {
-  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
   "include": ["*.ts"]
 }
 ```
@@ -468,7 +456,7 @@ Only a failure that nothing before payment could predict, such as an upstream th
 
 ### Side effects after delivery
 
-Do nothing that cannot be undone until the call is paid and delivered. The middleware settles after your handler, and turns a refused settlement into a `402`, so a `2xx` at the end of the response is the only sign that the call was paid. `onDelivered` from `@z402-net/service-kit` runs `ok` or `failed`, exactly one of them, once the response is over. Add `@z402-net/service-kit` to your dependencies as `workspace:*` to use it.
+Do nothing that cannot be undone until the call is paid and delivered. The middleware settles after your handler, and turns a refused settlement into a `402`, so a `2xx` at the end of the response is the only sign that the call was paid. `onDelivered` from `@z402-net/service-kit` runs `ok` or `failed`, exactly one of them, once the response is over. To use it, install the kit with `npm install --save-exact @z402-net/service-kit`.
 
 ```ts
 import { onDelivered } from "@z402-net/service-kit";
@@ -634,13 +622,15 @@ main().catch((e: unknown) => {
 
 ### Run it and look at the listing
 
+Run it from the folder that holds `main.ts`, with the two `.secrets` paths pointing at the files you made earlier:
+
 ```bash
 export Z402_FACILITATOR_URL=http://127.0.0.1:4022
 export Z402_FACILITATOR_TOKEN="$(cat .secrets/provider-key)"
 export Z402_PAY_TO="$(jq -r .orchardOnlyAddress .secrets/my-api.view.json)"
 export PUBLIC_URL=http://127.0.0.1:4040
 
-pnpm --filter @z402/my-api start
+npx tsx main.ts
 ```
 
 An unpaid call gets the offer. A bad body is refused at once, with no voucher involved:

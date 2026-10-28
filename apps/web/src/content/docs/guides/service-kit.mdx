@@ -16,12 +16,6 @@ export const meta = {
 
 To add payment to an existing Express API by hand instead, read [Sell an API](/docs/guides/sell-an-api).
 
-<Callout type="note" title="A workspace package">
-
-`@z402-net/service-kit` is a package of the z402 workspace, like the services under `services/`, and it is not published to npm yet. Build your service as a package in the same workspace.
-
-</Callout>
-
 ## How a call passes through the kit
 
 ```mermaid
@@ -98,47 +92,45 @@ It shows each part of the kit that matters: checks before payment, a side effect
 
 ### Create the package
 
-Put the service in `services/notes`. The package follows the starter services.
+Make a folder for the service, `notes` here, and install the kit from npm. One install brings Express, the x402 middleware and `@z402-net/server`, each at the exact version the kit was built with. The service imports `express` itself, so the line names it.
 
-```json title="services/notes/package.json"
+```bash
+npm install --save-exact @z402-net/service-kit express@5.3.0
+npm install --save-dev --save-exact @types/express@5.0.6 @types/node tsx typescript
+```
+
+The service is TypeScript in ES modules for Node.js 22 or later. Add `type` and the scripts to its `package.json`. `npm test` runs the tests of [Test it](#test-it), which need the z402 repository.
+
+```json title="package.json"
 {
-  "name": "@z402/service-notes",
-  "version": "0.0.0",
-  "private": true,
   "type": "module",
   "scripts": {
     "start": "tsx src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@z402-net/service-kit": "workspace:*",
-    "express": "5.3.0"
-  },
-  "devDependencies": {
-    "@types/express": "5.0.6"
   }
 }
 ```
 
-```json title="services/notes/tsconfig.json"
+```json title="tsconfig.json"
 {
-  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
   "include": ["src", "test"]
 }
 ```
 
-Run `pnpm install` in the repository root so that the workspace links the new package.
-
-<Callout type="note">
-
-`@z402-net/service-kit` is not published to npm yet. Until it is, depend on it from the z402 monorepo with `"workspace:*"`, as above, and run with `tsx` on Node 22 or later.
-
-</Callout>
-
 ### Write the routes and the handlers
 
-```ts title="services/notes/src/service.ts"
+```ts title="src/service.ts"
 import { randomBytes } from "node:crypto";
 import { createPaidService, onDelivered, type PaidRoute, type ServiceEnv } from "@z402-net/service-kit";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
@@ -292,7 +284,7 @@ What to notice:
 
 ### Write the entry point
 
-```ts title="services/notes/src/main.ts"
+```ts title="src/main.ts"
 import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402-net/service-kit";
 import { createNotesService } from "./service.js";
 
@@ -327,7 +319,7 @@ runMain("notes", async () => {
 
 Register an address and get an API key first, as in [Sell an API](/docs/guides/sell-an-api#register-with-the-facilitator). Then give the service its settings:
 
-```bash title="services/notes/.env"
+```bash title=".env"
 Z402_NETWORK=regtest
 Z402_FACILITATOR_URL=http://127.0.0.1:4022
 Z402_FACILITATOR_TOKEN_FILE=/absolute/path/to/.secrets/provider-key
@@ -336,7 +328,7 @@ PUBLIC_URL=http://127.0.0.1:4040
 ```
 
 ```bash
-pnpm --filter @z402/service-notes start
+npm start
 ```
 
 ```text
@@ -422,11 +414,11 @@ The `z402` extension carries the billing unit and the note. The `bazaar` extensi
 
 <Callout type="note" title="In the z402 repository only">
 
-`@z402-net/service-kit/testing` is available inside the z402 repository only. It runs the repository's own facilitator and fake chain, `@z402/facilitator` and `@z402/testkit`, which are not published, so the package leaves this entry point out when it is published. Write the test in a service that is a package of the z402 workspace, as this one is.
+`@z402-net/service-kit/testing` is available inside the z402 repository only. It runs the repository's own facilitator and fake chain, `@z402/facilitator` and `@z402/testkit`, which are not published, so the published package leaves this entry point out. To run this test, make the service a package of the z402 workspace, such as `services/notes`, and depend on the kit there as `"@z402-net/service-kit": "workspace:*"`, as the starter services do.
 
 </Callout>
 
-```ts title="services/notes/test/service.test.ts"
+```ts title="test/service.test.ts"
 import { declarationRefusal, railOf, startTestStack, TEST_PAY_TO, type TestStack } from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createNotesService, type NotesService } from "../src/service.js";
@@ -514,8 +506,8 @@ describe("short notes", () => {
 ```
 
 ```bash
-pnpm --filter @z402/service-notes test
-pnpm --filter @z402/service-notes typecheck
+npm test
+npm run typecheck
 ```
 
 What each test proves:

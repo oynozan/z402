@@ -9,13 +9,7 @@ export const meta = {
 npm install --save-exact @z402-net/server @z402-net/protocol @x402/core@2.28.0
 ```
 
-The package has one entry point, `@z402-net/server`. It depends on `@z402-net/protocol`, which is installed with it, and takes `@x402/core` as a peer dependency at exactly 2.28.0, so you install that yourself. The example below imports `NETWORK_REGTEST` from `@z402-net/protocol` as well, which is why the line names it.
-
-<Callout type="note">
-
-`@z402-net/server` and `@z402-net/protocol` are not published to npm yet. Until they are, depend on them from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
-
-</Callout>
+The package needs Node.js 22 or later and has one entry point, `@z402-net/server`. It depends on `@z402-net/protocol`, which is installed with it, and takes `@x402/core` as a peer dependency at exactly 2.28.0, so you install that yourself. The example below imports `NETWORK_REGTEST` from `@z402-net/protocol` as well, which is why the line names it.
 
 | Export | Kind | What it is |
 | --- | --- | --- |

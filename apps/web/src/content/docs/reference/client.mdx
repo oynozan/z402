@@ -11,13 +11,7 @@ export const meta = {
 npm install --save-exact @z402-net/client @z402-net/lightwalletd @x402/fetch@2.28.0 @x402/core@2.28.0
 ```
 
-<Callout type="note">
-
-`@z402-net/client` and `@z402-net/lightwalletd` are not published to npm yet. Until they are, depend on them from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
-
-</Callout>
-
-`@z402-net/client` is an ES module. It depends on `@z402-net/protocol`, which is installed with it, and it takes `@x402/core` as a peer dependency at exactly 2.28.0, so you install that yourself. It has no dependency on `@x402/fetch`: install that yourself for `x402Client` and `wrapFetchWithPayment`. The package needs no gRPC or wallet library. It reaches the chain through an object you give it, such as the client from `@z402-net/lightwalletd`, and Zallet through `fetch`. It also re-exports the seams that a wallet or a chain source of your own implements, so you need no `@z402-net/protocol` import for them.
+`@z402-net/client` is an ES module for Node.js 22 or later. It depends on `@z402-net/protocol`, which is installed with it, and it takes `@x402/core` as a peer dependency at exactly 2.28.0, so you install that yourself. It has no dependency on `@x402/fetch`: install that yourself for `x402Client` and `wrapFetchWithPayment`. The package needs no gRPC or wallet library. It reaches the chain through an object you give it, such as the client from `@z402-net/lightwalletd`, and Zallet through `fetch`. It also re-exports the seams that a wallet or a chain source of your own implements, so you need no `@z402-net/protocol` import for them.
 
 ```ts
 import {
