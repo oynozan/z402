@@ -123,7 +123,8 @@ export function commit(ledger: Ledger, state: FacilitatorState, events: LedgerEv
   try {
     state.check(events);
   } catch (e) {
-    throw new LedgerRefusal(`the ledger refused the batch: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new LedgerRefusal(`the ledger refused the batch: ${reason}`, { cause: e });
   }
   ledger.appendSync(events);
   for (const e of events) state.apply(e);

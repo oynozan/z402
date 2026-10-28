@@ -234,7 +234,9 @@ describe("Ledger after a failed write", () => {
       }
       throw new Error("expected the append to be refused");
     })();
-    expect(refused.message).toBe("the ledger refuses writes after a failed write; restart the facilitator to replay it");
+    expect(refused.message).toBe(
+      "the ledger refuses writes after a failed write; restart the facilitator to replay it",
+    );
     expect(refused.cause).toMatchObject({ code: "EIO" });
     expect(refused).not.toBeInstanceOf(LedgerRefusal);
     expect(vi.mocked(appendFileSync).mock.calls.length).toBe(writes);

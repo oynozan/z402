@@ -92,8 +92,8 @@ describe("lockLedger", () => {
     writeLock(holder({ host: "facilitator-elsewhere" }));
     const attempt = () => lock();
     expect(attempt).toThrow(
-      `ledgerPath: ${ledger()} is in use by pid ${process.pid} on facilitator-elsewhere since 2026-10-28T00:00:00.000Z; ` +
-        `stop that facilitator, or delete ${lockFile()} if none is running`,
+      `ledgerPath: ${ledger()} is in use by pid ${process.pid} on facilitator-elsewhere ` +
+        `since 2026-10-28T00:00:00.000Z; stop that facilitator, or delete ${lockFile()} if none is running`,
     );
     expect(readLock()).toEqual(holder({ host: "facilitator-elsewhere" }));
   });

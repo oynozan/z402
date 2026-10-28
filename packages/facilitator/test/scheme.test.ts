@@ -890,7 +890,10 @@ describe("a cached definitive failure", () => {
     await r.watcher.pollNow();
     expect(r.state.deposit(d1)?.status).toBe("orphaned");
 
-    expect(await r.s.verify(pay(1000n), req())).toMatchObject({ isValid: false, invalidReason: REASON.depositRequired });
+    expect(await r.s.verify(pay(1000n), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.depositRequired,
+    });
   });
 });
 

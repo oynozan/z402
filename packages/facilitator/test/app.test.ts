@@ -906,7 +906,7 @@ describe("startFacilitator", () => {
     await expect(boot({ ledgerPath })).resolves.toMatchObject({ url: expect.any(String) });
   });
 
-  test.skipIf(process.getuid?.() === 0)("a ledger that cannot be written is refused before the first poll", async () => {
+  test.skipIf(process.getuid?.() === 0)("a ledger nobody may write is refused before the first poll", async () => {
     const ledgerPath = join(scratch, "read-only.jsonl");
     writeFileSync(ledgerPath, "");
     chmodSync(ledgerPath, 0o444);
