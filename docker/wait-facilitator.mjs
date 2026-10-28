@@ -1,5 +1,6 @@
 // Holds the API back until the facilitator answers, since a restart starts every container at once and the API exits
-// when its first call to /supported fails. Run by compose.yaml before the API, with the bearer token file as argument.
+// when its first call to /supported fails. Run by compose.yaml before the API, with the bearer token file as argument,
+// and by compose.vps.yaml, where the facilitator is asked at its public name through Caddy.
 import { readFileSync } from "node:fs";
 
 const url = process.env.Z402_FACILITATOR_URL ?? "http://127.0.0.1:4022";
@@ -28,8 +29,10 @@ for (;;) {
       signal: AbortSignal.timeout(5000),
     });
     await res.body?.cancel();
-    // Any status will do, as the facilitator listens only once it is ready
-    break;
+    // The facilitator listens only once it is ready, so any answer of its own will do, a refusal included. A 5xx is not
+    // its answer when a proxy stands in between: Caddy says 502 or 504 for as long as the facilitator is down
+    if (res.status < 500) break;
+    lastError = `HTTP ${res.status}`;
   } catch (e) {
     lastError = e?.cause?.code ?? e?.code ?? e?.message ?? String(e);
   }

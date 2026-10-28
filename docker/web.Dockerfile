@@ -21,6 +21,10 @@ COPY tsconfig.base.json ./
 COPY packages packages
 COPY apps/web apps/web
 ENV NEXT_TELEMETRY_DISABLED=1
+# The public origin that the share image's URL is made absolute against. Next.js inlines NEXT_PUBLIC_* at build time,
+# so a deployment passes it as a build argument (compose.vps.yaml); empty, the default, leaves it unset
+ARG NEXT_PUBLIC_SITE_URL=
+ENV NEXT_PUBLIC_SITE_URL=${NEXT_PUBLIC_SITE_URL}
 # next/font downloads the fonts from Google Fonts during the build and gives up after under a second of retries, which
 # would end the whole docker compose up on a short network failure
 RUN for attempt in 1 2 3; do \

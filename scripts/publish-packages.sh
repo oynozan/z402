@@ -5,7 +5,9 @@
 #   pnpm run publish:packages --otp=123456  publish, with a one-time password
 #   pnpm run publish:packages               publish; npm asks for the one-time password when it needs one
 #
-# Every argument goes to `pnpm publish` (leading `--` arguments are dropped, since `pnpm run script -- args` passes them on). Log in first with `npm login`; this script never reads or prints a token.
+# The only arguments are --dry-run and --otp=<6 digits>, which go to `pnpm publish`; anything else is refused
+# (leading `--` arguments are dropped, since `pnpm run script -- args` passes them on). Log in first with
+# `npm login`; this script never reads or prints a token.
 #
 # 1. Refuses to run while the packages, the root package.json or the lockfile have uncommitted changes, so only
 #    committed code is published.
@@ -31,6 +33,15 @@ die() {
   echo "publish-packages: $*" >&2
   exit 1
 }
+
+# Only these reach pnpm publish, and anything else stops the run before it builds: zsh, by default, passes a
+# trailing `# comment` on an interactive line as arguments
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run | --otp=[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) die "unknown argument '$arg': use --dry-run, --otp=123456 or no argument" ;;
+  esac
+done
 
 echo "==> 1/4 Checking that the published code is committed"
 tracked=(package.json pnpm-lock.yaml)

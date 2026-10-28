@@ -230,3 +230,6 @@ chain containers are not needed: point the facilitator at a public lightwalletd 
 example `https://zec.rocks:443` on mainnet) and set `Z402_NETWORK`. Give the facilitator only `Z402_PAY_TO` and
 `Z402_UIVK` instead of the keygen file: the viewing key reads deposits and cannot spend, and a seed-bearing keys file
 is refused on mainnet. Set each service's `PUBLIC_URL` to the address agents reach it at.
+
+`compose.vps.yaml` does exactly this on one server, on testnet, with HTTPS from Caddy and the operator's view-only
+keys: see [deploy-vps.md](deploy-vps.md).
