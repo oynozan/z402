@@ -1,14 +1,13 @@
 /**
- * The facilitator's HTTP face and its start-up (design §3 and §4.3 to §4.5, protocol.md §7.1).
+ * The facilitator's HTTP face and its start-up (design §3 and §4.1 to §4.5, protocol.md §7.1).
  *
+ * A bearer key picks the provider, and that provider's runtime answers with a scheme that refuses any other payTo.
  * POST /verify and /settle answer HTTP 200 whatever happens, since a 500 leaks its body into the client's error and a
- * 4xx has no place in the schema. Only a missing or wrong token (401) and an unknown route (404) are not 200.
+ * 4xx has no place in the schema. Only a key that names no provider (401) and an unknown route (404) are not 200.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { closeSync, openSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { x402Facilitator } from "@x402/core/facilitator";
 import { PaymentPayloadV2Schema, PaymentRequirementsV2Schema } from "@x402/core/schemas";
 import type { Network, PaymentPayload, PaymentRequirements, SettleResponse, VerifyResponse } from "@x402/core/types";
 import {
@@ -24,24 +23,26 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
-import {
-  checkLedgerHeader,
-  Ledger,
-  LedgerMismatch,
-  LedgerRefusal,
-  type LedgerEvent,
-  type LedgerOwner,
-} from "./core/ledger.js";
-import { lockLedger } from "./core/ledgerLock.js";
-import { DepositResolver } from "./core/resolver.js";
-import { commit, FacilitatorState } from "./core/state.js";
-import { ChainWatcher } from "./core/watcher.js";
+import { keyDigest } from "./providers/apiKey.js";
 import { providerId } from "./providers/id.js";
-import { PrepaidVoucherFacilitatorScheme } from "./scheme.js";
-
-type Log = (msg: string, err?: unknown) => void;
+import { createRegistrar, RegistrationRefused, type Registrar } from "./providers/register.js";
+import { openRegistry, type ProviderEntry, type ProviderRegistry } from "./providers/registry.js";
+import { openRuntime, type Log, type ProviderRuntime } from "./runtime.js";
 
 const stderr: Log = (msg, err) => (err === undefined ? console.error(msg) : console.error(msg, err));
+
+export interface ProvidersOptions {
+  /** Where the registry and the ledgers of the registered providers live, made with mode 0700 */
+  dir: string;
+  /** The chain view that reads the deposits to `payTo` with the viewing key `uivk` */
+  chainFor(p: { payTo: string; uivk: string }): ChainView;
+  /** Whether `uivk` is the viewing key of `payTo` and `payTo` takes no transparent deposit */
+  owns(p: { payTo: string; uivk: string }): Promise<boolean>;
+  /** The most providers that can register, the operator not counted, default 32 */
+  max?: number;
+  /** Bearer token that POST /providers requires, and left out means anyone may register */
+  registrationToken?: string;
+}
 
 export interface FacilitatorOptions {
   network: ZcashNetwork;
@@ -49,10 +50,12 @@ export interface FacilitatorOptions {
   payTo: string;
   priceZat: bigint;
   terms: Terms;
-  /** Bearer token callers must present, nothing is checked when it is left out */
+  /** Bearer token of the operator's provider, and without one a request with no header is the operator's */
   authToken?: string;
   /** JSON Lines ledger replayed at start, left out means an in-memory ledger and no file I/O */
   ledgerPath?: string;
+  /** Providers that register themselves, left out means POST /providers is refused as registration_disabled */
+  providers?: ProvidersOptions;
   /** Default 127.0.0.1 */
   host?: string;
   /** Default 0 picks a free port, read the real one from url */
@@ -61,18 +64,35 @@ export interface FacilitatorOptions {
   pollIntervalMs?: number;
   /** How long verify waits for a deposit the chain does not show yet, default 30000 */
   depositWaitMs?: number;
-  /** Called once, on the first failed ledger write or once the ledger lock names another start, so the host exits */
+  /** Called once, on the first failed ledger write or once a ledger lock names another start, so the host exits */
   onFatal?: (err: unknown) => void;
-  /** Receives one line per request (method, path, status, reason code) and the diagnostics, which default to stderr */
+  /** Receives one line per request (method, path, status, reason, provider) and the diagnostics, default stderr */
   log?: Log;
 }
 
 export interface FacilitatorHandle {
   url: string;
-  /** One best effort pass over every live deposit, which does nothing once closed */
+  /** One best effort pass over every live deposit of every provider, which does nothing once closed */
   pollNow(): Promise<void>;
-  /** Stops the watcher and the server, and a watcher pass still in flight does not write to the ledger */
+  /** How many providers are registered, the operator not counted */
+  providerCount(): number;
+  /** Stops the watchers and the server, and a watcher pass still in flight does not write to a ledger */
   close(): Promise<void>;
+}
+
+/** What a route needs of the provider whose key it was given */
+export type Tenant = Pick<ProviderRuntime, "id" | "network" | "payTo" | "facilitator">;
+
+export interface AppOptions {
+  /** The operator's provider, whose facilitator answers GET /supported */
+  operator: Tenant;
+  /** The provider an Authorization header belongs to, undefined when it belongs to none or there is no header */
+  tenantOf(authorization: string | undefined): Tenant | undefined;
+  /** Registers the provider a POST /providers asks for, and without it every such request is registration_disabled */
+  register?: Registrar;
+  /** Bearer token that POST /providers requires, and left out means anyone may call it */
+  registrationToken?: string;
+  log?: Log;
 }
 
 interface Refusal {
@@ -83,8 +103,8 @@ interface Refusal {
 type Read = { ok: true; payload: PaymentPayload; requirements: PaymentRequirements } | { ok: false; refusal: Refusal };
 
 const DEFAULT_HOST = "127.0.0.1";
-const DEFAULT_POLL_MS = 5000;
-const DEFAULT_DEPOSIT_WAIT_MS = 30_000;
+const DEFAULT_MAX_PROVIDERS = 32;
+const MAX_PROVIDERS_LIMIT = 1000;
 const BODY_LIMIT = "64kb";
 const MAX_LOGGED_PATH = 120;
 /** CAIP-2 ids are at most 41 characters, so anything longer is not worth echoing back */
@@ -93,8 +113,8 @@ const MAX_NETWORK_LENGTH = 64;
 const BEARER = /^bearer +(.+)$/i;
 /** An RFC 6750 b64token, the only token an Authorization header can carry and match */
 const B64TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
-const EMPTY_TOKEN = "authToken: must not be empty (leave it out to run without a token)";
-const BAD_TOKEN = "authToken: must be one token of letters, digits and -._~+/ (no spaces or control characters)";
+const NO_TOKEN = "leave it out to run without a token";
+const OPEN_REGISTRATION = "leave it out to let anyone register";
 /** The longest delay setInterval honours, past which Node fires it after 1 ms */
 const MAX_TIMER_MS = 2_147_483_647;
 /** The scheme's own ceiling, the wait the API's 60 s for a verify was sized for */
@@ -175,9 +195,11 @@ function accessLog(log: Log | undefined): RequestHandler {
         const path = req.path.replace(/[^\x21-\x7e]/g, "?");
         const shown = path.length > MAX_LOGGED_PATH ? `${path.slice(0, MAX_LOGGED_PATH)}...` : path;
         const reason = typeof res.locals.reason === "string" ? ` ${res.locals.reason}` : "";
+        // A request that carried a provider's key names that provider, and never the key
+        const provider = typeof res.locals.provider === "string" ? ` ${res.locals.provider}` : "";
         // A logger that throws must not take the process down from an event handler
         try {
-          log(`${req.method} ${shown} ${res.statusCode}${reason}`);
+          log(`${req.method} ${shown} ${res.statusCode}${reason}${provider}`);
         } catch {}
       });
     }
@@ -185,18 +207,41 @@ function accessLog(log: Log | undefined): RequestHandler {
   };
 }
 
-function bearer(token: string): RequestHandler {
-  const expected = digest(token);
+function refuse(res: Response, status: number, error: string, message: string): void {
+  res.status(status).json({ error, message });
+}
+
+/** Finds the provider of the request, or refuses it with 401 and a challenge */
+function tenancy(tenantOf: AppOptions["tenantOf"]): RequestHandler {
+  return (req, res, next) => {
+    const tenant = tenantOf(req.get("authorization"));
+    if (tenant === undefined) {
+      res.set("WWW-Authenticate", "Bearer");
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    res.locals.tenant = tenant;
+    res.locals.provider = tenant.id;
+    next();
+  };
+}
+
+/** The provider that `tenancy` found for this request */
+const providerOf = (res: Response): Tenant => res.locals.tenant as Tenant;
+
+/** Lets a request through when no registration token is set or it carries that token */
+function registrationGate(token: string | undefined): RequestHandler {
+  const expected = token === undefined ? undefined : digest(token);
   return (req, res, next) => {
     const header = req.get("authorization");
     const presented = header === undefined ? undefined : BEARER.exec(header)?.[1];
     // Both sides are hashed first, so the comparison takes the same time whatever the lengths
-    if (presented !== undefined && timingSafeEqual(digest(presented), expected)) {
+    if (expected === undefined || (presented !== undefined && timingSafeEqual(digest(presented), expected))) {
       next();
       return;
     }
     res.set("WWW-Authenticate", "Bearer");
-    res.status(401).json({ error: "unauthorized" });
+    refuse(res, 401, "unauthorized", "registration needs the registration token as a bearer token");
   };
 }
 
@@ -212,35 +257,22 @@ function jsonBody(): RequestHandler {
   };
 }
 
-export function createFacilitatorApp(o: {
-  facilitator: x402Facilitator;
-  authToken?: string;
-  log?: Log;
-  /** The provider the token belongs to, which GET /providers/me names, and the route is a 404 without it */
-  me?: { network: string; payTo: string };
-}): Express {
-  const { facilitator, authToken, log, me } = o;
-  checkToken(authToken);
+export function createFacilitatorApp(o: AppOptions): Express {
+  const { operator, tenantOf, register, registrationToken, log } = o;
+  checkToken("providers.registrationToken", registrationToken, OPEN_REGISTRATION);
   const diagnose = log ?? stderr;
 
   /** The network a failed settle names when the request gave no usable one, which is the one registered here */
-  const ownNetwork = (): string => {
-    try {
-      return facilitator.getSupported().kinds[0]?.network ?? "";
-    } catch {
-      return "";
-    }
-  };
-  const networkOf = (body: unknown): Network => {
+  const networkOf = (body: unknown, tenant: Tenant): Network => {
     const requirements = isRecord(body) ? body.paymentRequirements : undefined;
     const sent = isRecord(requirements) ? requirements.network : undefined;
-    return (typeof sent === "string" && sent.length <= MAX_NETWORK_LENGTH ? sent : ownNetwork()) as Network;
+    return (typeof sent === "string" && sent.length <= MAX_NETWORK_LENGTH ? sent : tenant.network) as Network;
   };
 
-  async function verify(read: Read): Promise<VerifyResponse> {
+  async function verify(tenant: Tenant, read: Read): Promise<VerifyResponse> {
     if (!read.ok) return verifyRefused(read.refusal);
     try {
-      return await facilitator.verify(read.payload, read.requirements);
+      return await tenant.facilitator.verify(read.payload, read.requirements);
     } catch (e) {
       if (isUnregistered(e)) return verifyRefused(UNSUPPORTED);
       diagnose("verify failed unexpectedly", e);
@@ -248,10 +280,10 @@ export function createFacilitatorApp(o: {
     }
   }
 
-  async function settle(read: Read, network: Network): Promise<SettleResponse> {
+  async function settle(tenant: Tenant, read: Read, network: Network): Promise<SettleResponse> {
     if (!read.ok) return settleRefused(read.refusal, network);
     try {
-      return await facilitator.settle(read.payload, read.requirements);
+      return await tenant.facilitator.settle(read.payload, read.requirements);
     } catch (e) {
       if (isUnregistered(e)) return settleRefused(UNSUPPORTED, network);
       diagnose("settle failed unexpectedly", e);
@@ -263,29 +295,54 @@ export function createFacilitatorApp(o: {
   app.disable("x-powered-by");
   // Request lines are opt-in, so the log goes in as given and not as the stderr default
   app.use(accessLog(log));
-  if (authToken !== undefined) app.use(bearer(authToken));
-  app.use(jsonBody());
+
+  /* Public routes */
 
   app.get("/supported", (_req: Request, res: Response) => {
-    res.json(facilitator.getSupported());
+    res.json(operator.facilitator.getSupported());
   });
 
-  // A resource server reads this at start to prove that its key and its payTo belong together (design §4.1)
-  if (me !== undefined) {
-    const answer = { providerId: providerId(me.network, me.payTo), network: me.network, payTo: me.payTo };
-    app.get("/providers/me", (_req: Request, res: Response) => {
-      res.json(answer);
+  if (register === undefined) {
+    app.post("/providers", (_req: Request, res: Response) => {
+      refuse(res, 403, "registration_disabled", "this facilitator has no providers directory");
+    });
+  } else {
+    app.post("/providers", registrationGate(registrationToken), jsonBody(), async (req: Request, res: Response) => {
+      try {
+        const unreadable: unknown = res.locals.unreadable;
+        if (typeof unreadable === "string") throw new RegistrationRefused(400, "invalid_request", unreadable);
+        const done = await register(req.body);
+        // The answer carries the key, which is shown once
+        res.set("Cache-Control", "no-store");
+        res.status(done.status).json(done.body);
+      } catch (e) {
+        if (!(e instanceof RegistrationRefused)) throw e;
+        // A failure of ours says no more than any other 500 does
+        if (e.status === 500) res.status(500).json({ error: e.code });
+        else refuse(res, e.status, e.code, e.message);
+      }
     });
   }
 
-  app.post("/verify", async (req: Request, res: Response) => {
-    const result = await verify(readRequest(req.body, res.locals.unreadable));
+  /* Routes behind a provider's key, which find the provider with providerOf(res) */
+
+  const authenticated = tenancy(tenantOf);
+
+  // A resource server reads this at start to prove that its key and its payTo belong together (design §4.1)
+  app.get("/providers/me", authenticated, (_req: Request, res: Response) => {
+    const { id, network, payTo } = providerOf(res);
+    res.json({ providerId: id, network, payTo });
+  });
+
+  app.post("/verify", authenticated, jsonBody(), async (req: Request, res: Response) => {
+    const result = await verify(providerOf(res), readRequest(req.body, res.locals.unreadable));
     res.locals.reason = result.invalidReason;
     res.json(result);
   });
 
-  app.post("/settle", async (req: Request, res: Response) => {
-    const result = await settle(readRequest(req.body, res.locals.unreadable), networkOf(req.body));
+  app.post("/settle", authenticated, jsonBody(), async (req: Request, res: Response) => {
+    const tenant = providerOf(res);
+    const result = await settle(tenant, readRequest(req.body, res.locals.unreadable), networkOf(req.body, tenant));
     res.locals.reason = result.errorReason;
     res.json(result);
   });
@@ -315,13 +372,24 @@ function wholeNumber(name: string, value: number | undefined, min: number, max =
   }
 }
 
-function checkToken(token: string | undefined): void {
+function checkToken(name: string, token: string | undefined, leaveOut: string): void {
   if (token === undefined) return;
-  if (token === "") throw new Error(EMPTY_TOKEN);
-  if (typeof token !== "string" || !B64TOKEN.test(token)) throw new Error(BAD_TOKEN);
+  if (token === "") throw new Error(`${name}: must not be empty (${leaveOut})`);
+  if (typeof token !== "string" || !B64TOKEN.test(token)) {
+    throw new Error(`${name}: must be one token of letters, digits and -._~+/ (no spaces or control characters)`);
+  }
 }
 
 const isBlank = (v: unknown): boolean => typeof v !== "string" || v.trim() === "";
+
+function checkProviders(p: ProvidersOptions | undefined): void {
+  if (p === undefined) return;
+  if (isBlank(p.dir)) throw new Error("providers.dir: must not be blank (leave providers out to refuse registration)");
+  if (typeof p.chainFor !== "function") throw new Error("providers.chainFor: must be a function");
+  if (typeof p.owns !== "function") throw new Error("providers.owns: must be a function");
+  wholeNumber("providers.max", p.max, 0, MAX_PROVIDERS_LIMIT);
+  checkToken("providers.registrationToken", p.registrationToken, OPEN_REGISTRATION);
+}
 
 /** Refuses a bad option before anything is opened, naming the field */
 function checkOptions(o: FacilitatorOptions): void {
@@ -334,7 +402,7 @@ function checkOptions(o: FacilitatorOptions): void {
   } catch (e) {
     throw new Error(`terms: ${text(e)}`);
   }
-  checkToken(o.authToken);
+  checkToken("authToken", o.authToken, NO_TOKEN);
   wholeNumber("port", o.port, 0, 65535);
   wholeNumber("pollIntervalMs", o.pollIntervalMs, 1, MAX_TIMER_MS);
   wholeNumber("depositWaitMs", o.depositWaitMs, 0, MAX_DEPOSIT_WAIT_MS);
@@ -342,59 +410,40 @@ function checkOptions(o: FacilitatorOptions): void {
   if (o.ledgerPath !== undefined && isBlank(o.ledgerPath)) {
     throw new Error("ledgerPath: must not be blank (leave it out for an in-memory ledger)");
   }
+  checkProviders(o.providers);
 }
 
-interface OpenLedger {
-  ledger: Ledger;
-  state: FacilitatorState;
-  /** Frees the ledger file for the next facilitator, and does nothing the second time */
-  release: () => void;
-}
-
-/** Locks the file, proves it can be written, then replays it, so a facilitator that says ready can record a settle */
-async function openLedger(path: string | undefined, own: LedgerOwner, fatal: Fatal): Promise<OpenLedger> {
-  if (path === undefined) return { ledger: new Ledger(), state: new FacilitatorState(), release: () => undefined };
-  const lock = await lockLedger(path, { onLost: fatal });
-  try {
-    writable(path);
-    return { ...replayed(path, own, lock.assertHeld), release: lock.release };
-  } catch (e) {
-    lock.release();
-    throw e;
+/** Refuses a registry that a registration could not have written, before any provider is opened or asked about */
+function checkEntries(
+  o: FacilitatorOptions,
+  entries: readonly ProviderEntry[],
+  keys: ReadonlyMap<string, unknown>,
+): void {
+  const hashes = new Set(keys.keys());
+  for (const entry of entries) {
+    if (entry.id !== providerId(o.network, entry.payTo)) {
+      throw new Error(`providersDir: registry entry ${entry.id} does not match its payTo`);
+    }
+    if (entry.payTo === o.payTo) throw new Error(`providersDir: registry entry ${entry.id} has the operator's payTo`);
+    if (hashes.has(entry.keyHash)) {
+      throw new Error(`providersDir: registry entry ${entry.id} shares its API key with another provider`);
+    }
+    hashes.add(entry.keyHash);
   }
 }
 
-function writable(path: string): void {
-  try {
-    closeSync(openSync(path, "a", 0o600));
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "EACCES" || code === "EISDIR" || code === "EROFS") {
-      throw new Error(`ledgerPath: ${path} is not writable (${code})`, { cause: e });
+/** Asks about every entry at once, and refuses the start for the first in registry order that fails */
+async function checkOwnership(providers: ProvidersOptions, entries: readonly ProviderEntry[]): Promise<void> {
+  const answers = await Promise.allSettled(entries.map((e) => providers.owns({ payTo: e.payTo, uivk: e.uivk })));
+  for (const [i, answer] of answers.entries()) {
+    const id = entries[i]?.id;
+    if (answer.status === "rejected") {
+      const why = text(answer.reason);
+      throw new Error(`providersDir: provider ${id}: cannot check that the stored viewing key owns its payTo (${why})`);
     }
-    throw new Error(`ledgerPath: cannot open ${path} (${code ?? text(e)})`, { cause: e });
-  }
-}
-
-/** Replays the ledger of `own`, and gives a ledger with no events the header that names its facilitator */
-function replayed(path: string, own: LedgerOwner, guard: () => void): { ledger: Ledger; state: FacilitatorState } {
-  try {
-    // Every write first checks that the lock is still this facilitator's
-    const ledger = new Ledger(path, { guard });
-    const state = new FacilitatorState();
-    let first = true;
-    // Each event is applied as it is read, so a long ledger is never held whole
-    for (const event of ledger.events()) {
-      if (first) checkLedgerHeader(event, own, path);
-      const header = first && event.t === "ledger";
-      first = false;
-      if (!header) state.apply(event);
+    if (!answer.value) {
+      throw new Error(`providersDir: provider ${id}: the stored viewing key no longer owns its payTo`);
     }
-    if (first) ledger.appendSync([{ t: "ledger", network: own.network, payTo: own.payTo }]);
-    return { ledger, state };
-  } catch (e) {
-    if (e instanceof LedgerMismatch) throw e;
-    throw new Error(`ledgerPath: cannot replay ${path}: ${text(e)}`, { cause: e });
   }
 }
 
@@ -414,19 +463,6 @@ function listen(app: Express, host: string, port: number, log: Log): Promise<Ser
   });
 }
 
-/** Opens the ledger, polls the chain once, then listens, and a failed poll does not stop the start */
-export async function startFacilitator(o: FacilitatorOptions): Promise<FacilitatorHandle> {
-  checkOptions(o);
-  const fatal = once(o.onFatal);
-  const opened = await openLedger(o.ledgerPath, { network: o.network, payTo: o.payTo }, fatal);
-  try {
-    return await serve(o, opened, fatal);
-  } catch (e) {
-    opened.release();
-    throw e;
-  }
-}
-
 type Fatal = (err: unknown) => void;
 
 /** The first failure is the only one reported, since the host exits on it */
@@ -439,78 +475,131 @@ function once(onFatal: Fatal | undefined): Fatal {
   };
 }
 
-async function serve(
-  o: FacilitatorOptions,
-  { ledger, state, release }: OpenLedger,
-  fatal: Fatal,
-): Promise<FacilitatorHandle> {
+/** Opens every runtime and polls each once, then listens and starts the watchers, and a failed poll does not stop it */
+export async function startFacilitator(o: FacilitatorOptions): Promise<FacilitatorHandle> {
+  checkOptions(o);
+  const fatal = once(o.onFatal);
+  const diagnose = o.log ?? stderr;
   const host = o.host ?? DEFAULT_HOST;
-  // A watcher pass already in flight when close() runs must not write once it resumes
-  let closed = false;
+  const providers = o.providers;
 
-  // Not gated on closed, since a settle in flight must still be recorded and the server closes before it ends
-  const write = (events: LedgerEvent[]): void => commit(ledger, state, events);
-  const resolver = new DepositResolver({ chain: o.chain, log: o.log });
-  const watcher = new ChainWatcher({
-    chain: o.chain,
-    state,
-    // The scheme reports its own failed writes, and a refused batch wrote nothing, so only these failures are fatal
-    commit: (events) => {
-      if (closed) return;
-      try {
-        write(events);
-      } catch (err) {
-        if (!(err instanceof LedgerRefusal)) fatal(err);
-        throw err;
-      }
-    },
-    intervalMs: o.pollIntervalMs ?? DEFAULT_POLL_MS,
-    log: o.log,
-  });
-  const scheme = new PrepaidVoucherFacilitatorScheme({
-    config: {
+  // The operator first, then the registered providers in the order they registered
+  const runtimes: ProviderRuntime[] = [];
+  const keys = new Map<string, ProviderRuntime>();
+  const byPayTo = new Map<string, ProviderRuntime>();
+  let registry: ProviderRegistry | undefined;
+
+  const open = (payTo: string, chain: ChainView, ledgerPath?: string): Promise<ProviderRuntime> =>
+    openRuntime({
       network: o.network,
-      payTo: o.payTo,
+      payTo,
+      chain,
       priceZat: o.priceZat,
       terms: o.terms,
-      depositWaitMs: o.depositWaitMs ?? DEFAULT_DEPOSIT_WAIT_MS,
-    },
-    state,
-    resolver,
-    watcher,
-    commit: write,
-    onFatal: fatal,
-    log: o.log,
-  });
-  const facilitator = new x402Facilitator().register(o.network, scheme);
-
-  await watcher.pollNow();
-  const server = await listen(
-    createFacilitatorApp({
-      facilitator,
-      authToken: o.authToken,
+      ledgerPath,
+      depositWaitMs: o.depositWaitMs,
+      pollIntervalMs: o.pollIntervalMs,
+      onFatal: fatal,
       log: o.log,
-      me: { network: o.network, payTo: o.payTo },
-    }),
-    host,
-    o.port ?? 0,
-    o.log ?? stderr,
-  );
-  watcher.start();
+    });
+
+  // A runtime stopped twice or released twice does nothing the second time
+  const releaseAll = (): void => {
+    for (const runtime of runtimes) {
+      runtime.stop();
+      runtime.release();
+    }
+    registry?.close();
+  };
+
+  let operator: ProviderRuntime;
+  let server: Server;
+  let register: Registrar | undefined;
+  try {
+    operator = await open(o.payTo, o.chain, o.ledgerPath);
+    runtimes.push(operator);
+    if (o.authToken !== undefined) keys.set(keyDigest(o.authToken), operator);
+
+    if (providers !== undefined) {
+      registry = await openRegistry({ dir: providers.dir, network: o.network, onLost: fatal });
+      const entries = registry.entries();
+      checkEntries(o, entries, keys);
+      await checkOwnership(providers, entries);
+
+      const ledgers = registry;
+      const opened = await Promise.allSettled(
+        entries.map(async (entry) => {
+          const chain = providers.chainFor({ payTo: entry.payTo, uivk: entry.uivk });
+          return { entry, runtime: await open(entry.payTo, chain, ledgers.ledgerPath(entry.id)) };
+        }),
+      );
+      // Every runtime that opened is kept, so that a failure of another lets them go
+      for (const result of opened) {
+        if (result.status !== "fulfilled") continue;
+        runtimes.push(result.value.runtime);
+        byPayTo.set(result.value.entry.payTo, result.value.runtime);
+        keys.set(result.value.entry.keyHash, result.value.runtime);
+      }
+      const failed = opened.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+
+      register = createRegistrar({
+        network: o.network,
+        operatorPayTo: o.payTo,
+        registry,
+        max: providers.max ?? DEFAULT_MAX_PROVIDERS,
+        owns: providers.owns,
+        open: (p) => open(p.payTo, providers.chainFor({ payTo: p.payTo, uivk: p.uivk }), p.ledgerPath),
+        runtimeOf: (payTo) => byPayTo.get(payTo),
+        admit: (runtime, keyHash) => {
+          runtimes.push(runtime);
+          byPayTo.set(runtime.payTo, runtime);
+          keys.set(keyHash, runtime);
+        },
+        rekey: (runtime, keyHash, replacing) => {
+          keys.delete(replacing);
+          keys.set(keyHash, runtime);
+        },
+        log: diagnose,
+      });
+    }
+
+    await Promise.all(runtimes.map((runtime) => runtime.pollNow()));
+    const tenantOf = (authorization: string | undefined): Tenant | undefined => {
+      // Without a token the operator serves a request that carries no header, and never one that carries a bad key
+      if (authorization === undefined) return o.authToken === undefined ? operator : undefined;
+      const presented = BEARER.exec(authorization)?.[1];
+      return presented === undefined ? undefined : keys.get(keyDigest(presented));
+    };
+    const app = createFacilitatorApp({
+      operator,
+      tenantOf,
+      register,
+      registrationToken: providers?.registrationToken,
+      log: o.log,
+    });
+    server = await listen(app, host, o.port ?? 0, diagnose);
+  } catch (e) {
+    releaseAll();
+    throw e;
+  }
+  for (const runtime of runtimes) runtime.start();
 
   const { port } = server.address() as AddressInfo;
   let closing: Promise<void> | undefined;
   return {
     url: `http://${host.includes(":") ? `[${host}]` : host}:${port}`,
-    pollNow: () => (closed ? Promise.resolve() : watcher.pollNow()),
+    pollNow: async () => {
+      await Promise.all(runtimes.map((runtime) => runtime.pollNow()));
+    },
+    providerCount: () => registry?.entries().length ?? 0,
     close: () => {
-      closed = true;
-      // The ledger is freed only once the requests in flight have ended, since a settle among them still writes
+      for (const runtime of runtimes) runtime.stop();
+      // Everything is freed only once the requests in flight have ended, since a settle among them still writes
       return (closing ??= new Promise<void>((resolve, reject) => {
-        watcher.stop();
         server.close((err) => (err === undefined ? resolve() : reject(err)));
         server.closeIdleConnections();
-      }).finally(release));
+      }).finally(releaseAll));
     },
   };
 }

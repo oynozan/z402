@@ -1,7 +1,8 @@
 // Prints one ready line on stdout and logs only to stderr, so scripts can wait for the line
 import { createLightwalletdClient } from "@z402/lightwalletd";
 import { startFacilitator, type FacilitatorHandle } from "./app.js";
-import { LightwalletdChainView } from "./chain/lightwalletdChainView.js";
+import { cachedTip, LightwalletdChainView } from "./chain/lightwalletdChainView.js";
+import { zdecryptNetwork, zdecryptOwns } from "./chain/zdecrypt.js";
 import { loadConfig } from "./config.js";
 import { runStartupChecks } from "./startup.js";
 
@@ -39,20 +40,40 @@ async function main(): Promise<void> {
       lwd,
       expectedBranchId: config.expectedBranchId,
     });
-    handle = await startFacilitator({
-      network: config.network,
-      chain: new LightwalletdChainView({
+    // One tip for every provider's view, so that the watchers of all of them cost lightwalletd one read a second
+    const tip = cachedTip(lwd);
+    const viewOf = (p: { payTo: string; uivk: string }) =>
+      new LightwalletdChainView({
         lwd,
         zdecryptBin: config.zdecryptBin,
-        uivk: config.uivk,
-        payTo: config.payTo,
+        uivk: p.uivk,
+        payTo: p.payTo,
         network: config.network,
-      }),
+        tip,
+      });
+    handle = await startFacilitator({
+      network: config.network,
+      chain: viewOf({ payTo: config.payTo, uivk: config.uivk }),
       payTo: config.payTo,
       priceZat: config.priceZat,
       terms: config.terms,
       authToken: config.authToken,
       ledgerPath: config.ledgerPath,
+      providers: {
+        dir: config.providersDir,
+        chainFor: viewOf,
+        owns: async (p) => {
+          const found = await zdecryptOwns({
+            bin: config.zdecryptBin,
+            key: p.uivk,
+            address: p.payTo,
+            network: zdecryptNetwork(config.network),
+          });
+          return found.ownedByKey && !found.hasTransparent;
+        },
+        max: config.maxProviders,
+        registrationToken: config.registrationToken,
+      },
       host: config.host,
       port: config.port,
       onFatal,
@@ -64,6 +85,7 @@ async function main(): Promise<void> {
   }
 
   console.log(`facilitator listening on ${handle.url} network=${config.network} payTo=${config.payTo}`);
+  console.log(`facilitator providers=${handle.providerCount()}`);
 
   const running = handle;
   const stop = (): void => {
