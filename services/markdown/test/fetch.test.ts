@@ -1,4 +1,8 @@
+import { spawn } from "node:child_process";
 import type { LookupAddress } from "node:dns";
+import { createServer } from "node:http";
+import type { AddressInfo, Socket } from "node:net";
+import { fileURLToPath } from "node:url";
 import { brotliCompressSync, deflateRawSync, deflateSync, gzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { decodeBody } from "../src/convert.js";
@@ -74,6 +78,13 @@ beforeAll(async () => {
     "/to-pinned": (_req, res) => {
       res.writeHead(302, { location: `http://pinned.test:${pages.port}/page` }).end();
     },
+    "/to-protocol-relative": (_req, res) => {
+      res.writeHead(302, { location: `//169.254.169.254:${pages.port}/latest/meta-data/` }).end();
+    },
+    "/to-backslash": (_req, res) => {
+      // A backslash is a slash in an http URL, so this names another host
+      res.writeHead(302, { location: `/\\169.254.169.254:${pages.port}/latest/meta-data/` }).end();
+    },
     "/to-ftp": redirect("ftp://127.0.0.1/file"),
     "/to-credentials": (_req, res) => {
       res.writeHead(302, { location: `http://user:pw@127.0.0.1:${pages.port}/page` }).end();
@@ -142,6 +153,13 @@ beforeAll(async () => {
     "/reset": (req) => {
       req.socket.destroy();
     },
+    // Node hands a 101 to an "upgrade" listener and otherwise drops the socket without "response" or "error"
+    "/switch": (req) => {
+      req.socket.end("HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: z402\r\n\r\n");
+    },
+    "/switch-open": (req) => {
+      req.socket.write("HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: z402\r\n\r\n");
+    },
   });
 });
 
@@ -158,6 +176,8 @@ describe("safeFetch", () => {
       accept: "text/html,application/xhtml+xml,text/plain;q=0.9",
       "accept-encoding": "gzip, deflate, br",
       host: `127.0.0.1:${pages.port}`,
+      // A fresh agent per request, so no socket is kept for another host
+      connection: "close",
     });
     expect(headers.cookie).toBeUndefined();
     expect(headers.authorization).toBeUndefined();
@@ -207,12 +227,22 @@ describe("safeFetch", () => {
 
   test("a redirect to a blocked address or URL is refused at that hop", async () => {
     const before = pages.hits.length;
-    for (const path of ["/to-metadata", "/to-internal", "/to-mixed", "/to-ftp", "/to-credentials", "/to-closed-port"]) {
+    const paths = [
+      "/to-metadata",
+      "/to-protocol-relative",
+      "/to-backslash",
+      "/to-internal",
+      "/to-mixed",
+      "/to-ftp",
+      "/to-credentials",
+      "/to-closed-port",
+    ];
+    for (const path of paths) {
       const e = await refusal(safeFetch(`${pages.origin}${path}`, options()));
       expect(e.code, path).toBe("blocked_address");
     }
-    // Each refused hop ended the chain: the server saw the six first requests and nothing after them
-    expect(pages.hits.length - before).toBe(6);
+    // Each refused hop ended the chain: the server saw the first requests and nothing after them
+    expect(pages.hits.slice(before)).toEqual(paths);
   });
 
   test("the strict default policy refuses the local server itself", async () => {
@@ -277,6 +307,74 @@ describe("safeFetch", () => {
     const slow = safeFetch(`http://slow.test:${pages.port}/`, options({ timeoutMs: 300, resolver: stuckDns }));
     const e = await refusal(slow);
     expect(e.code).toBe("fetch_timeout");
+  });
+
+  test("the deadline cancels a DNS lookup still running, not just the wait for it", async () => {
+    let given: AbortSignal | undefined;
+    const stuckDns: Resolver = (_hostname, signal) => {
+      given = signal;
+      return new Promise(() => undefined);
+    };
+    const slow = safeFetch(`http://slow.test:${pages.port}/`, options({ timeoutMs: 300, resolver: stuckDns }));
+    const e = await refusal(slow);
+    expect(e.code).toBe("fetch_timeout");
+    expect(given?.aborted).toBe(true);
+  });
+
+  test("a 101 answer to the GET ends the fetch at once instead of holding it past the deadline", async () => {
+    for (const path of ["/switch", "/switch-open"]) {
+      const started = Date.now();
+      const outcome = await Promise.race([
+        refusal(safeFetch(`${pages.origin}${path}`, options({ timeoutMs: 1_000 }))),
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000)),
+      ]);
+      expect(outcome, path).not.toBe("hung");
+      expect((outcome as PageError).code, path).toBe("fetch_failed");
+      expect(Date.now() - started, path).toBeLessThan(1_500);
+    }
+  });
+
+  test("proxy variables change nothing, even with Node's proxy support turned on", { timeout: 30_000 }, async () => {
+    const proxyHits: string[] = [];
+    const proxy = createServer((req, res) => {
+      proxyHits.push(`${req.method} ${req.url}`);
+      res.writeHead(502).end();
+    });
+    proxy.on("connect", (req, socket: Socket) => {
+      proxyHits.push(`CONNECT ${req.url}`);
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    const proxyUrl = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+    const before = pages.hits.length;
+    try {
+      const child = spawn(process.execPath, ["--import", "tsx", "test/proxy-child.ts"], {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: process.env.HOME ?? "",
+          TMPDIR: process.env.TMPDIR ?? "",
+          PAGE_PORT: String(pages.port),
+          NODE_USE_ENV_PROXY: "1",
+          HTTP_PROXY: proxyUrl,
+          HTTPS_PROXY: proxyUrl,
+          http_proxy: proxyUrl,
+          https_proxy: proxyUrl,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "";
+      child.stdout.setEncoding("utf8").on("data", (chunk: string) => (out += chunk));
+      await new Promise((resolve) => child.on("exit", resolve));
+      const outcomes = JSON.parse(out) as string[];
+      expect(outcomes.slice(0, 2)).toEqual([PAGE, PAGE]);
+      // TLS spoken straight to the plain HTTP server, which a proxy would have taken as CONNECT
+      expect(outcomes[2]).toMatch(/^failed: /);
+      expect(proxyHits).toEqual([]);
+      expect(pages.hits.slice(before)).toEqual(["/page", "/page"]);
+    } finally {
+      proxy.close();
+    }
   });
 
   test("refuses a bad URL before any connection", async () => {

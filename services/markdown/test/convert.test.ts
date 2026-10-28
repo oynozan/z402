@@ -1,8 +1,11 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, test } from "vitest";
 import {
   convertPage,
   decodeBody,
   MAX_DEPTH,
+  MAX_TITLE_BYTES,
   maxTagsFor,
   TooComplexError,
   type ConvertLimits,
@@ -103,6 +106,35 @@ describe("convertPage on HTML", () => {
     expect(result.title).not.toBe("hacked");
   });
 
+  test("nothing the page points at is loaded and no script or handler runs: no request leaves", async () => {
+    const hits: string[] = [];
+    const server = createServer((req, res) => {
+      hits.push(req.url ?? "");
+      res.writeHead(200, { "content-type": "text/css" }).end("body {}");
+    });
+    server.on("connection", () => hits.push("connection"));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const o = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const page = `<html><head><title>t</title>
+      <link rel="stylesheet" href="${o}/link"><link rel="preload" href="${o}/preload">
+      <style>@import url("${o}/import"); body { background: url(${o}/background) }</style>
+      <script src="${o}/script"></script><script>fetch("${o}/inline"); new Image().src = "${o}/image";</script>
+      <meta http-equiv="refresh" content="0;url=${o}/refresh"></head>
+      <body onload="fetch('${o}/onload')"><article><p>${"Words worth reading. ".repeat(30)}</p>
+      <img src="${o}/img" srcset="${o}/srcset 2x"><img src="x" onerror="fetch('${o}/onerror')">
+      <iframe src="${o}/iframe"></iframe><iframe srcdoc="<script>fetch('${o}/srcdoc')</script>"></iframe>
+      <object data="${o}/object"></object><embed src="${o}/embed"><video poster="${o}/poster" src="${o}/video"></video>
+      <svg><image href="${o}/svg"/></svg></article></body></html>`;
+    try {
+      const result = convertPage(htmlPage(page, { finalUrl: `${o}/page` }), LIMITS);
+      expect(result.markdown).toContain("Words worth reading.");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(hits).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
   test("a <base> element moves where relative links point", () => {
     const page = convertPage(
       htmlPage(`<html><head><base href="https://cdn.example.net/root/"></head><body><article>
@@ -172,6 +204,28 @@ describe("convertPage fallbacks and limits", () => {
     expect(blocks).toHaveLength(6_000);
     expect(blocks.slice(0, 4)).toEqual(["row 0", "value 0", "row 1", "value 1"]);
     expect(blocks.at(-1)).toBe("value 2999");
+  });
+
+  test("the title and the byline are capped like the markdown, whichever way they are found", () => {
+    const long = "Title words ".repeat(20_000);
+    const article = `<article><p>${"Words worth reading for the reader view. ".repeat(20)}</p></article>`;
+    const pages = [
+      // The whole body as the fallback, with document.title
+      `<html><head><title>${long}</title></head><body><p>x</p></body></html>`,
+      // Readability's title and its byline from a <meta>
+      `<html><head><title>${long}</title><meta name="author" content="${long}"></head><body>${article}</body></html>`,
+    ];
+    for (const page of pages) {
+      const result = convertPage(htmlPage(page), { ...LIMITS, maxMarkdownBytes: 1024 });
+      expect(Buffer.byteLength(result.title ?? "")).toBeGreaterThan(MAX_TITLE_BYTES - 16);
+      expect(Buffer.byteLength(result.title ?? "")).toBeLessThanOrEqual(MAX_TITLE_BYTES);
+      expect(Buffer.byteLength(result.byline ?? "")).toBeLessThanOrEqual(MAX_TITLE_BYTES);
+    }
+    const byline = convertPage(htmlPage(pages[1] ?? ""), LIMITS).byline ?? "";
+    expect(Buffer.byteLength(byline)).toBeGreaterThan(MAX_TITLE_BYTES - 16);
+    // Cut at a character boundary
+    const wide = convertPage(htmlPage(`<html><head><title>${"é".repeat(5_000)}</title></head></html>`), LIMITS);
+    expect(wide.title).toBe("é".repeat(MAX_TITLE_BYTES / 2));
   });
 
   test("the markdown is capped in bytes and marked truncated", () => {

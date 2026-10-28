@@ -2,8 +2,9 @@
  * URL to markdown (design §4.2): GET /v1/markdown?url=<http(s) URL>, one page per paid call.
  *
  * The page is fetched and converted in `prepare`, before payment: a page that cannot be served is refused on the
- * client's unpaid first attempt, before any voucher exists, and is never charged. A converted page is cached by URL, so
- * the paid retry is answered from the cache and never fetches again.
+ * client's unpaid first attempt, before any voucher exists, and is never charged. A converted page is cached by URL and
+ * held there for the paid retry of every unpaid attempt it answered, so that retry is answered from the cache and never
+ * fetches again; other clients' pages cannot push it out, and a page that finds no room is refused as busy instead.
  *
  * The rate limit counts fetches, not requests: only a cache miss takes a token from the caller's bucket, so an unpaid
  * attempt and its paid retry cost one token, and a paid retry is never refused for the rate limit. A miss that joins a
@@ -74,6 +75,22 @@ const EXAMPLE: MarkdownAnswer = {
   truncated: false,
 };
 
+function busy(res: Response): void {
+  res.set("Retry-After", "1");
+  res.status(503).json({ error: "busy" });
+}
+
+/** A paid retry carries one of these; an unpaid attempt neither */
+function carriesPayment(req: Request): boolean {
+  return req.get("payment-signature") !== undefined || req.get("x-payment") !== undefined;
+}
+
+/** What a cached page keeps in memory, in UTF-8 bytes */
+function entryBytes(key: string, page: CachedPage): number {
+  const strings = [key, page.finalUrl, page.markdown, page.title ?? "", page.byline ?? ""];
+  return strings.reduce((sum, text) => sum + Buffer.byteLength(text), 0);
+}
+
 function refuse(res: Response, e: unknown): void {
   if (e instanceof PageError) {
     res.status(e.status).json(e.body());
@@ -109,11 +126,12 @@ export async function createMarkdownService(o: MarkdownServiceOptions): Promise<
   const load = (key: string): Promise<CachedPage> => {
     const job: Promise<CachedPage> = Promise.resolve()
       .then(() => fetcher(key))
-      .then(async (page) => {
-        const converted = await pool.convert(page, limits);
-        const cached: CachedPage = { finalUrl: page.finalUrl, ...converted };
-        cache.set(key, cached, Buffer.byteLength(cached.markdown));
-        return cached;
+      .then(async (fetched) => {
+        const converted = await pool.convert(fetched, limits);
+        const page: CachedPage = { finalUrl: fetched.finalUrl, ...converted };
+        // Not stored when it does not fit next to the held pages, which an unpaid attempt then finds below
+        cache.set(key, page, entryBytes(key, page));
+        return page;
       })
       .finally(() => {
         if (inflight.get(key) === job) inflight.delete(key);
@@ -135,20 +153,22 @@ export async function createMarkdownService(o: MarkdownServiceOptions): Promise<
     keyUrl.hash = "";
     const key = keyUrl.href;
 
-    let page = cache.get(key);
+    // A paid request may be answered from a page held past its freshness for the unpaid attempt it retries
+    const paid = carriesPayment(req);
+    const client = clientKey(req.ip ?? req.socket.remoteAddress);
+    let page = paid ? cache.getPaid(key) : cache.get(key);
     if (page === undefined) {
       let job = inflight.get(key);
       if (job === undefined) {
-        const client = clientKey(req.ip ?? req.socket.remoteAddress);
         const wait = limiter.wait(client);
         if (wait > 0) {
           res.set("Retry-After", String(Math.ceil(wait / 1000)));
           res.status(429).json({ error: "rate_limited" });
           return;
         }
-        if (inflight.size >= config.maxConcurrent) {
-          res.set("Retry-After", "1");
-          res.status(503).json({ error: "busy" });
+        // An unpaid attempt needs room in the cache for its paid retry; a paid request is answered from its fetch
+        if (inflight.size >= config.maxConcurrent || (!paid && !cache.hasRoom(key))) {
+          busy(res);
           return;
         }
         limiter.take(client);
@@ -160,6 +180,15 @@ export async function createMarkdownService(o: MarkdownServiceOptions): Promise<
         refuse(res, e);
         return;
       }
+    }
+    if (!paid) {
+      // Its paid retry is answered from the cache, so the page must be there now, and is held for it
+      page = cache.get(key);
+      if (page === undefined) {
+        busy(res);
+        return;
+      }
+      cache.hold(key, client);
     }
     const answer: MarkdownAnswer = {
       url: url.href,

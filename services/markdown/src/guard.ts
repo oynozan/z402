@@ -3,17 +3,48 @@
  * address its host resolves to must be public unicast. The fetcher then connects only to the addresses returned here,
  * so a DNS answer that changes between this check and the connection cannot reach anything else.
  */
-import { promises as dns, type LookupAddress } from "node:dns";
+import type { LookupAddress } from "node:dns";
+import { Resolver as DnsResolver } from "node:dns/promises";
 import { isIP } from "node:net";
 import ipaddr from "ipaddr.js";
 import { PageError } from "./errors.js";
 
-/** Every address a host name has */
-export type Resolver = (hostname: string) => Promise<LookupAddress[]>;
+/** Every address a host name has. A lookup must end, failing, once `signal` aborts */
+export type Resolver = (hostname: string, signal?: AbortSignal) => Promise<LookupAddress[]>;
 /** Whether a connection to this address is allowed */
 export type AddressPolicy = (address: string) => boolean;
 
-export const systemResolver: Resolver = (hostname) => dns.lookup(hostname, { all: true, verbatim: true });
+/** A query is sent at most twice and given up after about 6 s, unless the fetch deadline cancels it first */
+const DNS_TRY_MS = 2_000;
+const DNS_TRIES = 2;
+
+/**
+ * A and AAAA records through c-ares, from `servers` or the system's DNS servers. Not dns.lookup: getaddrinfo runs on
+ * the libuv threadpool that zlib and every other lookup of the process share, and cannot be stopped, so names a caller
+ * makes slow on purpose would hold that pool past the fetch deadline. /etc/hosts is not read: public pages need none.
+ */
+export function dnsResolver(servers?: readonly string[]): Resolver {
+  return async (hostname, signal) => {
+    signal?.throwIfAborted();
+    const dns = new DnsResolver({ timeout: DNS_TRY_MS, tries: DNS_TRIES });
+    if (servers !== undefined) dns.setServers(servers);
+    const cancel = (): void => dns.cancel();
+    signal?.addEventListener("abort", cancel, { once: true });
+    try {
+      const [v4, v6] = await Promise.allSettled([dns.resolve4(hostname), dns.resolve6(hostname)]);
+      const found: LookupAddress[] = [
+        ...(v4.status === "fulfilled" ? v4.value.map((address) => ({ address, family: 4 })) : []),
+        ...(v6.status === "fulfilled" ? v6.value.map((address) => ({ address, family: 6 })) : []),
+      ];
+      if (found.length === 0 && v4.status === "rejected") throw v4.reason;
+      return found;
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+    }
+  };
+}
+
+export const systemResolver: Resolver = dnsResolver();
 
 export const MAX_URL_LENGTH = 4096;
 
@@ -120,19 +151,26 @@ export function checkRedirect(url: URL, allowedPorts: ReadonlySet<number>): URL 
 }
 
 /**
- * The addresses to connect to for `url`, every one allowed by `policy`. An IP literal is judged at once, without DNS.
+ * The addresses to connect to for `url`, every one allowed by `policy`. An IP literal is judged at once, without DNS,
+ * and so is localhost with every name under it, which is loopback by definition (RFC 6761) and which DNS is not asked.
  * A name is refused when any one of its addresses is blocked, so a name that also points inside cannot be used at all.
  */
-export async function allowedAddresses(url: URL, policy: AddressPolicy, resolver: Resolver): Promise<LookupAddress[]> {
+export async function allowedAddresses(
+  url: URL,
+  policy: AddressPolicy,
+  resolver: Resolver,
+  signal?: AbortSignal,
+): Promise<LookupAddress[]> {
   const host = hostOf(url);
   const literal = isIP(host);
   if (literal !== 0) {
     if (!policy(host)) throw new PageError("blocked_address", `${host} is not a public address`);
     return [{ address: host, family: literal }];
   }
+  if (/(^|\.)localhost\.?$/.test(host)) throw new PageError("blocked_address", `${host} is loopback`);
   let found: LookupAddress[];
   try {
-    found = await resolver(host);
+    found = await resolver(host, signal);
   } catch (e) {
     throw new PageError("fetch_failed", `cannot resolve ${host}`, { cause: e });
   }

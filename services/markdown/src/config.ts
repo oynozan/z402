@@ -22,11 +22,11 @@ export interface MarkdownConfig {
   workerHeapMb: number;
   cacheMs: number;
   cacheEntries: number;
-  /** Markdown the cache holds at most, in UTF-8 bytes (the newest page is always kept) */
+  /** What the cached pages keep at most (markdown, title, byline and URLs), in UTF-8 bytes */
   cacheBytes: number;
   userAgent: string;
   /** Express "trust proxy": which proxies may name the client IP that the rate limit counts */
-  trustProxy: boolean | number | string;
+  trustProxy: false | number | string;
 }
 
 const MiB = 1024 * 1024;
@@ -53,11 +53,14 @@ function userAgentOf(env: Env): string {
   return value;
 }
 
-function trustProxyOf(env: Env): boolean | number | string {
+function trustProxyOf(env: Env): false | number | string {
   const name = "MARKDOWN_TRUST_PROXY";
   const raw = read(env, name)?.trim();
   if (raw === undefined || raw === "" || raw === "false") return false;
-  if (raw === "true") return true;
+  // Express then takes the left-most X-Forwarded-For address, which the client writes itself even behind a proxy
+  if (raw === "true") {
+    throw new ConfigError(`${name}: true lets a client choose its IP; give the number of proxies or their addresses`);
+  }
   if (/^[0-9]{1,3}$/.test(raw)) return Number(raw);
   try {
     // Express compiles the value when it is set, which is where a bad address list throws

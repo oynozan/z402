@@ -53,6 +53,8 @@ export function maxTagsFor(heapMb: number): number {
 
 /** Element nesting allowed; Blink's parser stops nesting at the same depth, and real pages stay under 40 */
 export const MAX_DEPTH = 512;
+/** The title and the byline each, in UTF-8; either can otherwise be the whole page, past the markdown cap */
+export const MAX_TITLE_BYTES = 1024;
 /**
  * Readability's cost grows steeply with depth (511 nested elements keep it busy for seconds) and with size, so a
  * document deeper or larger than this goes straight to the body.
@@ -150,7 +152,7 @@ function tooManyTags(html: string, max: number): boolean {
 }
 
 function clean(value: string | null | undefined): string | null {
-  const text = value?.replace(/\s+/g, " ").trim() ?? "";
+  const text = capUtf8(value?.replace(/\s+/g, " ").trim() ?? "", MAX_TITLE_BYTES).markdown.trimEnd();
   return text === "" ? null : text;
 }
 

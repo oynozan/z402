@@ -1,14 +1,15 @@
 import type { LookupAddress } from "node:dns";
-import { describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vitest";
 import { PageError } from "../src/errors.js";
 import {
   allowedAddresses,
+  dnsResolver,
   isPublicAddress,
   MAX_URL_LENGTH,
   parsePageUrl,
-  systemResolver,
   type Resolver,
 } from "../src/guard.js";
+import { startDns, type DnsServer } from "./dns.js";
 import { allowLoopback } from "./pages.js";
 
 const PORTS: ReadonlySet<number> = new Set([80, 443, 8080, 8443]);
@@ -180,6 +181,18 @@ describe("allowedAddresses", () => {
       "http://[fe80::1]/",
       "http://[64:ff9b::a9fe:a9fe]/",
       "http://[2002:a9fe:a9fe::]/",
+      // Spellings the WHATWG parser maps onto an address before anything else sees the host
+      "http://%31%32%37.0.0.1/",
+      "http://\uff11\uff12\uff17.\uff10.\uff10.\uff11/",
+      "http://127\u30020\u30020\u30021/",
+      "http://\u2460\u2461\u2466.0.0.1/",
+      "http://0x7f.0x0.0x0.0x1/",
+      "http://127.0.0.0x1/",
+      "http://0.0.0.0/",
+      "http://4294967295/",
+      "http://[0:0:0:0:0:ffff:127.0.0.1]/",
+      "http:\\\\127.0.0.1\\",
+      "https:127.0.0.1/",
     ];
     for (const raw of literals) {
       expect((await refusal(allowedAddresses(url(raw), isPublicAddress, dns))).code, raw).toBe("blocked_address");
@@ -223,9 +236,22 @@ describe("allowedAddresses", () => {
     }
   });
 
-  test("the system resolver sends localhost to loopback, which is refused", async () => {
-    const e = await refusal(allowedAddresses(url("http://localhost/"), isPublicAddress, systemResolver));
-    expect(e.code).toBe("blocked_address");
+  test("localhost and every name under it are refused without asking DNS", async () => {
+    const dns = fakeDns({ "localhost.test": ["93.184.215.14"] });
+    const names = [
+      "http://localhost/",
+      "http://LOCALHOST./",
+      "http://a.b.localhost/",
+      "http://x.localhost.:8080/",
+      "http://loc%61lhost/",
+      "http://localhost%2e/",
+      "http://\u24db\u24de\u24d2\u24d0\u24db\u24d7\u24de\u24e2\u24e3/",
+    ];
+    for (const raw of names) {
+      expect((await refusal(allowedAddresses(url(raw), isPublicAddress, dns))).code, raw).toBe("blocked_address");
+    }
+    expect(dns.asked).toEqual([]);
+    expect(await allowedAddresses(url("http://localhost.test/"), isPublicAddress, dns)).toHaveLength(1);
   });
 
   test("the policy is injectable, and relaxing it for 127.0.0.1 opens nothing else", async () => {
@@ -242,5 +268,45 @@ describe("allowedAddresses", () => {
     expect((await refusal(allowedAddresses(url("http://[::ffff:127.0.0.1]/"), allowLoopback, dns))).code).toBe(
       "blocked_address",
     );
+  });
+});
+
+describe("dnsResolver", () => {
+  const servers: DnsServer[] = [];
+  afterAll(async () => {
+    for (const server of servers) await server.close();
+  });
+
+  test("reads the A and AAAA records from the DNS server, IPv4 first, and fails for a name that has none", async () => {
+    const server = await startDns({
+      "public.test": ["93.184.215.14", "2606:4700:4700::1111"],
+      "v6only.test": ["2606:4700:4700::1111"],
+      "internal.test": ["93.184.215.14", "10.0.0.7"],
+    });
+    servers.push(server);
+    const resolve = dnsResolver([server.server]);
+    expect(await resolve("public.test")).toEqual([
+      { address: "93.184.215.14", family: 4 },
+      { address: "2606:4700:4700::1111", family: 6 },
+    ]);
+    expect(await resolve("v6only.test")).toEqual([{ address: "2606:4700:4700::1111", family: 6 }]);
+    await expect(resolve("missing.test")).rejects.toThrow();
+    const e = await refusal(allowedAddresses(new URL("http://internal.test/"), isPublicAddress, resolve));
+    expect(e.code).toBe("blocked_address");
+  });
+
+  test("stops asking once its signal aborts, so that a slow name holds nothing past the fetch deadline", async () => {
+    const server = await startDns("silent");
+    servers.push(server);
+    const resolve = dnsResolver([server.server]);
+    const started = Date.now();
+    await expect(resolve("slow.test", AbortSignal.timeout(100))).rejects.toMatchObject({ code: "ECANCELLED" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(server.queries).toEqual(["A slow.test", "AAAA slow.test"]);
+    // An uncancelled lookup asks again about 3 s in
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    expect(server.queries).toHaveLength(2);
+    await expect(resolve("slow.test", AbortSignal.abort())).rejects.toThrow();
+    expect(server.queries).toHaveLength(2);
   });
 });

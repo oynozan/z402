@@ -1,5 +1,12 @@
 import type { LookupAddress } from "node:dns";
-import { startTestStack, TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
+import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
+import {
+  startTestStack,
+  TEST_NETWORK,
+  TEST_PAY_TO,
+  TEST_PUBLIC_URL,
+  type TestStack,
+} from "@z402/service-kit/testing";
 import { afterEach, describe, expect, test } from "vitest";
 import { loadMarkdownConfig, type MarkdownConfig } from "../src/config.js";
 import { safeFetch } from "../src/fetch.js";
@@ -32,7 +39,7 @@ interface Harness {
 }
 
 async function harness(
-  o: { config?: Partial<MarkdownConfig>; wrap?: (fetcher: Fetcher) => Fetcher } = {},
+  o: { config?: Partial<MarkdownConfig>; wrap?: (fetcher: Fetcher) => Fetcher; now?: () => number } = {},
 ): Promise<Harness> {
   const pages = await startPages({
     "/article": html(ARTICLE),
@@ -41,6 +48,9 @@ async function harness(
     "/json": html("{}", "application/json"),
     "/big": html(`<p>${"x".repeat(8192)}</p>`),
     "/hang": () => undefined,
+    "/switch": (req) => {
+      req.socket.end("HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: z402\r\n\r\n");
+    },
     "/to-metadata": (_req, res) => {
       res.writeHead(302, { location: `http://169.254.169.254:${pages.port}/latest/meta-data/` }).end();
     },
@@ -54,7 +64,8 @@ async function harness(
   };
   const stack = await startTestStack({
     build: async (env) => {
-      const service = await createMarkdownService({ env, config, fetcher: o.wrap?.(fetcher) ?? fetcher });
+      const fetching = o.wrap?.(fetcher) ?? fetcher;
+      const service = await createMarkdownService({ env, config, fetcher: fetching, ...(o.now && { now: o.now }) });
       return { app: service.app, close: service.close };
     },
   });
@@ -65,6 +76,21 @@ async function harness(
     fetches,
     at: (path) => `${stack.url}/v1/markdown?url=${encodeURIComponent(`${pages.origin}${path}`)}`,
   };
+}
+
+/** The stock paying fetch, running `between` after the unpaid attempt's 402 and before the paid retry */
+function payingWith(h: Harness, between: () => Promise<void>): typeof fetch {
+  let pending: (() => Promise<void>) | undefined = between;
+  const unpaidFirst: typeof fetch = async (input, init) => {
+    const res = await fetch(input, init);
+    const run = pending;
+    if (res.status === 402 && run !== undefined) {
+      pending = undefined;
+      await run();
+    }
+    return res;
+  };
+  return wrapFetchWithPayment(unpaidFirst, new x402Client().register(TEST_NETWORK, h.stack.scheme));
 }
 
 async function until(check: () => boolean): Promise<void> {
@@ -134,6 +160,65 @@ describe("GET /v1/markdown", { timeout: 30_000 }, () => {
     expect(await (await fetch(`${h.stack.url}/health`)).json()).toMatchObject({ callsToday: 0 });
   });
 
+  test("a page answered to an unpaid attempt is kept for its paid retry, whatever other clients ask", async () => {
+    const h = await harness({ config: { cacheEntries: 1, trustProxy: "loopback" } });
+    let other: Response | undefined;
+    const paid = await payingWith(h, async () => {
+      other = await fetch(h.at("/other"), { headers: { "x-forwarded-for": "198.51.100.7" } });
+    })(h.at("/article"));
+    expect(paid.status).toBe(200);
+    expect(((await paid.json()) as MarkdownAnswer).title).toBe("Paid Article");
+    // The paid retry was answered from the page fetched for the unpaid attempt, never fetched again
+    expect(h.fetches).toEqual([`${h.pages.origin}/article`]);
+    // The other client's page found no room, and was refused before anyone paid for it
+    expect(other?.status).toBe(503);
+    expect(await other?.json()).toEqual({ error: "busy" });
+    expect(h.stack.scheme.session(TEST_PAY_TO)?.cumulativeZat).toBe(500n);
+  });
+
+  test("a page that finds the cache full of held pages once fetched is refused before payment", async () => {
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started: string[] = [];
+    const h = await harness({
+      config: { cacheEntries: 1, trustProxy: "loopback" },
+      wrap: (fetcher) => async (url) => {
+        started.push(url);
+        if (url.endsWith("/other")) await gate;
+        return fetcher(url);
+      },
+    });
+    const other = fetch(h.at("/other"), { headers: { "x-forwarded-for": "198.51.100.7" } });
+    await until(() => started.length === 1);
+    // While that one is on its way, this page takes the only place and is held for this client's paid retry
+    expect((await fetch(h.at("/article"))).status).toBe(402);
+    release();
+    const refused = await other;
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({ error: "busy" });
+    const paid = await h.stack.paidFetch(h.at("/article"));
+    expect(paid.status).toBe(200);
+    // Each page was fetched once, and the paid retry came from the cache
+    expect(h.fetches).toEqual([`${h.pages.origin}/article`, `${h.pages.origin}/other`]);
+  });
+
+  test("a page about to expire is still there for the paid retry of an unpaid attempt it answered", async () => {
+    let now = 1_000_000;
+    const h = await harness({ config: { cacheMs: 1_000 }, now: () => now });
+    expect((await fetch(h.at("/article"))).status).toBe(402);
+    now += 999;
+    const paid = await payingWith(h, async () => {
+      now += 600;
+    })(h.at("/article"));
+    expect(paid.status).toBe(200);
+    expect(h.fetches).toEqual([`${h.pages.origin}/article`]);
+    // An unpaid attempt now finds it stale and fetches it again
+    expect((await fetch(h.at("/article"))).status).toBe(402);
+    expect(h.fetches).toHaveLength(2);
+  });
+
   test("the rate limit refuses a fetch before payment, but never a cached page", async () => {
     const h = await harness({ config: { ratePerMin: 2 } });
     expect((await fetch(h.at("/article"))).status).toBe(402);
@@ -190,6 +275,19 @@ describe("GET /v1/markdown", { timeout: 30_000 }, () => {
     expect((await first).status).toBe(402);
     expect((await joined).status).toBe(402);
     expect(started).toEqual([`${h.pages.origin}/article`]);
+  });
+
+  test("a page that answers 101 is refused and gives its fetch slot back", async () => {
+    const h = await harness({ config: { maxConcurrent: 1, timeoutMs: 1_000 } });
+    const answer = await Promise.race([
+      fetch(h.at("/switch")),
+      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000)),
+    ]);
+    expect(answer).not.toBe("hung");
+    expect((answer as Response).status).toBe(502);
+    expect(await (answer as Response).json()).toEqual({ error: "fetch_failed" });
+    // With the only slot back, the next page is fetched instead of refused as busy
+    expect((await fetch(h.at("/article"))).status).toBe(402);
   });
 
   test("/health is ready, and a discovery probe gets the 402 without fetching anything", async () => {

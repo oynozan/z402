@@ -118,6 +118,8 @@ function get(
     const req = (secure ? httpsRequest : httpRequest)(options);
     req.once("response", resolve);
     req.on("error", reject);
+    // A 101 answer makes Node drop the socket without "response" or "error", after which the signal cannot abort it
+    req.once("close", () => reject(new Error("the connection closed without an answer")));
     req.end();
   });
 }
@@ -227,8 +229,8 @@ export async function safeFetch(input: string | URL, o: FetchOptions): Promise<F
   try {
     let url = parsePageUrl(typeof input === "string" ? input : input.href, o.allowedPorts);
     for (let redirects = 0; ; redirects += 1) {
-      const addresses = await untilAborted(allowedAddresses(url, policy, resolver), deadline.signal);
-      const res = await get(url, addresses, o.userAgent, deadline.signal);
+      const addresses = await untilAborted(allowedAddresses(url, policy, resolver, deadline.signal), deadline.signal);
+      const res = await untilAborted(get(url, addresses, o.userAgent, deadline.signal), deadline.signal);
       const status = res.statusCode ?? 0;
       const location = res.headers.location;
       if (REDIRECTS.has(status) && location !== undefined) {

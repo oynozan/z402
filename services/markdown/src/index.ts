@@ -3,6 +3,7 @@ export {
   convertPage,
   decodeBody,
   MAX_DEPTH,
+  MAX_TITLE_BYTES,
   maxTagsFor,
   TooComplexError,
   type ConvertLimits,
@@ -14,6 +15,7 @@ export { PageError, type PageErrorBody, type PageErrorCode } from "./errors.js";
 export { PAGE_TYPES, safeFetch, type FetchedPage, type FetchOptions } from "./fetch.js";
 export {
   allowedAddresses,
+  dnsResolver,
   isPublicAddress,
   parsePageUrl,
   systemResolver,

@@ -57,9 +57,8 @@ describe("loadMarkdownConfig", () => {
     });
   });
 
-  test("MARKDOWN_TRUST_PROXY takes the forms Express does", () => {
+  test("MARKDOWN_TRUST_PROXY takes a hop count or the proxies' addresses, as Express does", () => {
     const trust = (value: string): unknown => loadMarkdownConfig({ MARKDOWN_TRUST_PROXY: value }).trustProxy;
-    expect(trust("true")).toBe(true);
     expect(trust("false")).toBe(false);
     expect(trust("1")).toBe(1);
     expect(trust("loopback")).toBe("loopback");
@@ -81,7 +80,8 @@ describe("loadMarkdownConfig", () => {
       MARKDOWN_CACHE_ENTRIES: ["0"],
       MARKDOWN_CACHE_BYTES: ["1048575"],
       MARKDOWN_USER_AGENT: ["agent\r\nX-Injected: 1", "é", "a".repeat(257)],
-      MARKDOWN_TRUST_PROXY: ["not-an-address"],
+      // true takes the left-most X-Forwarded-For address, which the client writes itself even behind a proxy
+      MARKDOWN_TRUST_PROXY: ["not-an-address", "true"],
     };
     for (const [name, values] of Object.entries(bad)) {
       for (const value of values) {
