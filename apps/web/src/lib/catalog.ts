@@ -38,7 +38,7 @@ export function slugOf(service: ServiceRow): string {
 
 /** Everything a search may match, lower case */
 export function searchText(service: ServiceRow): string {
-  const parts = [service.name, service.category, ...service.tags, service.unit ?? ""];
+  const parts = [service.name, service.category, ...service.tags];
   for (const route of service.routes) parts.push(route.path, route.description ?? "", route.unit ?? "");
   return parts.join(" ").toLowerCase();
 }
@@ -60,7 +60,7 @@ export function filterServices(
 
 export interface Totals {
   services: number;
-  /** Null while the health of every service is unknown */
+  /** Null while no service has a status, none having declared itself or the list not being readable */
   up: number | null;
   /** Null until at least one service reports a count */
   callsToday: number | null;
@@ -71,7 +71,7 @@ export function totals(services: readonly ServiceRow[]): Totals {
   for (const service of services) {
     if (service.callsToday !== null) calls = (calls ?? 0) + service.callsToday;
   }
-  const known = services.some((s) => s.health !== "unknown");
+  const known = services.some((s) => s.health === "up" || s.health === "stale" || s.health === "down");
   return {
     services: services.length,
     up: known ? services.filter((s) => s.health === "up").length : null,
@@ -81,12 +81,11 @@ export function totals(services: readonly ServiceRow[]): Totals {
 
 /** One price, or the range when the routes of a service charge differently */
 export function priceText(service: ServiceRow): string {
-  return service.routes.length > 0 ? formatPriceRange(service.routes.map((r) => r.priceZat)) : formatPriceRange([service.priceZat]);
+  return formatPriceRange(service.routes.map((r) => r.priceZat));
 }
 
 /** What one call buys, or each of the different units the routes sell */
 export function unitText(service: ServiceRow): string {
   const units = [...new Set(service.routes.map((r) => r.unit).filter((u): u is string => u !== null))];
-  if (units.length === 0) return service.unit ?? DASH;
-  return units.join(", ");
+  return units.length === 0 ? DASH : units.join(", ");
 }

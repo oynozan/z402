@@ -993,6 +993,12 @@ pre {
     background-color var(--t),
     color var(--t);
 }
+/* A column name with its "?" after it */
+.th-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 /* The section's own rule closes the table */
 .svc tbody:last-child > tr:last-child > td {
   border-bottom: 0;
@@ -1117,14 +1123,11 @@ pre {
 .status[data-health="up"] i {
   background: var(--up);
 }
-.status[data-health="starting"] i {
+.status[data-health="stale"] i {
   background: var(--starting);
 }
 .status[data-health="down"] i {
   background: var(--down);
-}
-.status-ms {
-  opacity: 0.44;
 }
 .svc .c-copy {
   padding: 0 var(--inset) 0 0;
@@ -1284,11 +1287,6 @@ pre {
   font: 400 12px/16px var(--mono);
   letter-spacing: 0;
   text-transform: none;
-}
-.d-empty {
-  padding: var(--inset);
-  border-bottom: 1px solid var(--line);
-  color: var(--subtle);
 }
 @media (prefers-reduced-motion: no-preference) {
   .detail {

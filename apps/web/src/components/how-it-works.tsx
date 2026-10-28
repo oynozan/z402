@@ -200,7 +200,7 @@ const STEPS: Step[] = [
     name: "Deposit",
     panel: <DepositPanel />,
     copy: "The agent pays one window, shielded, with its session key in the memo. Nothing on chain shows the amount or the merchant.",
-    more: "A viewing key held by the merchant's facilitator reads the deposit. The first call is served on it before it confirms.",
+    more: "A viewing key held by the facilitator reads the deposit. The first call is served on it before it confirms.",
   },
   {
     n: "03",

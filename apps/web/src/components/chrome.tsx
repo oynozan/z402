@@ -55,10 +55,7 @@ export function Header() {
 }
 
 /** The proxy's JSON, which is no page for the router to prefetch */
-const DEVELOPERS: NavItem[] = [
-  { href: "/discovery/resources", label: "Bazaar list" },
-  { href: "/discovery/status", label: "Status feed" },
-];
+const DEVELOPERS: NavItem[] = [{ href: "/discovery/resources", label: "Bazaar list" }];
 
 function FootColumn({ title, items }: { title: string; items: NavItem[] }) {
   return (

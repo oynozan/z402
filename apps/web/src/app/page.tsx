@@ -61,8 +61,8 @@ export default function Home() {
             <div className="head-cell" />
             <div className="head-cell">
               <p className="lede">
-                Every row is a running service that answers 402 with its terms. Agents read the same list from the Bazaar
-                endpoint.
+                Every row is a paid API that answers 402 with its terms. Agents read the same list from the
+                facilitator&apos;s Bazaar.
               </p>
             </div>
           </div>

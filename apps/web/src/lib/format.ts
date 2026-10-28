@@ -71,10 +71,6 @@ export function formatBps(value: number | null): string {
   return `${(value / 100).toFixed(2).replace(/\.?0+$/, "")}%`;
 }
 
-export function formatMs(value: number | null): string {
-  return value === null || !Number.isFinite(value) || value < 0 ? DASH : `${groupDigits(String(Math.round(value)))} ms`;
-}
-
 /** The start and end of a long address, which is all a reader compares */
 export function shortAddress(value: string): string {
   return value.length <= 24 ? value : `${value.slice(0, 13)}…${value.slice(-6)}`;

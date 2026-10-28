@@ -1,4 +1,4 @@
-/** One `accepts` entry of a discovered resource, as x402 v2 sends it */
+/** One `accepts` entry of a listed resource, as x402 v2 sends it */
 export interface PaymentRequirement {
   scheme: string;
   network: string;
@@ -9,7 +9,11 @@ export interface PaymentRequirement {
   extra?: Record<string, unknown>;
 }
 
-/** An item of `GET /discovery/resources`, the Bazaar shape of @x402/extensions 2.28.0 */
+/**
+ * An item of the facilitator's `GET /discovery/resources`: the Bazaar shape of @x402/extensions 2.28.0, plus the time
+ * the service last declared the route, absent for a route listed from its paid calls alone, and its paid calls since
+ * 00:00 UTC
+ */
 export interface DiscoveryResource {
   resource: string;
   type: string;
@@ -22,22 +26,11 @@ export interface DiscoveryResource {
   tags?: string[];
   iconUrl?: string;
   extensions?: Record<string, unknown>;
+  lastSeen?: string;
+  paidCallsToday?: number;
 }
 
-/** A service entry of `GET /discovery/status`, every field as the discovery service may send it */
-export interface DiscoveryStatusEntry {
-  serviceName?: string;
-  url?: string;
-  up?: boolean;
-  ready?: boolean;
-  latencyMs?: number | null;
-  checkedAt?: string | null;
-  callsToday?: number | string | null;
-  unit?: string | null;
-  priceZat?: string | number | null;
-}
-
-/** A JSON value, as discovery sends example inputs and answers */
+/** A JSON value, as the Bazaar sends example inputs and answers */
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
 export type BodyType = "json" | "form-data" | "text";
@@ -71,29 +64,21 @@ export interface Offer {
   unit: string | null;
   note: string | null;
   priceZat: string | null;
-  /** Lower case, in the order discovery lists them */
+  /** Lower case, in the order the Bazaar lists them */
   tags: string[];
   input: RouteInput | null;
   /** The example answer the route declares, as indented JSON */
   output: string | null;
   terms: RouteTerms | null;
+  /** When the service last declared the route, in ms since the epoch, null for a route listed from its paid calls */
+  lastSeen: number | null;
+  paidCallsToday: number | null;
 }
 
-/** One status entry after the loose fields are checked */
-export interface ServiceStatus {
-  serviceName: string | null;
-  url: string | null;
-  up: boolean;
-  /** Null when the entry does not say */
-  ready: boolean | null;
-  latencyMs: number | null;
-  callsToday: number | null;
-  unit: string | null;
-  priceZat: string | null;
-}
-
-/** What the server read from discovery, null where a read failed */
+/** What the site read from the Bazaar */
 export interface DiscoverySnapshot {
+  /** Null where the read failed */
   offers: Offer[] | null;
-  status: ServiceStatus[] | null;
+  /** When the list was read, by the server's clock so a visitor's own clock moves no status, null once reads keep failing */
+  at: number | null;
 }

@@ -10,7 +10,7 @@ function json(status: number, body: unknown): Response {
   return Response.json(body, { status, headers: HEADERS });
 }
 
-/** Makes the site origin a Bazaar endpoint that the stock withBazaar client can list services from */
+/** Makes the site origin a Bazaar endpoint that the stock withBazaar client can list and search */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }): Promise<Response> {
   const { path } = await params;
   const target = upstreamUrl(discoveryBase(process.env.DISCOVERY_URL), path, request.nextUrl.search);

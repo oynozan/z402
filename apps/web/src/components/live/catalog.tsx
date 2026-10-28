@@ -6,7 +6,7 @@ import { Tip } from "@/components/tip";
 import { curlCommand, exampleBlocks, paidFetchCall } from "@/lib/calls";
 import { categories, filterServices, priceText, slugOf, totals, unitText, type Category } from "@/lib/catalog";
 import type { RouteTerms } from "@/lib/discovery-types";
-import { DASH, formatBps, formatCount, formatCountCompact, formatMs, formatZat, shortAddress } from "@/lib/format";
+import { DASH, formatBps, formatCount, formatCountCompact, formatZat, shortAddress } from "@/lib/format";
 import type { Board, Health, RouteRow, ServiceRow } from "@/lib/services";
 import { useBoard } from "./discovery-provider";
 
@@ -15,10 +15,12 @@ const COLUMNS = 8;
 /** The filter grid's columns on a wide screen, where one hatched cell fills the last row */
 const FILTER_COLUMNS = 6;
 
-const HEALTH: Record<Exclude<Health, "unknown">, string> = { up: "Up", starting: "Starting", down: "Down" };
+const HEALTH: Record<"up" | "stale" | "down", string> = { up: "Up", stale: "Stale", down: "Down" };
+/** What a screen reader hears in place of the dash */
+const NO_HEALTH: Record<"none" | "unknown", string> = { none: "No heartbeat", unknown: "Unknown" };
 
 const QUIET = {
-  unreachable: "Discovery is not reachable.",
+  unreachable: "The Bazaar is not reachable.",
   empty: "No services yet.",
   none: "No services match.",
 } as const;
@@ -54,7 +56,7 @@ function Bazaar({ origin }: { origin: string }) {
         </span>
       </code>
       <Tip label="About the Bazaar endpoint">
-        Any x402 Bazaar client reads this list. Matching happens on the agent&apos;s machine.
+        The facilitator&apos;s Bazaar, passed through this site. Any x402 Bazaar client reads it.
       </Tip>
       <CopyCell text={url} label="the Bazaar endpoint" />
     </div>
@@ -122,20 +124,19 @@ function Filters({
   );
 }
 
-/** The latency is a service's answer time, so a service still starting shows none */
-function Status({ health, latencyMs }: { health: Health; latencyMs: number | null }) {
+/** The age of the service's latest declaration, a dash for one that never declared or a list that cannot be read */
+function Status({ health }: { health: Health }) {
   return (
     <span className="status" data-health={health}>
       <i aria-hidden="true" />
-      {health === "unknown" ? (
+      {health === "none" || health === "unknown" ? (
         <>
           <span aria-hidden="true">{DASH}</span>
-          <span className="sr-only">Unknown</span>
+          <span className="sr-only">{NO_HEALTH[health]}</span>
         </>
       ) : (
         HEALTH[health]
       )}
-      {health === "up" && latencyMs !== null && <span className="status-ms">{formatMs(latencyMs)}</span>}
     </span>
   );
 }
@@ -215,7 +216,7 @@ function Terms({ service, terms }: { service: ServiceRow; terms: RouteTerms | nu
         ) : (
           <span className="d-payto">
             <code title={terms.payTo}>{shortAddress(terms.payTo)}</code>
-            <CopyCell text={terms.payTo} label="the merchant address" />
+            <CopyCell text={terms.payTo} label="the provider's address" />
           </span>
         ),
       ],
@@ -243,13 +244,9 @@ function Detail({ service, id }: { service: ServiceRow; id: string }) {
   const copyCall = service.routes.length > 1;
   return (
     <div className="detail" id={id}>
-      {service.routes.length === 0 ? (
-        <p className="d-empty">Discovery has not listed this service&apos;s routes yet.</p>
-      ) : (
-        service.routes.map((route) => (
-          <RouteDetail key={`${route.method} ${route.url}`} route={route} copyCall={copyCall} />
-        ))
-      )}
+      {service.routes.map((route) => (
+        <RouteDetail key={`${route.method} ${route.url}`} route={route} copyCall={copyCall} />
+      ))}
       <Terms service={service} terms={terms} />
     </div>
   );
@@ -300,7 +297,7 @@ function ServiceRows({
           {unitText(service)}
         </td>
         <td className="c-status" data-label="Status">
-          <Status health={service.health} latencyMs={service.latencyMs} />
+          <Status health={service.health} />
         </td>
         <td className="c-today" data-label="Today">
           <LiveCount value={service.callsToday} compact />
@@ -383,7 +380,15 @@ export function Catalog({ origin }: { origin: string }) {
               </th>
               <th scope="col">Price</th>
               <th scope="col">Per</th>
-              <th scope="col">Status</th>
+              <th scope="col">
+                <span className="th-tip">
+                  Status
+                  <Tip label="About the status">
+                    From when a service last declared itself: up under 90 s, stale under 10 min, down after. A dash:
+                    never declared, listed from its paid calls.
+                  </Tip>
+                </span>
+              </th>
               <th scope="col">Today</th>
               <th scope="col">
                 <span className="sr-only">Copy call</span>

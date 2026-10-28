@@ -5,7 +5,6 @@ import {
   formatBps,
   formatCount,
   formatCountCompact,
-  formatMs,
   formatPriceRange,
   formatZat,
   groupDigits,
@@ -105,14 +104,6 @@ describe("terms", () => {
     expect(formatBps(10_000)).toBe("100%");
     expect(formatBps(null)).toBe(DASH);
     expect(formatBps(2.5)).toBe(DASH);
-  });
-
-  test("formatMs rounds and groups", () => {
-    expect(formatMs(3)).toBe("3 ms");
-    expect(formatMs(2.6)).toBe("3 ms");
-    expect(formatMs(1500)).toBe("1,500 ms");
-    expect(formatMs(null)).toBe(DASH);
-    expect(formatMs(-1)).toBe(DASH);
   });
 
   test("shortAddress keeps the start and the end of a long address", () => {

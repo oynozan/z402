@@ -1,28 +1,25 @@
 import { connection } from "next/server";
+import { LIST_PATH, readList } from "./bazaar";
 import type { DiscoverySnapshot } from "./discovery-types";
-import { DISCOVERY_TIMEOUT_MS, RESOURCES_QUERY, discoveryBase } from "./proxy";
-import { parseResources, parseStatus } from "./services";
+import { DISCOVERY_TIMEOUT_MS, discoveryBase } from "./proxy";
+import { parseResources } from "./services";
 
-async function readJson(url: string): Promise<unknown> {
+async function readJson(url: string, signal: AbortSignal): Promise<unknown> {
   try {
-    const res = await fetch(url, {
-      cache: "no-store",
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-    });
+    const res = await fetch(url, { cache: "no-store", headers: { accept: "application/json" }, signal });
     return res.ok ? await res.json() : null;
   } catch {
     return null;
   }
 }
 
-/** Reads discovery at request time, so a build never needs it and a page never shows a stale list */
+/** Reads the Bazaar at request time, so a build never needs it and a page never shows a stale list */
 export async function loadDiscovery(): Promise<DiscoverySnapshot> {
   await connection();
   const base = discoveryBase(process.env.DISCOVERY_URL);
-  const [resources, status] = await Promise.all([
-    readJson(`${base}/discovery/resources${RESOURCES_QUERY}`),
-    readJson(`${base}/discovery/status`),
-  ]);
-  return { offers: parseResources(resources), status: parseStatus(status) };
+  // One deadline for every page, so a long list holds the page up no longer than one slow read would
+  const signal = AbortSignal.timeout(DISCOVERY_TIMEOUT_MS);
+  const list = await readList((query) => readJson(`${base}${LIST_PATH}${query}`, signal));
+  const offers = list === null ? null : parseResources(list.items);
+  return { offers, at: offers === null ? null : Date.now() };
 }

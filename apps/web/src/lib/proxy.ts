@@ -1,10 +1,13 @@
-export const DEFAULT_DISCOVERY_URL = "http://127.0.0.1:4030";
+/** The facilitator, which hosts the Bazaar */
+export const DEFAULT_DISCOVERY_URL = "http://127.0.0.1:4022";
 export const DISCOVERY_TIMEOUT_MS = 5_000;
-export const DISCOVERY_PATHS = ["resources", "status"] as const;
-export type DiscoveryPath = (typeof DISCOVERY_PATHS)[number];
 
-/** Every item, so the site and an agent reading through it see the same list */
-export const RESOURCES_QUERY = "?type=http&limit=1000";
+/** The Bazaar's two public reads, each with the query parameters the stock client sends it */
+const READS = {
+  resources: ["type", "payTo", "scheme", "network", "extensions", "limit", "offset"],
+  search: ["query", "type", "payTo", "scheme", "network", "extensions", "limit", "cursor"],
+} as const satisfies Record<string, readonly string[]>;
+export type DiscoveryPath = keyof typeof READS;
 
 export function discoveryBase(value: string | undefined): string {
   const text = value?.trim() ?? "";
@@ -14,13 +17,20 @@ export function discoveryBase(value: string | undefined): string {
 export function allowedPath(segments: readonly string[] | undefined): DiscoveryPath | null {
   if (segments === undefined || segments.length !== 1) return null;
   const [segment] = segments;
-  return (DISCOVERY_PATHS as readonly string[]).includes(segment ?? "") ? (segment as DiscoveryPath) : null;
+  return segment !== undefined && Object.hasOwn(READS, segment) ? (segment as DiscoveryPath) : null;
 }
 
-/** The discovery URL a proxied request goes to, or null for a path the site does not pass on */
+/** The parameters the read documents, in the order and as often as they came, and nothing else */
+export function forwardedQuery(path: DiscoveryPath, search: string): string {
+  const names: readonly string[] = READS[path];
+  const kept = new URLSearchParams();
+  for (const [name, value] of new URLSearchParams(search)) if (names.includes(name)) kept.append(name, value);
+  const query = kept.toString();
+  return query === "" ? "" : `?${query}`;
+}
+
+/** The Bazaar URL a proxied request goes to, or null for a path the site does not pass on */
 export function upstreamUrl(base: string, segments: readonly string[] | undefined, search: string): string | null {
   const path = allowedPath(segments);
-  if (path === null) return null;
-  const query = search.startsWith("?") && search.length > 1 ? search : "";
-  return `${base}/discovery/${path}${query}`;
+  return path === null ? null : `${base}/discovery/${path}${forwardedQuery(path, search)}`;
 }

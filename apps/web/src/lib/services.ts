@@ -1,21 +1,16 @@
 /**
- * Turns what discovery serves into the rows the site shows. `parseResources` and `parseStatus` accept any JSON and
- * keep only what they can read, `groupOffers` groups the paid routes by service name and `mergeStatus` lays the status
- * of each service over its group. The server and the browser both run these, so a polled update renders the same way
- * the first paint did.
+ * Turns the Bazaar list into the rows the site shows. `parseResources` accepts any JSON and keeps only what it can
+ * read, and `groupOffers` makes one row per service and reads its status from the age of its latest declaration. The
+ * server and the browser both run these, so a polled update renders the same way the first paint did.
  */
-import type {
-  BodyType,
-  DiscoverySnapshot,
-  Json,
-  Offer,
-  RouteInput,
-  RouteTerms,
-  ServiceStatus,
-} from "./discovery-types";
+import type { BodyType, DiscoverySnapshot, Json, Offer, RouteInput, RouteTerms } from "./discovery-types";
 import { countOf, textOf, zatDigits } from "./format";
 
-export type Health = "up" | "starting" | "down" | "unknown";
+/**
+ * Up, stale or down from the age of the service's latest declaration, none for a service listed from its paid calls
+ * alone, and unknown while the list cannot be read
+ */
+export type Health = "up" | "stale" | "down" | "none" | "unknown";
 
 export interface RouteRow {
   method: string;
@@ -34,17 +29,16 @@ export interface RouteRow {
 export interface ServiceRow {
   key: string;
   name: string;
-  /** The first tag discovery lists for the service, or OTHER */
+  /** The first tag the Bazaar lists for the service, or OTHER */
   category: string;
   tags: string[];
   routes: RouteRow[];
   notes: string[];
+  /** The latest declaration of any of its routes, in ms since the epoch */
+  lastSeen: number | null;
   health: Health;
-  latencyMs: number | null;
+  /** The paid calls of its routes since 00:00 UTC, null when none of them says */
   callsToday: number | null;
-  /** From status, for a service whose routes discovery has not listed yet */
-  unit: string | null;
-  priceZat: string | null;
 }
 
 export type BoardState = "ready" | "empty" | "unreachable";
@@ -63,8 +57,13 @@ const MAX_TAG_CHARS = 32;
 /** An answer longer than this is cut, the panel shows its shape and not a whole document */
 const MAX_OUTPUT_CHARS = 4_000;
 const MAX_BPS = 10_000;
+/** The facilitator's reading of a declaration's age: up under 90 s, stale under 10 min, down after */
+const UP_MS = 90_000;
+const STALE_MS = 600_000;
+/** ISO 8601 as the facilitator writes it, so no looser date format reaches Date.parse */
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
-function record(value: unknown): Record<string, unknown> | null {
+export function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
@@ -153,6 +152,12 @@ function tagsOf(value: unknown): string[] {
   return tags;
 }
 
+function timeOf(value: unknown): number | null {
+  if (typeof value !== "string" || !ISO_RE.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 export function parseResources(json: unknown): Offer[] | null {
   const items = itemsOf(json);
   if (items === null) return null;
@@ -178,35 +183,11 @@ export function parseResources(json: unknown): Offer[] | null {
       input: inputOf(input),
       output: outputOf(info),
       terms: termsOf(offer),
+      lastSeen: timeOf(item.lastSeen),
+      paidCallsToday: countOf(item.paidCallsToday),
     });
   }
   return offers;
-}
-
-function latencyOf(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
-}
-
-export function parseStatus(json: unknown): ServiceStatus[] | null {
-  const top = record(json);
-  const services = Array.isArray(json) ? json : top?.services;
-  if (!Array.isArray(services)) return null;
-  const out: ServiceStatus[] = [];
-  for (const raw of services) {
-    const entry = record(raw);
-    if (entry === null) continue;
-    out.push({
-      serviceName: textOf(entry.serviceName),
-      url: textOf(entry.url),
-      up: entry.up === true,
-      ready: typeof entry.ready === "boolean" ? entry.ready : null,
-      latencyMs: latencyOf(entry.latencyMs),
-      callsToday: countOf(entry.callsToday),
-      unit: textOf(entry.unit),
-      priceZat: zatDigits(entry.priceZat),
-    });
-  }
-  return out;
 }
 
 export function originOf(url: string): string | null {
@@ -240,26 +221,36 @@ function pathOf(url: string): string {
   return `${path}${parsed.search}`;
 }
 
-/** One row per service name, in the order discovery first lists each, its routes in their own order */
-export function groupOffers(offers: readonly Offer[]): ServiceRow[] {
+/** The status a declaration gives at the time the list was read, where one dated well into the future says nothing */
+export function healthOf(lastSeen: number | null, at: number | null): Health {
+  if (at === null) return "unknown";
+  if (lastSeen === null) return "none";
+  const age = at - lastSeen;
+  if (age < -UP_MS) return "unknown";
+  return age < UP_MS ? "up" : age < STALE_MS ? "stale" : "down";
+}
+
+/**
+ * One row per service, in the order the Bazaar first lists each, its routes in their own order. A row holds the routes
+ * on one origin, paid to one address, under one name, so a name alone never joins two providers' routes: any provider
+ * can declare any name.
+ */
+export function groupOffers(offers: readonly Offer[], at: number | null): ServiceRow[] {
   const rows = new Map<string, ServiceRow>();
   for (const offer of offers) {
-    const name = offer.serviceName ?? hostOf(offer.url);
-    const key = offer.serviceName === null ? `origin:${originOf(offer.url) ?? offer.url}` : `name:${name}`;
+    const key = JSON.stringify([originOf(offer.url) ?? offer.url, offer.terms?.payTo ?? null, offer.serviceName]);
     let row = rows.get(key);
     if (row === undefined) {
       row = {
         key,
-        name,
+        name: offer.serviceName ?? hostOf(offer.url),
         category: OTHER,
         tags: [],
         routes: [],
         notes: [],
+        lastSeen: null,
         health: "unknown",
-        latencyMs: null,
         callsToday: null,
-        unit: null,
-        priceZat: null,
       };
       rows.set(key, row);
     }
@@ -279,61 +270,19 @@ export function groupOffers(offers: readonly Offer[]): ServiceRow[] {
     for (const tag of offer.tags) if (!row.tags.includes(tag)) row.tags.push(tag);
     row.category = row.tags[0] ?? OTHER;
     if (offer.note !== null && !row.notes.includes(offer.note)) row.notes.push(offer.note);
+    if (offer.lastSeen !== null) row.lastSeen = Math.max(row.lastSeen ?? offer.lastSeen, offer.lastSeen);
+    if (offer.paidCallsToday !== null) row.callsToday = (row.callsToday ?? 0) + offer.paidCallsToday;
   }
-  return [...rows.values()];
+  // Without a fresh read neither a status nor a count can be vouched for
+  return [...rows.values()].map((row) => ({
+    ...row,
+    health: healthOf(row.lastSeen, at),
+    callsToday: at === null ? null : row.callsToday,
+  }));
 }
 
-export function healthOf(status: ServiceStatus | undefined): Health {
-  if (status === undefined) return "unknown";
-  if (!status.up) return "down";
-  return status.ready === false ? "starting" : "up";
-}
-
-function matches(row: ServiceRow, status: ServiceStatus): boolean {
-  if (status.serviceName !== null && row.key === `name:${status.serviceName}`) return true;
-  const origin = status.url === null ? null : originOf(status.url);
-  return origin !== null && row.routes.some((r) => originOf(r.url) === origin);
-}
-
-/** Lays each status entry over its row, and adds a row for a service discovery knows by status alone */
-export function mergeStatus(rows: readonly ServiceRow[], status: readonly ServiceStatus[] | null): ServiceRow[] {
-  const entries = status ?? [];
-  const used = new Set<ServiceStatus>();
-  const merged = rows.map((row) => {
-    const entry = entries.find((s) => !used.has(s) && matches(row, s));
-    if (entry !== undefined) used.add(entry);
-    return {
-      ...row,
-      health: healthOf(entry),
-      latencyMs: entry?.latencyMs ?? null,
-      callsToday: entry?.callsToday ?? null,
-      unit: entry?.unit ?? null,
-      priceZat: entry?.priceZat ?? null,
-    };
-  });
-  for (const entry of entries) {
-    if (used.has(entry)) continue;
-    const name = entry.serviceName ?? (entry.url === null ? null : hostOf(entry.url));
-    if (name === null) continue;
-    merged.push({
-      key: entry.serviceName === null ? `origin:${entry.url}` : `name:${entry.serviceName}`,
-      name,
-      category: OTHER,
-      tags: [],
-      routes: [],
-      notes: [],
-      health: healthOf(entry),
-      latencyMs: entry.latencyMs,
-      callsToday: entry.callsToday,
-      unit: entry.unit,
-      priceZat: entry.priceZat,
-    });
-  }
-  return merged;
-}
-
-export function buildBoard(snapshot: DiscoverySnapshot): Board {
-  if (snapshot.offers === null && snapshot.status === null) return { state: "unreachable", services: [] };
-  const services = mergeStatus(groupOffers(snapshot.offers ?? []), snapshot.status);
+export function buildBoard({ offers, at }: DiscoverySnapshot): Board {
+  if (offers === null) return { state: "unreachable", services: [] };
+  const services = groupOffers(offers, at);
   return { state: services.length === 0 ? "empty" : "ready", services };
 }

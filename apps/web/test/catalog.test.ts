@@ -9,25 +9,21 @@ import {
   unitText,
 } from "../src/lib/catalog";
 import { DASH } from "../src/lib/format";
-import { buildBoard, OTHER, parseResources, parseStatus, type ServiceRow } from "../src/lib/services";
-import { ITEMS, item, status } from "./fixtures";
+import { buildBoard, OTHER, parseResources, type ServiceRow } from "../src/lib/services";
+import { ITEMS, NOW, ago, item } from "./fixtures";
 
-function services(): ServiceRow[] {
-  return buildBoard({
-    offers: parseResources({ items: ITEMS }),
-    status: parseStatus([
-      status({ callsToday: 128 }),
-      status({ serviceName: "URL to markdown", url: "http://localhost:4032", callsToday: 41, unit: "page" }),
-      status({ serviceName: "Text embeddings", url: "http://localhost:4033", ready: false, callsToday: 0, unit: "1k tokens" }),
-      status({ serviceName: "Encrypted drop box", url: "http://localhost:4034", callsToday: 9, unit: "10 blocks" }),
-    ]),
-  }).services;
+function services(at: number | null = NOW): ServiceRow[] {
+  return buildBoard({ offers: parseResources({ items: ITEMS }), at }).services;
+}
+
+function rowsOf(items: ReturnType<typeof item>[]): ServiceRow[] {
+  return buildBoard({ offers: parseResources({ items }), at: NOW }).services;
 }
 
 const names = (rows: ServiceRow[]) => rows.map((r) => r.name);
 
 describe("categories", () => {
-  test("one cell per first tag, in discovery order while the counts tie", () => {
+  test("one cell per first tag, in the Bazaar's order while the counts tie", () => {
     expect(categories(services())).toEqual([
       { key: "llm", count: 1 },
       { key: "web", count: 1 },
@@ -37,17 +33,12 @@ describe("categories", () => {
   });
 
   test("the largest category first and other last", () => {
-    const rows = buildBoard({
-      offers: parseResources({
-        items: [
-          item("http://u.test/a"),
-          item("http://a.test/x", { serviceName: "A", tags: ["web"] }),
-          item("http://b.test/x", { serviceName: "B", tags: ["llm"] }),
-          item("http://c.test/x", { serviceName: "C", tags: ["llm"] }),
-        ],
-      }),
-      status: null,
-    }).services;
+    const rows = rowsOf([
+      item("http://u.test/a"),
+      item("http://a.test/x", { serviceName: "A", tags: ["web"] }),
+      item("http://b.test/x", { serviceName: "B", tags: ["llm"] }),
+      item("http://c.test/x", { serviceName: "C", tags: ["llm"] }),
+    ]);
     expect(categories(rows).map((c) => `${c.key} ${c.count}`)).toEqual(["llm 2", "web 1", `${OTHER} 1`]);
   });
 
@@ -62,11 +53,10 @@ describe("slugOf", () => {
   });
 
   test("falls back to the category, or to the name for a service without either", () => {
-    const [onlyStatus] = buildBoard({ offers: [], status: parseStatus([status({ serviceName: "Odd One" })]) }).services;
-    expect(slugOf(onlyStatus!)).toBe("odd-one");
-    const [unnamed] = buildBoard({ offers: parseResources({ items: [item("http://a.test/v1/:id", { tags: ["web"] })] }), status: null })
-      .services;
-    expect(slugOf(unnamed!)).toBe("web");
+    const [named] = rowsOf([item("http://a.test/v1/:id", { serviceName: "Odd One" })]);
+    expect(slugOf(named!)).toBe("odd-one");
+    const [tagged] = rowsOf([item("http://a.test/v1/:id", { tags: ["web"] })]);
+    expect(slugOf(tagged!)).toBe("web");
   });
 });
 
@@ -101,49 +91,48 @@ describe("search", () => {
 
 describe("totals", () => {
   test("counts the services, those up and the paid calls today", () => {
-    expect(totals(services())).toEqual({ services: 4, up: 3, callsToday: 178 });
+    expect(totals(services())).toEqual({ services: 4, up: 1, callsToday: 178 });
   });
 
-  test("knows neither the services up nor the calls until status reports them", () => {
-    expect(totals(buildBoard({ offers: parseResources({ items: ITEMS }), status: null }).services)).toEqual({
-      services: 4,
-      up: null,
-      callsToday: null,
-    });
+  test("knows neither the services up nor the calls while the list is not read fresh", () => {
+    expect(totals(services(null))).toEqual({ services: 4, up: null, callsToday: null });
   });
 
-  test("counts none up when status reports every service down", () => {
-    const rows = buildBoard({
-      offers: parseResources({ items: ITEMS }),
-      status: parseStatus([status({ up: false, callsToday: null })]),
-    }).services;
-    expect(totals(rows)).toEqual({ services: 4, up: 0, callsToday: null });
+  test("knows no services up while none has declared itself, and still counts the calls", () => {
+    const rows = rowsOf([item("http://a.test/x", { serviceName: "A", paidCallsToday: 5 })]);
+    expect(totals(rows)).toEqual({ services: 1, up: null, callsToday: 5 });
+  });
+
+  test("counts none up when every service is stale or down, and no calls until one is counted", () => {
+    const rows = rowsOf([
+      item("http://a.test/x", { serviceName: "A", lastSeen: ago(120_000) }),
+      item("http://b.test/x", { serviceName: "B", lastSeen: ago(3_600_000) }),
+    ]);
+    expect(totals(rows)).toEqual({ services: 2, up: 0, callsToday: null });
   });
 });
 
 describe("row text", () => {
-  test("one price and one unit for a service whose routes agree", () => {
-    const drop = services()[3]!;
-    expect(priceText(drop)).toBe("500 zat");
-    expect(unitText(drop)).toBe("10 blocks");
+  test("each service shows the price of its own routes", () => {
+    expect(services().map((s) => [priceText(s), unitText(s)])).toEqual([
+      ["200 zat", "output chunk"],
+      ["1,000 zat", "page"],
+      ["100 zat", "1k tokens"],
+      ["500 zat", "10 blocks"],
+    ]);
   });
 
   test("a price range and each unit when the routes differ", () => {
-    const [row] = buildBoard({
-      offers: parseResources({
-        items: [
-          item("http://a.test/x", { serviceName: "A", amount: "500", z402: { unit: "page" } }),
-          item("http://a.test/y", { serviceName: "A", amount: "2000", z402: { unit: "site" } }),
-        ],
-      }),
-      status: null,
-    }).services;
+    const [row] = rowsOf([
+      item("http://a.test/x", { serviceName: "A", amount: "500", z402: { unit: "page" } }),
+      item("http://a.test/y", { serviceName: "A", amount: "2000", z402: { unit: "site" } }),
+    ]);
     expect(priceText(row!)).toBe("500–2,000 zat");
     expect(unitText(row!)).toBe("page, site");
   });
 
-  test("falls back to what status says for a service with no routes", () => {
-    const [row] = buildBoard({ offers: [], status: parseStatus([status({ unit: null, priceZat: null })]) }).services;
+  test("a dash for a route without a readable price or unit", () => {
+    const [row] = rowsOf([item("http://a.test/x", { serviceName: "A", amount: "free" })]);
     expect(priceText(row!)).toBe(DASH);
     expect(unitText(row!)).toBe(DASH);
   });
