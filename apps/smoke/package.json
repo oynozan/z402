@@ -1,0 +1,24 @@
+{
+  "name": "@z402/smoke",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@x402/core": "2.28.0",
+    "@x402/fetch": "2.28.0",
+    "@z402/client": "workspace:*",
+    "@z402/lightwalletd": "workspace:*",
+    "@z402/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@z402/service-kit": "workspace:*",
+    "@z402/testkit": "workspace:*",
+    "express": "5.3.0",
+    "@types/express": "5.0.6"
+  }
+}
