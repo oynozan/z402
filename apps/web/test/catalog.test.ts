@@ -3,6 +3,7 @@ import {
   categories,
   filterServices,
   matchesQuery,
+  pricedPerRoute,
   priceText,
   slugOf,
   totals,
@@ -129,6 +130,18 @@ describe("row text", () => {
     ]);
     expect(priceText(row!)).toBe("500–2,000 zat");
     expect(unitText(row!)).toBe("page, site");
+  });
+
+  test("each route names its own price only when the routes of a service charge differently", () => {
+    expect(services().map(pricedPerRoute)).toEqual([false, false, false, false]);
+    const [mixed, same] = rowsOf([
+      item("http://a.test/x", { serviceName: "A", amount: "500" }),
+      item("http://a.test/y", { serviceName: "A", amount: "2000" }),
+      item("http://b.test/x", { serviceName: "B", amount: "0500" }),
+      item("http://b.test/y", { serviceName: "B", amount: "500" }),
+    ]);
+    expect(pricedPerRoute(mixed!)).toBe(true);
+    expect(pricedPerRoute(same!)).toBe(false);
   });
 
   test("a dash for a route without a readable price or unit", () => {

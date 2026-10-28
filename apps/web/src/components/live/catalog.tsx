@@ -4,7 +4,16 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode }
 import { CopyButton, CopyCell } from "@/components/copy";
 import { Tip } from "@/components/tip";
 import { curlCommand, exampleBlocks, paidFetchCall } from "@/lib/calls";
-import { categories, filterServices, priceText, slugOf, totals, unitText, type Category } from "@/lib/catalog";
+import {
+  categories,
+  filterServices,
+  pricedPerRoute,
+  priceText,
+  slugOf,
+  totals,
+  unitText,
+  type Category,
+} from "@/lib/catalog";
 import type { RouteTerms } from "@/lib/discovery-types";
 import { DASH, formatBps, formatCount, formatCountCompact, formatZat, shortAddress } from "@/lib/format";
 import type { Board, Health, RouteRow, ServiceRow } from "@/lib/services";
@@ -153,13 +162,15 @@ function Endpoint({ routes }: { routes: RouteRow[] }) {
   );
 }
 
-function RouteDetail({ route, copyCall }: { route: RouteRow; copyCall: boolean }) {
+function RouteDetail({ route, copyCall, ownPrice }: { route: RouteRow; copyCall: boolean; ownPrice: boolean }) {
   const name = `${route.method} ${route.path}`;
+  const price = formatZat(route.priceZat);
   return (
     <div className="d-grid d-route">
       <section className="d-cell">
         <div className="d-head">
           <h3 className="d-label">About</h3>
+          {ownPrice && <p className="d-value">{price === DASH ? DASH : `${price} per call`}</p>}
         </div>
         <p className="d-about">{route.description ?? DASH}</p>
         {route.note !== null && <p className="d-note">{route.note}</p>}
@@ -242,10 +253,11 @@ function Detail({ service, id }: { service: ServiceRow; id: string }) {
   const terms = service.routes.find((r) => r.terms !== null)?.terms ?? null;
   // The row's own COPY CALL already copies the only route's call
   const copyCall = service.routes.length > 1;
+  const ownPrice = pricedPerRoute(service);
   return (
     <div className="detail" id={id}>
       {service.routes.map((route) => (
-        <RouteDetail key={`${route.method} ${route.url}`} route={route} copyCall={copyCall} />
+        <RouteDetail key={`${route.method} ${route.url}`} route={route} copyCall={copyCall} ownPrice={ownPrice} />
       ))}
       <Terms service={service} terms={terms} />
     </div>

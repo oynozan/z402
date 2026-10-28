@@ -84,6 +84,11 @@ export function priceText(service: ServiceRow): string {
   return formatPriceRange(service.routes.map((r) => r.priceZat));
 }
 
+/** Whether the routes of a service charge differently, so that each route's detail names its own price */
+export function pricedPerRoute(service: ServiceRow): boolean {
+  return new Set(service.routes.map((r) => r.priceZat)).size > 1;
+}
+
 /** What one call buys, or each of the different units the routes sell */
 export function unitText(service: ServiceRow): string {
   const units = [...new Set(service.routes.map((r) => r.unit).filter((u): u is string => u !== null))];
