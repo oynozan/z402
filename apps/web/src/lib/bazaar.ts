@@ -30,10 +30,11 @@ export async function readList(read: (query: string) => Promise<unknown>): Promi
     const page = record(await read(pageQuery(items.length)));
     const got = page?.items;
     if (!Array.isArray(got)) return null;
-    items.push(...got);
+    // Never more than the list can hold, since spreading a whole oversized page overflows the stack
+    items.push(...got.slice(0, MAX_ITEMS - items.length));
     const total = countOf(record(page?.pagination)?.total);
     if (got.length === 0 || total === null || items.length >= Math.min(total, MAX_ITEMS) || pages === MAX_PAGES) {
-      return { items: items.slice(0, MAX_ITEMS), pages };
+      return { items, pages };
     }
   }
 }
