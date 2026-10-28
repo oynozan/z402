@@ -328,6 +328,59 @@ describe("concurrency limit", () => {
   });
 });
 
+describe("a wait for a slot", () => {
+  test("ends with the budget, so a lookup queued behind four slow reads answers in its 1 s with no read", async () => {
+    vi.useFakeTimers();
+    const inspected: string[] = [];
+    const chain: ChainView = {
+      tip: async () => 1000,
+      inspect: async (txid) => {
+        inspected.push(txid);
+        await new Promise((resolve) => setTimeout(resolve, 6000));
+        return NOT_FOUND;
+      },
+    };
+    const resolver = new DepositResolver({ chain });
+    const slow = [1, 2, 3, 4].map((n) => resolver.lookup(txidOf(n), 30_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(inspected).toEqual([1, 2, 3, 4].map(txidOf));
+
+    const started = Date.now();
+    let answered: { lookup: Lookup; at: number } | undefined;
+    void resolver.lookup(txidOf(5), 1000).then((lookup) => {
+      answered = { lookup, at: Date.now() - started };
+    });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(answered).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(answered?.at).toBe(1000);
+    expect(errorOf(answered?.lookup ?? { kind: "not_found", tip: 0 })).toMatchObject({
+      message: "deposit lookup waited its whole budget for a slot",
+    });
+    expect(inspected).not.toContain(txidOf(5));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await Promise.all(slow);
+  });
+
+  test("takes a slot that comes free within the budget and leaves no timer behind", async () => {
+    vi.useFakeTimers();
+    const chain = new ScriptedChain();
+    chain.delayMs = 100;
+    const resolver = new DepositResolver({ chain, maxConcurrent: 1 });
+
+    const lookups = Promise.all([resolver.lookup(txidOf(1), 0), resolver.lookup(txidOf(2), 1000)]);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(await lookups).toEqual([
+      { kind: "not_found", tip: 1000 },
+      { kind: "not_found", tip: 1000 },
+    ]);
+    expect(chain.calls.get(txidOf(2))).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe("slots are held only while a read is in flight", () => {
   test("twenty lookups of absent txids delay an honest first read by one poll and one read at most", async () => {
     vi.useFakeTimers();

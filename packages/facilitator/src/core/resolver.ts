@@ -46,7 +46,7 @@ export class DepositResolver {
     this.#log = o.log ?? ((msg, err) => console.error(msg, err));
   }
 
-  /** Joins a flight under way, which starts no read past its budget, though its wait for a slot can outlast it */
+  /** Joins a flight under way, which waits for a slot and starts reads only within its budget */
   lookup(txid: string, budgetMs: number): Promise<Lookup> {
     const running = this.#flights.get(txid);
     if (running !== undefined) return running;
@@ -99,14 +99,15 @@ export class DepositResolver {
     let reads = 0;
     for (;;) {
       // A slot is held only around a read, so lookups sleeping between polls leave it to the others
-      const waited = await this.#acquire();
+      const slot = await this.#acquire(budgetMs - (this.#now() - startedAt));
+      // A caller whose budget ran out in the queue gets what is known, not one more read past its budget
+      if (slot === "none" || (slot === "waited" && this.#now() - startedAt >= budgetMs)) {
+        if (slot === "waited") this.#release();
+        if (reads > 0) break;
+        const error = new ChainUnavailableError("deposit lookup waited its whole budget for a slot");
+        return this.peek(txid) ?? { kind: "unavailable", error };
+      }
       try {
-        // A caller whose budget ran out in the queue gets what is known, not one more read past its budget
-        if (waited && this.#now() - startedAt >= budgetMs) {
-          if (reads > 0) break;
-          const error = new ChainUnavailableError("deposit lookup waited its whole budget for a slot");
-          return this.peek(txid) ?? { kind: "unavailable", error };
-        }
         reads++;
         const read = await this.#read(txid);
         if (read.kind === "found") {
@@ -154,14 +155,31 @@ export class DepositResolver {
     this.#results.set(txid, { lookup, at });
   }
 
-  /** Takes a slot, true when the caller had to wait in the queue for it */
-  async #acquire(): Promise<boolean> {
+  /** Takes a slot, waiting in the queue for at most `waitMs`, and says whether it waited or got none */
+  async #acquire(waitMs: number): Promise<"free" | "waited" | "none"> {
     if (this.#running < this.#maxConcurrent) {
       this.#running++;
-      return false;
+      return "free";
     }
-    await new Promise<void>((resolve) => this.#queue.push(resolve));
-    return true;
+    if (!(waitMs > 0)) return "none";
+    let grant = (): void => undefined;
+    const granted = new Promise<"waited">((resolve) => {
+      grant = () => resolve("waited");
+    });
+    this.#queue.push(grant);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<"none">((resolve) => {
+      timer = setTimeout(() => resolve("none"), waitMs);
+      timer.unref?.();
+    });
+    const outcome = await Promise.race([granted, expired]);
+    clearTimeout(timer);
+    if (outcome === "waited") return "waited";
+    const at = this.#queue.indexOf(grant);
+    if (at < 0) return "waited";
+    // Still in line when the budget ran out, so it leaves the queue without a slot
+    this.#queue.splice(at, 1);
+    return "none";
   }
 
   #release(): void {
