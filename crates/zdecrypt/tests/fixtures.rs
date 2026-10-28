@@ -70,7 +70,7 @@ fn unrelated_real_txs_parse_and_decrypt_nothing() {
 }
 
 #[test]
-fn synthetic_v6_deposit_passes_the_z402_rule_only_for_its_session() {
+fn synthetic_v6_deposit_verdict_passes_only_for_its_exact_memo() {
     let f = fixture();
     let m = &f["merchant"];
     let d = &f["deposit"];

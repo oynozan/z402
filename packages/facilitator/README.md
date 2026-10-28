@@ -14,13 +14,14 @@ Set up once, in any terminal:
 pnpm install
 pnpm --filter @z402/facilitator build:native          # builds crates/zdecrypt
 node scripts/merchant-keygen.mjs --network regtest    # .secrets/merchant-regtest.json, prints the payTo
+node scripts/merchant-keygen.mjs --view-only --from .secrets/merchant-regtest.json   # .secrets/merchant-regtest.view.json
 bash infra/z3/up.sh                                   # Zebra, Zallet and Zaino
-mkdir -p .data && (umask 077; openssl rand -hex 16 > .data/manual-token) && chmod 600 .data/manual-token
+mkdir -p .data && (umask 077; rm -f .data/manual-token; openssl rand -hex 16 > .data/manual-token)
 ```
 
-`merchant-keygen.mjs` refuses to replace an existing keys file, so on a machine that has one it exits 1 and changes nothing. `up.sh` publishes every port on `127.0.0.1`, with one gap: Zebra listens on every interface for about a minute on the first run and again after `down.sh --wipe`, while the wallet initialises, and if that initialisation fails part-way it stays on every interface until `bash infra/z3/down.sh` runs (`infra/z3/README.md`, section Endpoints). Add `bash infra/z3/fund-agent.sh` if an agent will pay deposits. `infra/z3/README.md` has the stack's commands and ports.
+Each `merchant-keygen.mjs` line refuses to replace a file that exists, so on a machine that has it the line exits 1 and changes nothing. The first line writes the account with its seed. The second writes the facilitator's keys file, which holds only `network`, `uivk` and `orchardOnlyAddress`, so the facilitator never sees the seed (see [Merchant keys](#merchant-keys)). `up.sh` publishes every port on `127.0.0.1`, with one gap: Zebra listens on every interface for about a minute on the first run and again after `down.sh --wipe`, while the wallet initialises, and if that initialisation fails part-way it stays on every interface until `bash infra/z3/down.sh` runs (`infra/z3/README.md`, section Endpoints). Add `bash infra/z3/fund-agent.sh` if an agent will pay deposits. `infra/z3/README.md` has the stack's commands and ports.
 
-The last line writes the bearer token to `.data/manual-token` and sets its mode to 0600, so that only you can read it (`.data/` is gitignored). The `chmod` is for a file that exists already, since `umask` does not change an existing file's mode. The facilitator and the API both read the token from that file, so run the line once. A second run writes a new token that the running processes do not have.
+The last line writes the bearer token to `.data/manual-token`, which only you can read (`.data/` is gitignored). The file is created under `umask 077`, so it has mode 0600 from the moment it exists and the token is never in a file that others can read, not even for an instant. Do not write the file first and `chmod` it afterwards. The `rm -f` comes first because `umask` applies only to a file that is created, and `>` onto an existing file keeps that file's mode and its readers. The facilitator and the API both read the token from that file, so run the line once. A second run writes a new token that the running processes do not have.
 
 The block clock, the facilitator and the API each run until you stop them, so each gets its own terminal, opened in the repository root.
 
@@ -35,7 +36,7 @@ Terminal 2, the facilitator:
 ```bash
 export Z402_FACILITATOR_TOKEN="$(cat .data/manual-token)"
 Z402_NETWORK=regtest \
-Z402_MERCHANT_KEYS_FILE=.secrets/merchant-regtest.json \
+Z402_MERCHANT_KEYS_FILE=.secrets/merchant-regtest.view.json \
 pnpm --filter @z402/facilitator start
 ```
 
@@ -45,7 +46,7 @@ Wait for the ready line on stdout, which names the full network id and the payTo
 facilitator listening on http://127.0.0.1:4022 network=zcash:regtest payTo=uregtest1...
 ```
 
-Everything else the process prints goes to stderr: one line per request (`GET /supported 200`) and the diagnostics. Neither stream carries the token or the viewing key.
+Everything else the process prints goes to stderr: one line per request (`GET /supported 200`) and the diagnostics. Neither stream carries the token or the viewing key. The keys file of this example holds no seed, so the facilitator prints no warning about it. Pointed at the full `.secrets/merchant-regtest.json` instead, it first prints a `facilitator: warning: Z402_MERCHANT_KEYS_FILE: ...` line on stderr that says the file holds the spending seed. On regtest that is tolerated, and mainnet refuses such a file. `scripts/demo.sh up` passes the full file for now, so the log of its facilitator has that warning.
 
 Terminal 3, the API (`apps/api/README.md`), which reads the same token from the same file.
 
@@ -62,7 +63,7 @@ To run a second facilitator next to the demo, give it its own port and its own l
 ```bash
 export Z402_FACILITATOR_TOKEN="$(cat .data/manual-token)"
 Z402_NETWORK=regtest \
-Z402_MERCHANT_KEYS_FILE=.secrets/merchant-regtest.json \
+Z402_MERCHANT_KEYS_FILE=.secrets/merchant-regtest.view.json \
 Z402_FACILITATOR_PORT=4098 \
 Z402_LEDGER=.data/scratch-ledger.jsonl \
 pnpm --filter @z402/facilitator start
@@ -70,20 +71,20 @@ pnpm --filter @z402/facilitator start
 
 ## Environment
 
-An empty variable counts as unset. A path that is not absolute is relative to the repository root, whatever directory `pnpm` runs the package from. A problem is printed as one `facilitator: ...` line on stderr, and the process exits 1. The line names the variable at fault, the start-up check that failed, or, for the ledger, the port and the host, the option (`ledgerPath:`, `port:` and `host:`) rather than the variable. No message quotes the keys file, the viewing key or the token.
+An empty variable counts as unset. A path that is not absolute is relative to the repository root, whatever directory `pnpm` runs the package from. A problem is printed as one `facilitator: ...` line on stderr, and the process exits 1. A setting that works but puts something at risk is printed as a `facilitator: warning: ...` line on stderr before the start-up checks, and the start goes on. Those are the three warnings of the configuration: a keys file that holds the seed or the full viewing key (off mainnet), a mainnet `Z402_LWD_URL` host that is not loopback, and a `Z402_FACILITATOR_HOST` that is not loopback. Two warnings print later, during the checks and with no `facilitator:` prefix: `warning: Z402_EXPECTED_BRANCH_ID is not set, so the consensus branch of lightwalletd is not checked` (mainnet, check 4), and `ledger <ledger>: dropped a truncated last line (line <n>)` (check 5). The line names the variable at fault, the start-up check that failed, or, for the ledger, the port and the host, the option (`ledgerPath:`, `port:` and `host:`) rather than the variable. No message quotes the keys file, the viewing key or the token.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `Z402_NETWORK` | `regtest` | `regtest`, `testnet` or `mainnet`. Picks the defaults of `Z402_LWD_URL` and `Z402_EXPECTED_BRANCH_ID`, and the address and key prefixes that are accepted. |
-| `Z402_MERCHANT_KEYS_FILE` | none | The JSON that `zdecrypt keygen` prints, which `scripts/merchant-keygen.mjs` writes. The whole file is read and parsed, seed included, but only `orchardOnlyAddress` and `uivk` are used, and only for the two variables below that are not set. Set those two instead, and keep the keys file out of that process's reach (another OS user or another host), wherever it must not be able to read the seed. |
+| `Z402_MERCHANT_KEYS_FILE` | none | The JSON that `zdecrypt keygen` prints, which `scripts/merchant-keygen.mjs` writes. The whole file is read and parsed, but only `orchardOnlyAddress` and `uivk` are used, and only for the two variables below that are not set. A file with a top-level `seedHex` key, as that one has, is refused on mainnet with `Z402_MERCHANT_KEYS_FILE: <file> holds the spending seed; give the facilitator only uivk and orchardOnlyAddress, or set Z402_UIVK and Z402_PAY_TO`. A file with no `seedHex` but a top-level `ufvk` key gets the same text with `holds the full viewing key` in place of `holds the spending seed`. Elsewhere either text is a warning. The rule goes by those two exact key names only, so a secret stored under another name, in other letter case or nested deeper is not detected; the files `scripts/merchant-keygen.mjs` writes use exactly those names. Set those two variables instead, or give the facilitator a file that holds only `uivk` and `orchardOnlyAddress`, and keep the seed out of that process's reach (another OS user or another host). `node scripts/merchant-keygen.mjs --view-only --from <keys file>` writes exactly such a file, `.secrets/merchant-<network>.view.json`, and it is the keys file to give the facilitator (see [Merchant keys](#merchant-keys)). |
 | `Z402_PAY_TO` | `orchardOnlyAddress` of the keys file | The shielded-only unified address deposits go to (`uregtest1...`, `utest1...` or `u1...`, and the ZIP 316 revision 2 `zu...` forms). Required unless the keys file has it. The API needs the same address. |
 | `Z402_UIVK` | `uivk` of the keys file | The merchant's unified incoming viewing key (`uivkregtest1...`, `uivktest1...` or `uivk1...`, and the revision 2 `uvi...` forms). Required unless the keys file has it. It can see deposits and cannot spend. |
-| `Z402_FACILITATOR_TOKEN` | none | Required. The bearer token every caller must present, as `Authorization: Bearer <token>` (the scheme in any case, one or more spaces after it). It must be one token of letters, digits and `-._~+/`, optionally ending in `=` (an RFC 6750 b64token), so `openssl rand -hex 16` and `openssl rand -base64 24` both pass. Anything else is refused at start with `Z402_FACILITATOR_TOKEN: must be one token of letters, digits and -._~+/ (no spaces or control characters)`, since no Authorization header could carry it. The API needs the same token. |
-| `Z402_LWD_URL` | regtest `http://127.0.0.1:28137`, testnet `https://testnet.zec.rocks:443`, mainnet none | A lightwalletd-compatible gRPC endpoint. `http://` is plaintext and `https://` is TLS. Required on mainnet, where no public default is trusted. |
-| `Z402_EXPECTED_BRANCH_ID` | regtest `37a5165b`, testnet `77190ad9`, mainnet none | Eight hex digits. Start-up compares them with the endpoint's `consensusBranchId`. Left unset on mainnet, the check is skipped with a warning. |
+| `Z402_FACILITATOR_TOKEN` | none | Required. The bearer token every caller must present, as `Authorization: Bearer <token>` (the scheme in any case, one or more spaces after it). It must be one token of letters, digits and `-._~+/`, which may end in any number of `=` (an RFC 6750 b64token), so `openssl rand -hex 16` and `openssl rand -base64 24` both pass. An `=` anywhere but at the end is refused. Anything else is refused at start with `Z402_FACILITATOR_TOKEN: must be one token of letters, digits and -._~+/ (no spaces or control characters)`, since no Authorization header could carry it. The API needs the same token. |
+| `Z402_LWD_URL` | regtest `http://127.0.0.1:28137`, testnet `https://testnet.zec.rocks:443`, mainnet none | A lightwalletd-compatible gRPC endpoint. `http://` is plaintext and `https://` is TLS. On testnet and mainnet `http://` is allowed only to a loopback host (`localhost`, `127.0.0.0/8` or `[::1]`), and any other host is refused with `Z402_LWD_URL: plaintext http:// is allowed only to a loopback host on <network>; use https://`. Regtest allows it to any host, such as another container of a compose network. The loopback test reads the host as `new URL()` parses it, so `127.1` and `[0:0:0:0:0:0:0:1]` count as loopback, while `localhost.` and `[::ffff:127.0.0.1]` do not. A username or password in the URL is ignored: it is neither sent nor printed. Required on mainnet, where no public default is trusted. On mainnet a host that is not loopback gives the warning `Z402_LWD_URL points at <host>: the facilitator trusts it for whether a deposit exists and how deep it is mined; for real money use a node you operate`. |
+| `Z402_EXPECTED_BRANCH_ID` | regtest `37a5165b`, testnet `77190ad9`, mainnet none | Eight hex digits. Start-up compares them with the endpoint's `consensusBranchId`. Left unset on mainnet, that check is skipped with a warning, and the network check still runs. |
 | `Z402_ZDECRYPT_BIN` | `crates/zdecrypt/target/release/zdecrypt` | The decryptor. `pnpm --filter @z402/facilitator build:native` builds the default. |
 | `Z402_LEDGER` | `.data/facilitator-ledger.<network>.jsonl` | The append-only JSON Lines ledger, replayed at start. One facilitator at a time writes it, through `<ledger>.lock` (see [The ledger and its lock](#the-ledger-and-its-lock)). |
-| `Z402_FACILITATOR_HOST` | `127.0.0.1` | The address to listen on. Keep it on loopback, since the only protection is the token. |
+| `Z402_FACILITATOR_HOST` | `127.0.0.1` | The address to listen on. Keep it on loopback, since the only protection is the token. Any other address gives the warning `Z402_FACILITATOR_HOST: <host> is not a loopback host, so the facilitator and its bearer token are reachable over plain http`. The value is matched as written: only `localhost` (in any letter case), `::1` or `[::1]`, and `127.` followed by three dot-separated groups of one to three digits count as loopback. Other spellings of a loopback address, such as `127.1`, `localhost.`, `0:0:0:0:0:0:0:1` or `::ffff:127.0.0.1`, also get the warning. |
 | `Z402_FACILITATOR_PORT` | `4022` | 0 to 65535, where 0 picks a free port. |
 | `Z402_PRICE_ZAT` | `500` | The price of one call in zatoshi, at least 1. Give the API the same `Z402_PRICE_ZAT`. Nothing checks that at start, and with different prices every paid call is refused with `invalid_payment_requirements`. |
 | `Z402_WINDOW_ZAT` | `100000` | The size of one deposit, which is also the cap on unconfirmed exposure. |
@@ -102,8 +103,8 @@ The process exits 1 at the first failure. The message names the check, and the v
 1. The configuration parses, and the address and key match the network.
 2. `zdecrypt` decrypts a bundled real transaction (the Kage vector `030c3cbf...8351`) to the output it is known to hold.
 3. `zdecrypt owns` says the viewing key owns the payTo address (`ownedByKey: true`) and that the address has no transparent receiver (`hasTransparent: false`).
-4. `GetLightdInfo.consensusBranchId` equals `Z402_EXPECTED_BRANCH_ID`. `chainName` is never compared, because Zaino reports `test` on regtest.
-5. The ledger is locked, proven writable, and replayed (next section). A truncated last line is dropped with a warning.
+4. One `GetLightdInfo` answers two checks. Its `saplingActivationHeight` must be the network's: 419200 on mainnet, 280000 on testnet, and neither of those on regtest (Z3's Zaino reports 1). Otherwise the start stops with `startup check failed (network): lightwalletd reports Sapling activation at <height>, which is not <network>'s; Z402_LWD_URL serves another network`. Then its `consensusBranchId` must equal `Z402_EXPECTED_BRANCH_ID`, which checks the upgrade. `chainName` is never compared, because Zaino reports `test` on regtest.
+5. The ledger is locked, proven writable, and replayed in chunks, so a long ledger is never held in memory whole (next section). A truncated last line is dropped with a warning. A new ledger starts with a header line that names its network and payTo. A ledger whose header names another network or payTo stops the start, untouched, with `ledgerPath: <ledger> is the ledger of <network> <payTo>, not of this facilitator`. A ledger with no header, written before the header existed, opens on regtest and testnet, and on mainnet it stops the start with `ledgerPath: <ledger> has no ledger header; a mainnet facilitator opens only a ledger it created`.
 
 After the checks it polls the chain once, then listens. A failed first poll does not stop the start. The watcher then checks the tip every 5 s.
 
@@ -113,13 +114,19 @@ A failed ledger write exits 1, so that a restart replays the file. Until then th
 
 One facilitator at a time writes a ledger. Before it reads the file, a facilitator takes the lock `<ledger>.lock`, for example `.data/facilitator-ledger.regtest.jsonl.lock`:
 
-- The lock is a small file, created exclusively with mode 0600. It holds the pid, the host name, a random token and the start time of its owner.
-- A second facilitator on the same ledger does not start, and it leaves the ledger as it was. It stops with `ledgerPath: <ledger> is in use by pid <pid> on <host> since <time>; stop that facilitator, or delete <ledger>.lock if none is running`. Inside one process the message is `ledgerPath: <ledger> is already open in this process`.
-- A lock that a crash left behind is taken over, once, when it is stale. That means it names this host, and a pid that no longer exists or this very pid from an earlier run (pid 1 again after a container restart). A pid that belongs to another user counts as alive. A lock that names another host is never taken over, even if that host is gone: the message names the host, and you delete the lock by hand once you know that no facilitator runs there. A lock file that cannot be read as a lock stops the start too: `ledgerPath: <ledger>.lock exists and cannot be read; delete it if no facilitator is running`.
+- The lock is a small file, created exclusively with mode 0600 beside the ledger's real path, with links and letter case resolved, so every spelling of one ledger shares one lock. It holds the pid, the host name, a random token and the start time of its owner, and the owner touches it every 5 s while it runs.
+- One facilitator per ledger path. A symbolic link to the ledger, and on a case-insensitive filesystem (the macOS default) another letter case of the path, name the same real path, so they share the lock and the second start is refused (`ledgerPath: <path> is already open in this process` inside one process, and the message below across processes). A hard link is the one other name that does not resolve: it is another path to the same file, so a facilitator started on it takes a lock of its own beside the link, finds the ledger unlocked and starts, and two facilitators then append to one file. Never open a ledger by a hard link, and never give two running facilitators two names of one ledger.
+- A second facilitator on the same ledger does not start, and it leaves the ledger as it was. It stops with `ledgerPath: <ledger> is in use by pid <pid> on <host> since <time>; stop that facilitator, or delete <ledger>.lock if none is running`. It stops at once when the lock names a live pid of this host, and a pid of another user counts as alive. Any other fresh lock (a pid that no longer exists, this very pid as a container's pid 1 would be, another host, or a lock it cannot read) may belong to a facilitator this process cannot see, in another container that shares the volume for example. So the start watches it for up to 15 s, and a touch in that time stops the start. Inside one process the message is `ledgerPath: <ledger> is already open in this process`.
+- A lock that nobody touched for 15 s was left by a crash, whatever pid or host it names, and the next start takes it over with no help. A crashed facilitator can therefore be replaced within 15 s, and a start can wait that long. Neither rule depends on the host name staying the same, which macOS may change when the network does. A facilitator that is paused for longer than 15 s (SIGSTOP, a suspended VM) looks crashed, and another start may take its lock over.
+- The holder reads its lock back at every heartbeat and before every ledger write, a check that costs about 13 µs per write here. Once the lock names another start, or is gone, the facilitator writes nothing more, reports `ledgerPath: <ledger> is no longer locked by this facilitator (...), so it writes nothing more`, and exits 1. A paused facilitator that resumes after a takeover therefore stops at its first check. One batch can still pass: the check and the append run back to back, about 20 µs apart (median, measured; up to tens of milliseconds under heavy CPU load), so a facilitator stopped exactly between them (SIGSTOP, a VM pause, a write hung on a stalled network filesystem) appends the batch it was writing to a ledger the new holder has already replayed. Closing that window needs `flock` or a lease, which is a mainnet item.
+- The takeover runs under `<ledger>.lock.takeover`, created exclusively, and it checks again under that file that the lock is still the one it judged stale, so of two starts that race for one stale lock only one wins.
+- A lock that cannot be read as one (empty or garbled, as a crash between its creation and its first write leaves it) is stale like any other once 15 s pass with no touch. If it changes while a start watches it, the start stops with `ledgerPath: <ledger>.lock exists and cannot be read; delete it if no facilitator is running`. Anything but a regular file at the lock path, such as a FIFO or a symbolic link, stops the start with `ledgerPath: <ledger>.lock is not a regular file; delete it if no facilitator is running`.
 - Closing the facilitator removes the lock, but only while the lock still carries its owner's token. A start that fails after the lock was taken, on a busy port for example, gives it back.
-- Taking over a stale lock is not atomic, so two facilitators that start at the same instant on one stale lock can both succeed. The lock guards against a second run by mistake. It is not a mutex.
+- To clear a lock by hand, first make sure that no facilitator runs on that ledger anywhere, on this host or in any container that mounts it. Then delete `<ledger>.lock`, and `<ledger>.lock.takeover` if it is there. After a crash that is never needed, only to start sooner than 15 s.
 
-The lock is followed by a write check. The facilitator opens the ledger for appending, which creates it empty with mode 0600 when it does not exist yet, and it stops before its first chain poll if that fails: `ledgerPath: <ledger> is not writable (EACCES)`, with `EISDIR` or `EROFS` in the same place, and `ledgerPath: cannot open <ledger> (<code>)` for any other error. A facilitator that prints its ready line can therefore record a settle.
+The lock is created before anything else, so the first failure of a ledger that cannot be written is often the lock's own. A directory you cannot write to (mode 0555, say) or a read-only mount stops the start with `ledgerPath: cannot create <ledger>.lock (EACCES)`, or `(EROFS)` on a read-only mount, and the write check below is never reached. A ledger directory that does not exist and cannot be created gives `ledgerPath: cannot create the directory of <ledger> (<code>)` instead.
+
+The lock is followed by a write check. The facilitator opens the ledger for appending, which creates it empty with mode 0600 when it does not exist yet, and it stops before its first chain poll if that fails: `ledgerPath: <ledger> is not writable (EACCES)` for a ledger file that you cannot write (mode 0444, say), with `EISDIR` when the path is a directory and `EROFS` in the same place, and `ledgerPath: cannot open <ledger> (<code>)` for any other error. The lock is given back whenever the start fails here. A facilitator that prints its ready line can therefore record a settle.
 
 ## Options of `startFacilitator`
 
@@ -129,12 +136,12 @@ The process builds its options from the variables above. The tests and `apps/e2e
 | --- | --- | --- |
 | `port` | a whole number from 0 to 65535 | 0, a free port |
 | `pollIntervalMs` | a whole number from 1 to 2,147,483,647, the longest delay a timer honours | 5000 |
-| `depositWaitMs` | a whole number from 0 to 60,000 | 30,000 |
+| `depositWaitMs` | a whole number from 0 to 30,000, since the API's 60 s for a verify is sized for this wait, the read that ends it and the 5 s refresh | 30,000 |
 | `host` | not blank | `127.0.0.1` |
 | `ledgerPath` | not blank, or left out for an in-memory ledger that takes no lock and writes no file | none |
-| `authToken` | one token of letters, digits and `-._~+/`, optionally ending in `=`, or left out to check no token | none |
+| `authToken` | one token of letters, digits and `-._~+/` that may end in any number of `=`, or left out to check no token | none |
 
-A host that the machine does not have fails when it listens, as `host: cannot listen on <host>:<port> (<code>)`. A port that is busy or forbidden fails as `port: cannot listen on <host>:<port> (EADDRINUSE)`.
+A host that the machine does not have fails when it listens, as `host: cannot listen on <host>:<port> (<code>)`. A port that is busy fails as `port: cannot listen on <host>:<port> (EADDRINUSE)`, and a port that you may not bind (a port below 1024 without root, for one) fails as `port: cannot listen on <host>:<port> (EACCES)`.
 
 ## Merchant keys
 
@@ -146,11 +153,33 @@ It runs `zdecrypt keygen` and writes `.secrets/merchant-<network>.json` with mod
 
 - The script prints the `orchardOnlyAddress` on stdout and a backup reminder on stderr. Nothing else leaves the file.
 - It refuses to replace an existing file. `--force` replaces it and keeps the old one as `<file>.replaced-<UTC time>` (for example `merchant-regtest.json.replaced-20261027T205936Z`, mode 0600), so a replaced seed is never destroyed. The script prints that path, never the contents.
-- The keys path is never absent. The old file first gets a second name, or a copy where the filesystem has no hard links (FAT and exFAT), and then the new file takes the place of the old one by an atomic rename. A failure before the rename leaves the old file where it was, byte for byte. Key files must be 0600, so `--force` sets the old file to that mode on the way, and where a hard link made the second name the mode stays set even if the write then fails.
-- `--force` refuses a symbolic link: exit 2 with "the key file is a symbolic link; replace it by hand". A new key file on a filesystem without hard links needs `--force` as well, which creates it with a rename and keeps any file that is already there.
+- Run one merchant-keygen at a time: two runs on the same key file can lose a key whose address was already printed.
+- The keys path is never absent. The old file first gets a second name, or a copy where the filesystem has no hard links (FAT and exFAT), and the directory entry of that name is synced. Then the new file takes the place of the old one by an atomic rename. A failure before the rename leaves the old file where it was, byte for byte. Key files must be 0600, so `--force` sets the old file to that mode on the way, and where a hard link made the second name the mode stays set even if the write then fails.
+- A rename that reports an error may have happened all the same, so after the old file got its second name the script never deletes that name. It exits 1, names the kept file and the key path, and says "check which key <path> holds before you use it". Read `orchardOnlyAddress` in both files to tell them apart.
+- A new key file is published with an exclusive create, with or without `--force`: the finished temp file is hard-linked to the key path, and the link fails if anything is there. Two runs that race for one new path cannot overwrite each other. The loser of the race refuses, or with `--force` it keeps the winner's file as `<file>.replaced-<UTC time>` and writes its own key, so both keys are on disk. A filesystem without hard links (FAT, exFAT) has no exclusive create, so a new key file there is refused with `cannot create <file> here, the filesystem has no hard links for the exclusive create; create the file on another filesystem and copy it here`. `--force` still replaces a file that exists there, keeping the old one as a copy.
+- A symbolic link as the key file is refused with or without `--force`: exit 2 with "the key file is a symbolic link; replace it by hand".
+- The temp file's mode is read back before any key is written. A filesystem that does not keep mode 0600 (FAT and exFAT show the mode of their mount) makes `mainnet` stop with exit 2 and no key, and gives `regtest` and `testnet` one warning, "this filesystem does not keep file modes; the key file is readable by other users".
 - After the write the script syncs the directory entries to disk, the new directories included. If that fails, it still prints the address and the kept file, then one warning ("the new key is in place but its directory entry may not survive a power loss; run sync"), and it exits 1.
 - On `mainnet` the seed controls real money and the script says so. A server needs only `Z402_UIVK` and `Z402_PAY_TO`, so keep the seed off it.
 - `--out <absolute path>` writes somewhere else, but only outside the repository or inside its `.secrets/` directory (symlinks are resolved first). Any other path in the work tree exits 2, since a key file there can be committed by accident. The binary and the default output are found from the script's own location, so the working directory does not matter.
+
+### The facilitator's keys file
+
+```bash
+node scripts/merchant-keygen.mjs --view-only --from .secrets/merchant-regtest.json
+```
+
+The facilitator needs the viewing key and the address and has no use for the seed, so give it a keys file without one. `--view-only` makes no key. It reads a keys file that the command above wrote and writes `.secrets/merchant-<network>.view.json` (the network is the file's own) with mode 0600, holding exactly these three fields and nothing else:
+
+```json
+{ "network": "regtest", "uivk": "uivkregtest1...", "orchardOnlyAddress": "uregtest1..." }
+```
+
+This is the recommended `Z402_MERCHANT_KEYS_FILE` of the facilitator. It has no `seedHex` and no `ufvk`, so the facilitator prints no warning about it, and mainnet accepts it. The API accepts it too (`Z402_MERCHANT_KEYS_FILE`, `apps/api/README.md`) and uses only its address.
+
+- It prints the address on stdout and `Saved <path> (mode 600)` on stderr, and nothing of the key.
+- It follows the rules of the command above: an exclusive create, no replacing of a file that exists without `--force`, which keeps the old file as `<file>.replaced-<UTC time>`, no symbolic link, `--out` only outside the repository or inside `.secrets/`, and the same check that the filesystem keeps file modes. `--from` is a path from the working directory. `--network` is optional, and if it is given it must be the file's network (exit 2 otherwise).
+- It refuses a file whose `uivk` or `orchardOnlyAddress` does not fit the network, and no message quotes the file.
 
 Check that the key owns the address. The key goes through the environment, never an argument:
 
@@ -166,7 +195,7 @@ ZDECRYPT_KEY=$(jq -r .uivk .secrets/merchant-regtest.json) crates/zdecrypt/targe
 scripts/show-deposit.sh <txid> [--network regtest] [--keys <file>]
 ```
 
-It fetches the raw transaction from Zebra (`getrawtransaction <txid> 1` at `Z3_ZEBRA_RPC`, default `http://127.0.0.1:29232`, Basic auth `Z3_RPC_USER:Z3_RPC_PASSWORD`, default `zebra:zebra`), then decrypts it with the viewing key from the keys file (default `.secrets/merchant-<network>.json`). A mined transaction is judged at its height and a mempool one at the tip plus one. The key reaches `zdecrypt` through `ZDECRYPT_KEY` only and is never printed. The JSON report is on stdout and the commentary is on stderr, so `scripts/show-deposit.sh <txid> 2>/dev/null | jq` works. The report goes through `jq -a`, which escapes every non-ASCII and control character, so a memo chosen by the sender cannot reach the terminal as one, and the text that Zebra sends in an error is cut to printable characters. After the report, a line says whether only the net value balance (the fee) is public, as for a fully shielded deposit, or the transaction also has a transparent part. The script needs `curl`, `jq`, `base64` and `perl`. `scripts/demo.sh show` runs it.
+It fetches the raw transaction from Zebra (`getrawtransaction <txid> 1` at `Z3_ZEBRA_RPC`, default `http://127.0.0.1:29232`, Basic auth `Z3_RPC_USER:Z3_RPC_PASSWORD`, default `zebra:zebra`), then decrypts it with the viewing key from the keys file (default `.secrets/merchant-<network>.json`). A mined transaction is judged at its height and a mempool one at the tip plus one. The key reaches `zdecrypt` through `ZDECRYPT_KEY` only and is never printed. The JSON report is on stdout and the commentary is on stderr, so `scripts/show-deposit.sh <txid> 2>/dev/null | jq` works. The report goes through `jq -a`, which escapes every non-ASCII and control character, so a memo chosen by the sender cannot reach the terminal as one, and the text that Zebra sends in an error is cut to printable characters, with control, format and line separator characters removed whatever `PERL_UNICODE` or `PERL5OPT` say. A `zdecrypt` that prints something other than a JSON report ends the run with `ERROR: zdecrypt did not print a JSON report`, and one whose report names no txid with `ERROR: zdecrypt printed a report with no txid`. After the report, a line says whether only the net value balance (the fee) is public, as for a fully shielded deposit, or the transaction also has a transparent part. The script needs `curl`, `jq`, `base64`, `perl` and `env`. `scripts/demo.sh show` runs it.
 
 ## Testnet
 
@@ -174,8 +203,9 @@ The same process runs against the public testnet. Only `testnet.zec.rocks:443` a
 
 ```bash
 node scripts/merchant-keygen.mjs --network testnet
+node scripts/merchant-keygen.mjs --view-only --from .secrets/merchant-testnet.json
 Z402_NETWORK=testnet \
-Z402_MERCHANT_KEYS_FILE=.secrets/merchant-testnet.json \
+Z402_MERCHANT_KEYS_FILE=.secrets/merchant-testnet.view.json \
 pnpm --filter @z402/facilitator start
 ```
 

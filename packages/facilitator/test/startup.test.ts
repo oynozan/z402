@@ -12,6 +12,7 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { startFakeLwd, type FakeLwd } from "../../lightwalletd/test/support/fakeLwd.js";
 import { runStartupChecks, StartupError } from "../src/startup.js";
 import { FakeBinaries, type Call } from "./support/fakeZdecrypt.js";
 import { KAGE_MEMO, KAGE_TXID, keys, minedFixture, ZDECRYPT_BIN } from "./support/fixtures.js";
@@ -27,8 +28,24 @@ afterAll(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-function lwdAt(consensusBranchId: string, chainName = "test") {
-  const info: LightdInfo = { chainName, consensusBranchId, blockHeight: 1, version: "v0.0.0" };
+/** The Sapling activation each network's lightwalletd reports, regtest's as Z3's Zaino reports it */
+const SAPLING_AT: Record<ZcashNetwork, number> = {
+  [NETWORK_MAINNET]: 419_200,
+  [NETWORK_TESTNET]: 280_000,
+  [NETWORK_REGTEST]: 1,
+};
+
+/** A lightwalletd of `network`, testnet unless given, on the branch given */
+function lwdAt(consensusBranchId: string, over: Partial<LightdInfo> & { network?: ZcashNetwork } = {}) {
+  const { network = NETWORK_TESTNET, ...fields } = over;
+  const info: LightdInfo = {
+    chainName: "test",
+    saplingActivationHeight: SAPLING_AT[network],
+    consensusBranchId,
+    blockHeight: 1,
+    version: "v0.0.0",
+    ...fields,
+  };
   return { getLightdInfo: vi.fn(async () => info) };
 }
 
@@ -60,7 +77,8 @@ describe("runStartupChecks with the real zdecrypt", () => {
   test("never looks at chainName", async () => {
     // Zaino reports "test" on regtest, so no name can be trusted
     for (const chainName of ["main", "regtest", "", "anything"]) {
-      await expect(runStartupChecks({ ...merchant, lwd: lwdAt(TESTNET_BRANCH, chainName) })).resolves.toBeUndefined();
+      const lwd = lwdAt(TESTNET_BRANCH, { chainName });
+      await expect(runStartupChecks({ ...merchant, lwd })).resolves.toBeUndefined();
     }
   });
 
@@ -74,9 +92,8 @@ describe("runStartupChecks with the real zdecrypt", () => {
   });
 
   test("a key of another network is refused by the owns check without echoing the key", async () => {
-    const error = await refusal(
-      runStartupChecks({ ...merchant, network: NETWORK_REGTEST, lwd: lwdAt(REGTEST_BRANCH) }),
-    );
+    const lwd = lwdAt(REGTEST_BRANCH, { network: NETWORK_REGTEST });
+    const error = await refusal(runStartupChecks({ ...merchant, network: NETWORK_REGTEST, lwd }));
     expect(error.message).toMatch(/owns/);
     expect(error.message).not.toContain(keys.merchant.uivk.slice(12, 60));
   });
@@ -95,14 +112,14 @@ describe("runStartupChecks with the real zdecrypt", () => {
     ).resolves.toBeUndefined();
   });
 
-  test("a lightwalletd that does not answer is refused as consensusBranchId", async () => {
+  test("a lightwalletd that does not answer is refused as the network check", async () => {
     const lwd = {
       getLightdInfo: async (): Promise<LightdInfo> => {
         throw new ChainUnavailableError("lightwalletd GetLightdInfo failed: 14 UNAVAILABLE");
       },
     };
     const error = await refusal(runStartupChecks({ ...merchant, lwd }));
-    expect(error.message).toMatch(/consensusBranchId/);
+    expect(error.message).toMatch(/^startup check failed \(network\): /);
     expect(error.message).toMatch(/Z402_LWD_URL/);
     expect(error.message).toMatch(/UNAVAILABLE/);
   });
@@ -170,7 +187,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
     async (network, bare, branch) => {
       reply(KAGE_REPORT);
       const before = calls().length;
-      await run({ network, expectedBranchId: branch, lwd: lwdAt(branch) });
+      await run({ network, expectedBranchId: branch, lwd: lwdAt(branch, { network }) });
 
       const made = calls().slice(before);
       expect(made).toHaveLength(2);
@@ -241,9 +258,59 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
   test("a mainnet start without an expected branch id warns instead of failing", async () => {
     reply(KAGE_REPORT);
     const log = vi.fn<(message: string) => void>();
-    await run({ network: NETWORK_MAINNET, expectedBranchId: undefined, lwd: lwdAt("deadbeef"), log });
+    const lwd = lwdAt("deadbeef", { network: NETWORK_MAINNET });
+    await run({ network: NETWORK_MAINNET, expectedBranchId: undefined, lwd, log });
     expect(log).toHaveBeenCalledTimes(1);
     expect(log.mock.calls[0]?.[0]).toMatch(/Z402_EXPECTED_BRANCH_ID/);
+  });
+
+  describe("the network lightwalletd serves", () => {
+    const otherNetwork = (reported: number, network: ZcashNetwork) =>
+      `startup check failed (network): lightwalletd reports Sapling activation at ${reported}, ` +
+      `which is not ${network}'s; Z402_LWD_URL serves another network`;
+
+    test("mainnet refuses an endpoint on testnet's Sapling activation and branch, branch id or not", async () => {
+      reply(KAGE_REPORT);
+      for (const expectedBranchId of [undefined, TESTNET_BRANCH]) {
+        const log = vi.fn<(message: string) => void>();
+        const lwd = lwdAt(TESTNET_BRANCH, { network: NETWORK_TESTNET });
+        const error = await refusal(run({ network: NETWORK_MAINNET, expectedBranchId, lwd, log }));
+        expect(error.message).toBe(otherNetwork(280_000, NETWORK_MAINNET));
+        expect(log).not.toHaveBeenCalled();
+      }
+    });
+
+    test("testnet refuses an endpoint that reports regtest's Sapling activation", async () => {
+      reply(KAGE_REPORT);
+      const error = await refusal(run({ lwd: lwdAt(TESTNET_BRANCH, { network: NETWORK_REGTEST }) }));
+      expect(error.message).toBe(otherNetwork(1, NETWORK_TESTNET));
+    });
+
+    test.each([280_000, 419_200])("regtest refuses an endpoint that reports %i", async (reported) => {
+      reply(KAGE_REPORT);
+      const lwd = lwdAt(REGTEST_BRANCH, { saplingActivationHeight: reported });
+      const error = await refusal(run({ network: NETWORK_REGTEST, expectedBranchId: REGTEST_BRANCH, lwd }));
+      expect(error.message).toBe(otherNetwork(reported, NETWORK_REGTEST));
+    });
+
+    test("regtest passes the Sapling activation at 1 that Z3's Zaino reports", async () => {
+      reply(KAGE_REPORT);
+      const lwd = lwdAt(REGTEST_BRANCH, { network: NETWORK_REGTEST });
+      await expect(run({ network: NETWORK_REGTEST, expectedBranchId: REGTEST_BRANCH, lwd })).resolves.toBeUndefined();
+    });
+
+    test("is checked before the branch, so an endpoint on another network is named as one", async () => {
+      reply(KAGE_REPORT);
+      const error = await refusal(run({ lwd: lwdAt(REGTEST_BRANCH, { network: NETWORK_REGTEST }) }));
+      expect(error.message).toBe(otherNetwork(1, NETWORK_TESTNET));
+    });
+
+    test("and the branch are read from one GetLightdInfo", async () => {
+      reply(KAGE_REPORT);
+      const lwd = lwdAt(TESTNET_BRANCH);
+      await run({ lwd });
+      expect(lwd.getLightdInfo).toHaveBeenCalledTimes(1);
+    });
   });
 
   test("an expected branch id is not warned about", async () => {
@@ -257,14 +324,22 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
     const KEY = "uivk1" + "q".repeat(100);
     const PAY_TO = "u1" + "q".repeat(60);
     const TOKEN = "main-test-token";
+    let lwd: FakeLwd;
+
+    beforeAll(async () => {
+      lwd = await startFakeLwd({
+        latestBlock: { height: "3000000" },
+        lightdInfo: { chainName: "main", saplingActivationHeight: "419200", consensusBranchId: "c2d6d0b4" },
+      });
+    });
+    afterAll(() => lwd.close());
 
     function configured(over: Record<string, string> = {}): NodeJS.ProcessEnv {
       const clean = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("Z402_")));
       return {
         ...clean,
-        // Mainnet is the one network whose startup checks ask lightwalletd nothing, so a closed port stands in for it
         Z402_NETWORK: "mainnet",
-        Z402_LWD_URL: "http://127.0.0.1:1",
+        Z402_LWD_URL: lwd.url,
         Z402_PAY_TO: PAY_TO,
         Z402_UIVK: KEY,
         Z402_FACILITATOR_TOKEN: TOKEN,
@@ -299,6 +374,16 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
       expect(await exited).toBe(1);
       expect(out.stderr).toMatch(/Z402_FACILITATOR_TOKEN/);
       expect(out.stdout).toBe("");
+    });
+
+    test("each config warning goes to stderr before the startup checks run", { timeout: 30_000 }, async () => {
+      reply(withOutput({ valueZat: 1 }));
+      const { out, exited } = launch(configured({ Z402_LWD_URL: "https://lwd.invalid:443" }));
+      expect(await exited).toBe(1);
+      expect(out.stdout).toBe("");
+      const lines = out.stderr.trimEnd().split("\n");
+      expect(lines[0]).toMatch(/^facilitator: warning: Z402_LWD_URL points at lwd\.invalid: /);
+      expect(lines.slice(1).join("\n")).toMatch(/startup check failed \(self-test\)/);
     });
 
     test("a failed check exits 1 naming the check and never prints the key", { timeout: 30_000 }, async () => {

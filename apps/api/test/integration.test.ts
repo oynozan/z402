@@ -19,6 +19,7 @@ import { startFacilitator, type FacilitatorOptions } from "@z402/facilitator";
 import {
   DEMO_TERMS,
   depositMemo,
+  NETWORK_MAINNET,
   NETWORK_REGTEST,
   NETWORK_TESTNET,
   parseSessionSnapshot,
@@ -37,6 +38,7 @@ const NETWORK = NETWORK_REGTEST;
 const PAY_TO = `uregtest1${"q".repeat(60)}`;
 const OTHER_PAY_TO = `uregtest1${"p".repeat(60)}`;
 const TESTNET_PAY_TO = `utest1${"q".repeat(60)}`;
+const MAINNET_PAY_TO = `u1${"q".repeat(60)}`;
 const TOKEN = "t-api-4c9a1e-secret";
 /** The facilitator's terms version for PAY_TO, price 500 and the demo terms, as packages/facilitator/test/app.test.ts pins it */
 const TERMS_VERSION = "23e5935a1b39a198";
@@ -511,6 +513,8 @@ describe("startApi", () => {
     ["facilitatorUrl", { facilitatorUrl: "http://op@127.0.0.1:9" }],
     ["facilitatorToken", { facilitatorToken: "abc\nSECRET" }],
     ["facilitatorToken", { facilitatorToken: "two words" }],
+    ["facilitatorUrl", { network: NETWORK_TESTNET, payTo: TESTNET_PAY_TO, facilitatorUrl: "http://192.0.2.1:9" }],
+    ["facilitatorUrl", { network: NETWORK_MAINNET, payTo: MAINNET_PAY_TO, facilitatorUrl: "http://f.example:4022" }],
     ["host", { host: " " }],
     ["port", { port: 70000 }],
     ["port", { port: 1.5 }],
@@ -518,6 +522,25 @@ describe("startApi", () => {
     const requests = vi.spyOn(globalThis, "fetch");
     await expect(startApi(apiOptions("http://127.0.0.1:9", over))).rejects.toThrow(new RegExp(`^${field}:`));
     expect(requests).not.toHaveBeenCalled();
+  });
+
+  test("plaintext http:// to a host that is not loopback is refused off regtest with the rule it broke", async () => {
+    const over: Partial<ApiOptions> = { network: NETWORK_TESTNET, payTo: TESTNET_PAY_TO };
+    await expect(startApi(apiOptions("http://192.0.2.1:9", over))).rejects.toThrow(
+      new Error("facilitatorUrl: plaintext http:// is allowed only to a loopback host on zcash:testnet; use https://"),
+    );
+  });
+
+  test.each<[string, Partial<ApiOptions>]>([
+    ["http://127.0.0.1:9", { network: NETWORK_TESTNET, payTo: TESTNET_PAY_TO }],
+    ["http://localhost:9", { network: NETWORK_TESTNET, payTo: TESTNET_PAY_TO }],
+    ["http://[::1]:9", { network: NETWORK_MAINNET, payTo: MAINNET_PAY_TO }],
+    ["https://f.example:8443", { network: NETWORK_MAINNET, payTo: MAINNET_PAY_TO }],
+    ["http://facilitator:4022", {}],
+  ])("%s passes the option check and is asked for /supported", async (url, over) => {
+    const requests = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+    await expect(startApi(apiOptions(url, over))).rejects.toThrow(/^facilitatorUrl: /);
+    expect(requests).toHaveBeenCalled();
   });
 
   test.each<[string, Partial<ApiOptions>, string]>([

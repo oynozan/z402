@@ -43,6 +43,8 @@ export interface FacilitatorEnv {
   port: number;
   priceZat: bigint;
   terms: Terms;
+  /** Settings that work but put something at risk, which main prints before the startup checks */
+  warnings: string[];
 }
 
 type Env = Record<string, string | undefined>;
@@ -114,10 +116,17 @@ function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
 }
 
+interface KeysFile {
+  fields: Record<string, unknown>;
+  path: string;
+  /** What the file holds that the facilitator must not, the spending seed before the full viewing key */
+  secret: string | undefined;
+}
+
 /** Reads the keys file, quoting none of it in an error */
-function readKeysFile(env: Env): Record<string, unknown> {
+function readKeysFile(env: Env): KeysFile | undefined {
   const configured = read(env, "Z402_MERCHANT_KEYS_FILE");
-  if (configured === undefined) return {};
+  if (configured === undefined) return undefined;
   const path = pathOf(configured);
 
   let text: string;
@@ -137,7 +146,18 @@ function readKeysFile(env: Env): Record<string, unknown> {
   if (!isRecord(parsed)) {
     throw new ConfigError(`Z402_MERCHANT_KEYS_FILE: ${path} must hold the JSON object that zdecrypt keygen prints`);
   }
-  return parsed;
+  const secret = Object.hasOwn(parsed, "seedHex")
+    ? "the spending seed"
+    : Object.hasOwn(parsed, "ufvk")
+      ? "the full viewing key"
+      : undefined;
+  return { fields: parsed, path, secret };
+}
+
+/** localhost, 127.0.0.0/8 or ::1, with or without the brackets a URL puts around an IPv6 address */
+function isLoopback(host: string): boolean {
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return bare.toLowerCase() === "localhost" || bare === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare);
 }
 
 function termsOf(env: Env): Terms {
@@ -183,9 +203,15 @@ function portOf(env: Env): number {
 function lwdUrlOf(env: Env, profile: Profile): string {
   const url = read(env, "Z402_LWD_URL") ?? profile.lwdUrl;
   if (url === undefined) throw new ConfigError("Z402_LWD_URL is required on mainnet (no public default is trusted)");
-  const protocol = URL.canParse(url) ? new URL(url).protocol : "";
-  if (protocol !== "http:" && protocol !== "https:") {
+  const parsed = URL.canParse(url) ? new URL(url) : undefined;
+  if (parsed === undefined || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
     throw new ConfigError("Z402_LWD_URL: expected an http:// or https:// URL");
+  }
+  // Regtest keeps plaintext to any host, since its endpoint is often another container of the same compose network
+  if (parsed.protocol === "http:" && profile.network !== NETWORK_REGTEST && !isLoopback(parsed.hostname)) {
+    throw new ConfigError(
+      `Z402_LWD_URL: plaintext http:// is allowed only to a loopback host on ${profile.network}; use https://`,
+    );
   }
   return url;
 }
@@ -203,12 +229,23 @@ export function loadConfig(env: Env): FacilitatorEnv {
   const profile = Object.hasOwn(PROFILES, name) ? PROFILES[name] : undefined;
   if (profile === undefined) throw new ConfigError("Z402_NETWORK: expected regtest, testnet or mainnet");
   const { network } = profile;
+  const warnings: string[] = [];
 
   // The explicit variable wins, and the file is opened only for what is still missing
-  let file: Record<string, unknown> | undefined;
+  let file: KeysFile | null | undefined;
   const fromFile = (field: string): string | undefined => {
-    file ??= readKeysFile(env);
-    const value = file[field];
+    if (file === undefined) {
+      file = readKeysFile(env) ?? null;
+      if (file?.secret !== undefined) {
+        const advice =
+          `Z402_MERCHANT_KEYS_FILE: ${file.path} holds ${file.secret}; ` +
+          "give the facilitator only uivk and orchardOnlyAddress, or set Z402_UIVK and Z402_PAY_TO";
+        // Whoever breaks into the network-facing facilitator gets what it holds, which must not be real money
+        if (network === NETWORK_MAINNET) throw new ConfigError(advice);
+        warnings.push(advice);
+      }
+    }
+    const value = file?.fields[field];
     return typeof value === "string" && value !== "" ? value : undefined;
   };
   const keyed = (variable: string, field: string, hint: string): { value: string; origin: string } => {
@@ -219,7 +256,8 @@ export function loadConfig(env: Env): FacilitatorEnv {
     const configured = read(env, "Z402_MERCHANT_KEYS_FILE");
     throw new ConfigError(
       configured === undefined
-        ? `${variable} is required (${hint}, or set Z402_MERCHANT_KEYS_FILE to a zdecrypt keygen JSON)`
+        ? `${variable} is required (${hint}); set Z402_UIVK and Z402_PAY_TO, ` +
+            "or Z402_MERCHANT_KEYS_FILE to a file holding only uivk and orchardOnlyAddress"
         : `${variable} is not set and Z402_MERCHANT_KEYS_FILE has no "${field}" string`,
     );
   };
@@ -247,11 +285,24 @@ export function loadConfig(env: Env): FacilitatorEnv {
   }
 
   const lwdUrl = lwdUrlOf(env, profile);
+  const lwdHost = new URL(lwdUrl).hostname;
+  if (network === NETWORK_MAINNET && !isLoopback(lwdHost)) {
+    warnings.push(
+      `Z402_LWD_URL points at ${lwdHost}: the facilitator trusts it for whether a deposit exists and how deep it is ` +
+        "mined; for real money use a node you operate",
+    );
+  }
   const expectedBranchId = branchIdOf(env, profile);
   const zdecryptBin = pathOf(read(env, "Z402_ZDECRYPT_BIN") ?? DEFAULT_ZDECRYPT_BIN);
   const ledgerPath = pathOf(read(env, "Z402_LEDGER") ?? `.data/facilitator-ledger.${name}.jsonl`);
   const host = read(env, "Z402_FACILITATOR_HOST") ?? "127.0.0.1";
   if (host.trim() === "") throw new ConfigError("Z402_FACILITATOR_HOST: must not be blank");
+  if (!isLoopback(host)) {
+    warnings.push(
+      `Z402_FACILITATOR_HOST: ${host} is not a loopback host, so the facilitator and its bearer token are reachable ` +
+        "over plain http",
+    );
+  }
   const port = portOf(env);
   const priceZat = priceOf(env);
   const terms = termsOf(env);
@@ -269,5 +320,6 @@ export function loadConfig(env: Env): FacilitatorEnv {
     port,
     priceZat,
     terms,
+    warnings,
   };
 }

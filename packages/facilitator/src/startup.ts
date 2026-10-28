@@ -4,8 +4,8 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LightwalletdClient } from "@z402/lightwalletd";
-import type { ZcashNetwork } from "@z402/protocol";
+import type { LightdInfo, LightwalletdClient } from "@z402/lightwalletd";
+import { NETWORK_MAINNET, NETWORK_TESTNET, type ZcashNetwork } from "@z402/protocol";
 import { ZdecryptError, zdecryptDecrypt, zdecryptNetwork, zdecryptOwns } from "./chain/zdecrypt.js";
 import { REPO_ROOT } from "./config.js";
 
@@ -34,6 +34,12 @@ const FIXTURE_DIR = join(REPO_ROOT, "crates", "zdecrypt", "tests", "fixtures");
 const KAGE_TXID = "030c3cbf78ce8460553bba4e82c0ba813f039bd3ecf4d7f2e81c59837dc28351";
 const KAGE_MEMO = "x402z-f19a63da20cbc0749ea800b3";
 const KAGE_VALUE_ZAT = 100000;
+
+/** Where Sapling activated on each public network, which tells the networks apart where chainName cannot */
+const SAPLING_ACTIVATION: ReadonlyMap<ZcashNetwork, number> = new Map([
+  [NETWORK_MAINNET, 419_200],
+  [NETWORK_TESTNET, 280_000],
+]);
 
 function failed(check: string, detail: string): StartupError {
   return new StartupError(`startup check failed (${check}): ${detail}`);
@@ -129,20 +135,36 @@ async function ownership(o: StartupCheckOptions): Promise<void> {
   }
 }
 
-/** Compares the consensus branch only, since chainName is wrong where Zaino says "test" for regtest */
-async function branch(lwd: StartupCheckOptions["lwd"], expected: string): Promise<void> {
-  const check = "consensusBranchId";
-  let reported: string;
+async function lightdInfo(lwd: StartupCheckOptions["lwd"]): Promise<LightdInfo> {
   try {
-    reported = (await lwd.getLightdInfo()).consensusBranchId;
+    return await lwd.getLightdInfo();
   } catch (e) {
-    throw failed(check, `lightwalletd did not answer GetLightdInfo (${text(e)}); check Z402_LWD_URL`);
+    throw failed("network", `lightwalletd did not answer GetLightdInfo (${text(e)}); check Z402_LWD_URL`);
   }
+}
+
+/** A regtest may activate Sapling anywhere but where a public network did, and Z3's Zaino reports 1 */
+function servesNetwork(info: LightdInfo, network: ZcashNetwork): void {
+  const reported = info.saplingActivationHeight;
+  const own = SAPLING_ACTIVATION.get(network);
+  const serves = own === undefined ? ![...SAPLING_ACTIVATION.values()].includes(reported) : reported === own;
+  if (!serves) {
+    throw failed(
+      "network",
+      `lightwalletd reports Sapling activation at ${reported}, which is not ${network}'s; ` +
+        "Z402_LWD_URL serves another network",
+    );
+  }
+}
+
+/** The consensus branch tells which network upgrade the endpoint follows */
+function branch(info: LightdInfo, expected: string): void {
+  const reported = info.consensusBranchId;
   if (reported.toLowerCase() !== expected.toLowerCase()) {
     throw failed(
-      check,
+      "consensusBranchId",
       `lightwalletd reports ${reported} but Z402_EXPECTED_BRANCH_ID is ${expected}; ` +
-        "the endpoint is on another network or upgrade (check Z402_LWD_URL and Z402_NETWORK)",
+        "the endpoint is on another upgrade (or network); check Z402_LWD_URL and Z402_NETWORK",
     );
   }
 }
@@ -151,10 +173,12 @@ async function branch(lwd: StartupCheckOptions["lwd"], expected: string): Promis
 export async function runStartupChecks(o: StartupCheckOptions): Promise<void> {
   await selfTest(o.zdecryptBin);
   await ownership(o);
+  const info = await lightdInfo(o.lwd);
+  servesNetwork(info, o.network);
   if (o.expectedBranchId === undefined) {
     const warn = o.log ?? ((message: string) => console.warn(message));
     warn("warning: Z402_EXPECTED_BRANCH_ID is not set, so the consensus branch of lightwalletd is not checked");
     return;
   }
-  await branch(o.lwd, o.expectedBranchId);
+  branch(info, o.expectedBranchId);
 }

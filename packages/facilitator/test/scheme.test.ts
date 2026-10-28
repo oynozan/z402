@@ -72,6 +72,9 @@ function pay(c: bigint, o: { txid?: string; seed?: Uint8Array } = {}): PaymentPa
   return paymentFor(requirements, voucherFor(requirements, c, { seed: o.seed, depositTxid: o.txid }));
 }
 
+/** A fresh session that has paid nothing, one per n */
+const throwaway = (n: number): Uint8Array => Uint8Array.from({ length: 32 }, (_, i) => (i * 11 + n * 3 + 40) % 256);
+
 /** Time that moves only when a test or a resolver sleep moves it */
 function fakeClock() {
   let ms = 0;
@@ -555,6 +558,67 @@ describe("deposits", () => {
     }
   });
 
+  test("with the lookups saturated, a credited-elsewhere txid and an uncredited one answer alike", async () => {
+    const gate = gated();
+    const r = rig(gate.wrap);
+    const elsewhere = await opened(r);
+    const otherMemo = send(r.chain, { memo: `${K}:2` });
+    // Twenty free verifies of txids that never answer hold the 4 slots and the 16 places in the queue
+    for (let n = 0; n < 20; n++) {
+      const txid = `f${n.toString(16).padStart(63, "0")}`;
+      gate.close(txid);
+      void r.s.verify(pay(500n, { txid, seed: throwaway(n) }), req());
+    }
+    await turn();
+
+    const seen = [];
+    for (const txid of [elsewhere, otherMemo]) {
+      const verdict = await r.s.verify(pay(500n, { txid, seed: OTHER_SEED }), req());
+      const settled = await r.s.settle(pay(500n, { txid, seed: OTHER_SEED }), req());
+      seen.push([verdict.invalidReason, verdict.invalidMessage, settled.errorReason, settled.errorMessage]);
+    }
+
+    expect(seen[0]).toEqual(seen[1]);
+    expect(seen[0]?.[0]).toBe(REASON.chainUnavailable);
+  });
+
+  test("with the chain unreadable, a credited-elsewhere txid and an uncredited one answer alike", async () => {
+    const r = rig();
+    const elsewhere = await opened(r);
+    const otherMemo = send(r.chain, { memo: `${K}:2` });
+    r.chain.setUnavailable(true);
+
+    const seen = [];
+    for (const txid of [elsewhere, otherMemo]) {
+      const verdict = await r.s.verify(pay(500n, { txid, seed: OTHER_SEED }), req());
+      const settled = await r.s.settle(pay(500n, { txid, seed: OTHER_SEED }), req());
+      seen.push([verdict.invalidReason, verdict.invalidMessage, settled.errorReason, settled.errorMessage]);
+    }
+
+    expect(seen[0]).toEqual(seen[1]);
+    expect(seen[0]?.[0]).toBe(REASON.chainUnavailable);
+  });
+
+  test("a credited deposit gone from the chain answers like a txid the chain never had", async () => {
+    const r = rig();
+    const gone = await opened(r);
+    r.chain.hold(gone);
+    r.chain.mine(41);
+    await r.watcher.pollNow();
+    expect(r.state.deposit(gone)?.status).toBe("dead");
+
+    const seen = [];
+    for (const txid of [gone, "ee".repeat(32)]) {
+      const verdict = await r.s.verify(pay(500n, { txid, seed: OTHER_SEED }), req());
+      seen.push([verdict.invalidReason, verdict.invalidMessage]);
+    }
+
+    expect(seen).toEqual([
+      [REASON.depositNotFound, "the chain has no such tx"],
+      [REASON.depositNotFound, "the chain has no such tx"],
+    ]);
+  });
+
   test("re-presented credited txid is acked, not re-credited", async () => {
     const r = rig();
     const d1 = await opened(r);
@@ -753,7 +817,7 @@ describe("stale lookup results", () => {
     return d2;
   }
 
-  test("a cached deposit that died since is dead at settle and at verify, and never credited", async () => {
+  test("a cached deposit that died since is never credited, and verify reads it once to call it dead", async () => {
     const r = rig();
     const d2 = await needingD2(r);
     r.chain.hold(d2);
@@ -762,13 +826,14 @@ describe("stale lookup results", () => {
     const inspect = vi.spyOn(r.view, "inspect");
 
     const settled = await r.s.settle(pay(125500n, { txid: d2 }), req());
-    expect(settled).toMatchObject({ success: false, errorReason: REASON.depositDead, transaction: "" });
+    expect(settled).toMatchObject({ success: false, errorReason: REASON.chainUnavailable, transaction: "" });
     expect(sessionOf(settled).limitZat).toBe("125000");
+    expect(inspect).not.toHaveBeenCalled();
     const verdict = await r.s.verify(pay(125500n, { txid: d2 }), req());
     expect(verdict).toMatchObject({ isValid: false, invalidReason: REASON.depositDead });
+    expect(inspect).toHaveBeenCalledTimes(1);
 
     expect(creditedTxids(r.ledger)).not.toContain(d2);
-    expect(inspect).not.toHaveBeenCalled();
   });
 
   test("a found result older than 30 s is not evidence, so settle answers chain_unavailable", async () => {
@@ -787,6 +852,142 @@ describe("stale lookup results", () => {
     const inspect = vi.spyOn(r.view, "inspect");
     expect((await r.s.verify(pay(500n, { txid: d1 }), req())).isValid).toBe(true);
     expect(inspect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a cached unmined deposit once the tip reaches its expiry", () => {
+  /** K's over-limit call at tip 1039 caches d pending and not zero-conf, with expiry 1041 */
+  async function cachedNearExpiry(r: Rig): Promise<string> {
+    const d = send(r.chain);
+    r.chain.hold(d);
+    r.chain.mine(39);
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({
+      invalidReason: REASON.awaitingConfirmation,
+    });
+    expect(r.resolver.peek(d)).toMatchObject({
+      kind: "found",
+      tip: 1039,
+      inspection: { location: "mempool", expiryHeight: 1041 },
+    });
+    return d;
+  }
+
+  test.each([
+    ["one block before its expiry", 0],
+    ["in its expiry block", 1],
+  ])("is read again before any answer, so a deposit mined %s counts", async (_, heldBlocks) => {
+    const r = rig();
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(heldBlocks);
+    r.chain.unhold(d);
+    r.chain.mine(1);
+    r.chain.mine(1 - heldBlocks);
+    await r.watcher.pollNow();
+    expect(r.watcher.lastTip()).toBe(1041);
+    const inspect = vi.spyOn(r.view, "inspect");
+
+    expect((await r.s.verify(pay(500n, { txid: d }), req())).isValid).toBe(true);
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(await r.s.settle(pay(500n, { txid: d }), req())).toMatchObject({ success: true, transaction: d });
+  });
+
+  test("settle never calls it dead from the cache alone, it answers chain_unavailable", async () => {
+    const r = rig();
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+
+    expect(await r.s.settle(pay(500n, { txid: d }), req())).toMatchObject({
+      success: false,
+      errorReason: REASON.chainUnavailable,
+    });
+    expect(r.ledger.replay()).toEqual([]);
+  });
+
+  test("a fresh read that finds it gone past its expiry calls it dead", async () => {
+    const r = rig();
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({ invalidReason: REASON.depositDead });
+  });
+
+  test("a fresh read that sees it unmined at a tip past its expiry calls it dead", async () => {
+    let d = "";
+    const r = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => (txid === d && r.chain.height >= 1041 ? mempoolDeposit(txid, 1041) : view.inspect(txid)),
+    }));
+    d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({ invalidReason: REASON.depositDead });
+  });
+
+  test("a fresh read that finds it gone is dead only once a tip read before that read reached the expiry", async () => {
+    let lagging = false;
+    const r = rig((view) => ({
+      // The read is answered by a backend two blocks behind the one the watcher asked
+      tip: async () => (lagging ? (await view.tip()) - 2 : view.tip()),
+      inspect: (txid) => view.inspect(txid),
+    }));
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+    expect(r.watcher.lastTip()).toBe(1041);
+    lagging = true;
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.depositNotFound,
+    });
+  });
+
+  test("a fresh read that fails answers chain_unavailable, never dead", async () => {
+    const r = rig();
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+    r.chain.setUnavailable(true);
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.chainUnavailable,
+    });
+  });
+});
+
+describe("a deposit mined in its expiry block just after a read saw it in the mempool", () => {
+  test("counts, since the read took the tip before the inspect", async () => {
+    let d = "";
+    let mineAfterInspect = false;
+    const r = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => {
+        const answer = await view.inspect(txid);
+        // Block 1041, the deposit's expiry, arrives with it right after this inspect saw it unmined
+        if (txid === d && mineAfterInspect) {
+          mineAfterInspect = false;
+          r.chain.mine(1);
+        }
+        return answer;
+      },
+    }));
+    d = send(r.chain);
+    r.chain.hold(d);
+    r.chain.mine(40);
+    r.chain.unhold(d);
+    mineAfterInspect = true;
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.awaitingConfirmation,
+    });
+    expect(r.chain.height).toBe(1041);
+    expect((await r.s.verify(pay(500n, { txid: d }), req())).isValid).toBe(true);
+    expect(await r.s.settle(pay(500n, { txid: d }), req())).toMatchObject({ success: true, transaction: d });
   });
 });
 
@@ -811,12 +1012,13 @@ describe("a credited pending deposit past its expiry while its lookups fail", ()
 
     const over = await r.s.verify(pay(100500n), req());
     expect(over).toMatchObject({ isValid: false, invalidReason: REASON.depositRequired });
+    // Left out of the limit, and listed as the pending the watcher last recorded (R49)
     expect(sessionOf(over)).toMatchObject({
       limitZat: "0",
-      deposits: [expect.objectContaining({ txid: d1, status: "dead" })],
+      deposits: [expect.objectContaining({ txid: d1, status: "pending" })],
     });
     expect(await r.s.settle(pay(1000n), req())).toMatchObject({ success: false, errorReason: REASON.depositRequired });
-    expect(await r.s.verify(pay(1000n, { txid: d1 }), req())).toMatchObject({ invalidReason: REASON.depositDead });
+    expect(await r.s.verify(pay(1000n, { txid: d1 }), req())).toMatchObject({ invalidReason: REASON.chainUnavailable });
     expect(r.ledger.replay().map((e) => e.t)).toEqual(["deposit", "voucher"]);
 
     answer = { minedAt: 1040 };
@@ -825,6 +1027,140 @@ describe("a credited pending deposit past its expiry while its lookups fail", ()
     const counted = await r.s.verify(pay(1000n), req());
     expect(counted.isValid).toBe(true);
     expect(sessionOf(counted)).toMatchObject({ confirmedZat: "100000", limitZat: "125000" });
+  });
+
+  test("is left out of the limit of a settle that succeeds on another, and listed as last recorded", async () => {
+    let d1 = "";
+    let failing = false;
+    const r = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => {
+        if (txid === d1 && failing) throw new ChainUnavailableError("lightwalletd is unreachable");
+        return view.inspect(txid);
+      },
+    }));
+    d1 = await opened(r);
+    r.chain.hold(d1);
+    const d2 = send(r.chain, { memo: `${K}:2` });
+    r.chain.mine();
+    await r.s.verify(pay(1000n, { txid: d2 }), req());
+    await until(() => r.resolver.peek(d2) !== undefined);
+    expect(await r.s.settle(pay(1000n, { txid: d2 }), req())).toMatchObject({ success: true, transaction: d2 });
+    failing = true;
+    r.chain.mine(40);
+    await r.watcher.pollNow();
+    expect(r.state.deposit(d1)?.status).toBe("pending");
+    expect(r.state.deposit(d2)?.status).toBe("final");
+
+    const settled = await r.s.settle(pay(1500n), req());
+    expect(settled).toMatchObject({ success: true });
+    const snapshot = sessionOf(settled);
+    expect(snapshot.limitZat).toBe("125000");
+    expect(snapshot.deposits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ txid: d1, status: "pending" }),
+        expect.objectContaining({ txid: d2, status: "final" }),
+      ]),
+    );
+    expect(r.state.deposit(d1)?.status).toBe("pending");
+  });
+});
+
+describe("a presented own deposit past its expiry, which only a fresh read may call dead (R49)", () => {
+  type Answer = "outage" | "gone" | "unmined" | { minedAt: number };
+
+  /** K's d1, credited at zero-conf, whose reads fail while the tip reaches its expiry of 1041 */
+  async function pastExpiry() {
+    let d1 = "";
+    const control: { answer: Answer; reads: number } = { answer: "outage", reads: 0 };
+    const r = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => {
+        if (txid !== d1) return view.inspect(txid);
+        control.reads++;
+        const a = control.answer;
+        if (a === "outage") throw new ChainUnavailableError("lightwalletd is unreachable");
+        if (a === "gone") return { found: false };
+        if (a === "unmined") return mempoolDeposit(txid, 1041);
+        return { ...mempoolDeposit(txid, 1041), location: "mined", minedHeight: a.minedAt };
+      },
+    }));
+    d1 = await opened(r);
+    r.chain.hold(d1);
+    r.chain.mine(41);
+    await r.watcher.pollNow();
+    expect(r.state.deposit(d1)?.status).toBe("pending");
+    return { r, d1, control };
+  }
+
+  test("is chain_unavailable while its reads fail, counts nowhere, and nothing is written", async () => {
+    const { r, d1, control } = await pastExpiry();
+    const before = control.reads;
+
+    const verified = await r.s.verify(pay(1000n, { txid: d1 }), req());
+    expect(verified).toMatchObject({ isValid: false, invalidReason: REASON.chainUnavailable });
+    expect(control.reads).toBe(before + 1);
+    expect(sessionOf(verified)).toMatchObject({ limitZat: "0", pendingZat: "0" });
+    expect(await r.s.settle(pay(1000n, { txid: d1 }), req())).toMatchObject({
+      success: false,
+      errorReason: REASON.chainUnavailable,
+    });
+    expect(r.ledger.replay().map((e) => e.t)).toEqual(["deposit", "voucher"]);
+    expect(r.state.deposit(d1)?.status).toBe("pending");
+  });
+
+  test("is chain_unavailable, never dead, when the refresh it needs is not due yet", async () => {
+    const { r, d1, control } = await pastExpiry();
+    expect(await r.s.verify(pay(1000n, { txid: d1 }), req())).toMatchObject({
+      invalidReason: REASON.chainUnavailable,
+    });
+    control.answer = "gone";
+    const before = control.reads;
+
+    expect(await r.s.verify(pay(1000n, { txid: d1 }), req())).toMatchObject({
+      invalidReason: REASON.chainUnavailable,
+    });
+    expect(control.reads).toBe(before);
+    r.clock.advance(5000);
+    expect(await r.s.verify(pay(1000n, { txid: d1 }), req())).toMatchObject({ invalidReason: REASON.depositDead });
+  });
+
+  test.each([
+    ["one block before its expiry", 1040, 2],
+    ["in its expiry block", 1041, 1],
+  ])("counts and is credited once a read shows it mined %s", async (_, minedHeight, confirmations) => {
+    const { r, d1, control } = await pastExpiry();
+    control.answer = { minedAt: minedHeight };
+
+    const verified = await r.s.verify(pay(1000n, { txid: d1 }), req());
+    expect(verified.isValid).toBe(true);
+    expect(sessionOf(verified)).toMatchObject({ confirmedZat: "100000", limitZat: "125000" });
+    expect(r.state.deposit(d1)).toMatchObject({ status: "confirmed", minedHeight, confirmations });
+    expect(await r.s.settle(pay(1000n, { txid: d1 }), req())).toMatchObject({ success: true, transaction: d1 });
+  });
+
+  test("is listed as the pending last recorded, so no snapshot reports a death no read has shown", async () => {
+    const { r, d1 } = await pastExpiry();
+    const listing = expect.objectContaining({ txid: d1, status: "pending", confirmations: 0 });
+
+    const over = await r.s.verify(pay(100500n), req());
+    expect(over).toMatchObject({ isValid: false, invalidReason: REASON.depositRequired });
+    expect(sessionOf(over)).toMatchObject({ limitZat: "0", pendingZat: "0", deposits: [listing] });
+    const presented = await r.s.verify(pay(1000n, { txid: d1 }), req());
+    expect(presented).toMatchObject({ invalidReason: REASON.chainUnavailable });
+    expect(sessionOf(presented)).toMatchObject({ limitZat: "0", pendingZat: "0", deposits: [listing] });
+  });
+
+  test.each<[string, Answer]>([
+    ["gone", "gone"],
+    ["still unmined at a tip at its expiry", "unmined"],
+  ])("is dead once a read finds it %s, and that read is recorded", async (_, answer) => {
+    const { r, d1, control } = await pastExpiry();
+    control.answer = answer;
+
+    expect(await r.s.verify(pay(1000n, { txid: d1 }), req())).toMatchObject({ invalidReason: REASON.depositDead });
+    expect(r.ledger.replay().at(-1)).toMatchObject({ t: "status", txid: d1, status: "dead", deadAtTip: 1041 });
+    expect(await r.s.settle(pay(1000n, { txid: d1 }), req())).toMatchObject({ errorReason: REASON.depositDead });
   });
 });
 
@@ -1327,9 +1663,9 @@ describe("advertised terms and configuration", () => {
     ["terms the wire cannot carry", { terms: { ...DEMO_TERMS, creditRatioBps: 10001 } }, /terms/],
     ["a deposit wait of Infinity, which would poll forever", { depositWaitMs: Infinity }, /^depositWaitMs:/],
     ["a deposit wait below zero", { depositWaitMs: -1 }, /^depositWaitMs:/],
-    ["a deposit wait past 60 s", { depositWaitMs: 60_001 }, /^depositWaitMs:/],
+    ["a deposit wait past 30 s", { depositWaitMs: 30_001 }, /^depositWaitMs: expected a whole number from 0 to 30000$/],
     ["a refresh wait below zero", { refreshWaitMs: -1 }, /^refreshWaitMs:/],
-    ["a refresh wait past 60 s", { refreshWaitMs: 60_001 }, /^refreshWaitMs:/],
+    ["a refresh wait past 5 s", { refreshWaitMs: 5001 }, /^refreshWaitMs: expected a whole number from 0 to 5000$/],
   ])("the constructor refuses %s", (_, over, field) => {
     const { state, resolver, watcher } = rig();
 
@@ -1343,5 +1679,13 @@ describe("advertised terms and configuration", () => {
           commit: () => undefined,
         }),
     ).toThrow(field);
+  });
+
+  test("takes the longest waits whose worst case the API's 60 s for a verify was sized for", () => {
+    const { state, resolver, watcher } = rig();
+    const config = { ...CONFIG, depositWaitMs: 30_000, refreshWaitMs: 5000 };
+    expect(
+      () => new PrepaidVoucherFacilitatorScheme({ config, state, resolver, watcher, commit: () => undefined }),
+    ).not.toThrow();
   });
 });

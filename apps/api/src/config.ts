@@ -1,6 +1,7 @@
 /**
  * The API's environment for `main`. Every problem names the variable at fault. The merchant keys file is parsed whole,
- * but only its orchardOnlyAddress is used, so the viewing key in it is never used. No message quotes the file.
+ * but only its orchardOnlyAddress is used, so the viewing key in it is never used. No message quotes the file. A file
+ * that also holds the spending seed or the full viewing key is refused on mainnet and warned about elsewhere.
  */
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -78,7 +79,7 @@ function facilitatorUrlOf(env: Env): string {
   return url;
 }
 
-function readKeysFile(configured: string): Record<string, unknown> {
+function readKeysFile(configured: string): { fields: Record<string, unknown>; path: string } {
   const path = pathOf(configured);
   let text: string;
   try {
@@ -97,11 +98,18 @@ function readKeysFile(configured: string): Record<string, unknown> {
   if (!isRecord(parsed)) {
     throw new ConfigError(`Z402_MERCHANT_KEYS_FILE: ${path} must hold the JSON object that zdecrypt keygen prints`);
   }
-  return parsed;
+  return { fields: parsed, path };
+}
+
+/** The spending seed, or else the full viewing key, when the file holds one that the API has no use for */
+function secretIn(fields: Record<string, unknown>): string | undefined {
+  if (Object.hasOwn(fields, "seedHex")) return "the spending seed";
+  if (Object.hasOwn(fields, "ufvk")) return "the full viewing key";
+  return undefined;
 }
 
 /** The explicit variable wins, and the keys file is opened only when it is missing */
-function payToOf(env: Env, profile: Profile): string {
+function payToOf(env: Env, profile: Profile, warn: (message: string) => void): string {
   let payTo = read(env, "Z402_PAY_TO");
   let origin = "";
   if (payTo === undefined) {
@@ -111,7 +119,14 @@ function payToOf(env: Env, profile: Profile): string {
         "Z402_PAY_TO is required (the merchant's shielded-only unified address, or set Z402_MERCHANT_KEYS_FILE to a zdecrypt keygen JSON)",
       );
     }
-    const address = readKeysFile(file).orchardOnlyAddress;
+    const { fields, path } = readKeysFile(file);
+    const secret = secretIn(fields);
+    if (secret !== undefined) {
+      const advice = `Z402_MERCHANT_KEYS_FILE: ${path} holds ${secret}; the API needs only Z402_PAY_TO`;
+      if (profile.network === NETWORK_MAINNET) throw new ConfigError(advice);
+      warn(advice);
+    }
+    const address = fields.orchardOnlyAddress;
     if (typeof address !== "string" || address === "") {
       throw new ConfigError('Z402_PAY_TO is not set and Z402_MERCHANT_KEYS_FILE has no "orchardOnlyAddress" string');
     }
@@ -154,14 +169,14 @@ function portOf(env: Env): number {
   return port;
 }
 
-/** Reads and checks the environment, throwing a ConfigError that names the variable */
-export function loadConfig(env: Env): ApiOptions {
+/** Reads and checks the environment, throwing a ConfigError that names the variable, and passes each warning to warn */
+export function loadConfig(env: Env, warn = (message: string): void => console.error(message)): ApiOptions {
   const profile = profileOf(env);
   return {
     network: profile.network,
     facilitatorUrl: facilitatorUrlOf(env),
     facilitatorToken: read(env, "Z402_FACILITATOR_TOKEN"),
-    payTo: payToOf(env, profile),
+    payTo: payToOf(env, profile, warn),
     priceZat: priceOf(env),
     host: hostOf(env),
     port: portOf(env),

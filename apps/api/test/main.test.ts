@@ -100,6 +100,10 @@ test(
     run.child.kill("SIGTERM");
     expect(await run.exited).toBe(0);
     expect(run.stdout()).toBe(`${line}\n`);
+    // The fixture is a whole keygen JSON, which regtest takes with a warning
+    expect(run.stderr()).toMatch(
+      /^api: warning: Z402_MERCHANT_KEYS_FILE: \S+ holds the spending seed; the API needs only Z402_PAY_TO$/m,
+    );
     for (const secret of [TOKEN, UIVK]) {
       expect(run.stdout()).not.toContain(secret);
       expect(run.stderr()).not.toContain(secret);

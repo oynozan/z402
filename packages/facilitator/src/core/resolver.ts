@@ -1,8 +1,9 @@
 import { ChainUnavailableError, type ChainView, type FoundInspection } from "@z402/protocol";
 
+/** `tip` was read before the inspect, so an unmined or missing answer speaks for a chain at least that high */
 export type Lookup =
   | { kind: "found"; inspection: FoundInspection; tip: number }
-  | { kind: "not_found" }
+  | { kind: "not_found"; tip: number }
   | { kind: "unavailable"; error: unknown };
 
 /** Looks deposits up on the chain within a time budget, sharing and limiting the work */
@@ -24,7 +25,7 @@ export class DepositResolver {
   constructor(o: {
     chain: ChainView;
     maxConcurrent?: number;
-    /** Callers that may wait for a slot, past which a lookup is answered unavailable at once */
+    /** Lookups waiting for a slot, past which a new one is answered unavailable at once */
     maxQueued?: number;
     pollMs?: number;
     negativeTtlMs?: number;
@@ -45,7 +46,7 @@ export class DepositResolver {
     this.#log = o.log ?? ((msg, err) => console.error(msg, err));
   }
 
-  /** Settles within the longest budget in use plus one inspect and one tip, and joins a flight already under way */
+  /** Joins a flight under way, which waits for a slot and starts reads only within its budget */
   lookup(txid: string, budgetMs: number): Promise<Lookup> {
     const running = this.#flights.get(txid);
     if (running !== undefined) return running;
@@ -93,36 +94,49 @@ export class DepositResolver {
     if (this.#running >= this.#maxConcurrent && this.#queue.length >= this.#maxQueued) {
       return { kind: "unavailable", error: new ChainUnavailableError("deposit lookups are saturated") };
     }
-    const waited = await this.#acquire();
-    try {
+    let outage: ChainUnavailableError | undefined;
+    let missed: Extract<Lookup, { kind: "not_found" }> | undefined;
+    let reads = 0;
+    for (;;) {
+      // A slot is held only around a read, so lookups sleeping between polls leave it to the others
+      const slot = await this.#acquire(budgetMs - (this.#now() - startedAt));
       // A caller whose budget ran out in the queue gets what is known, not one more read past its budget
-      if (waited && this.#now() - startedAt >= budgetMs) {
+      if (slot === "none" || (slot === "waited" && this.#now() - startedAt >= budgetMs)) {
+        if (slot === "waited") this.#release();
+        if (reads > 0) break;
         const error = new ChainUnavailableError("deposit lookup waited its whole budget for a slot");
         return this.peek(txid) ?? { kind: "unavailable", error };
       }
-      const lookup = await this.#poll(txid, budgetMs, startedAt);
-      this.#remember(txid, lookup);
-      return lookup;
-    } finally {
-      this.#release();
-    }
-  }
-
-  async #poll(txid: string, budgetMs: number, startedAt: number): Promise<Lookup> {
-    let outage: ChainUnavailableError | undefined;
-    for (;;) {
       try {
-        const inspection = await this.#chain.inspect(txid);
-        if (inspection.found) return { kind: "found", inspection, tip: await this.#chain.tip() };
+        reads++;
+        const read = await this.#read(txid);
+        if (read.kind === "found") {
+          this.#remember(txid, read);
+          return read;
+        }
+        missed = read;
       } catch (e) {
         if (!(e instanceof ChainUnavailableError)) throw e;
         outage = e;
+      } finally {
+        this.#release();
       }
       // Written as a negation so a NaN budget ends the loop instead of running it forever
       if (!(this.#now() - startedAt + this.#pollMs <= budgetMs)) break;
       await this.#sleep(this.#pollMs);
     }
-    return outage === undefined ? { kind: "not_found" } : { kind: "unavailable", error: outage };
+    // A read that failed may have been the one to find it, so any outage leaves the lookup unavailable
+    const lookup: Lookup =
+      outage === undefined && missed !== undefined ? missed : { kind: "unavailable", error: outage };
+    this.#remember(txid, lookup);
+    return lookup;
+  }
+
+  /** The tip, then one inspect, so a block mined in between can only make the answer look older than it is */
+  async #read(txid: string): Promise<Extract<Lookup, { kind: "found" | "not_found" }>> {
+    const tip = await this.#chain.tip();
+    const inspection = await this.#chain.inspect(txid);
+    return inspection.found ? { kind: "found", inspection, tip } : { kind: "not_found", tip };
   }
 
   #recentlyMissed(txid: string): boolean {
@@ -141,14 +155,31 @@ export class DepositResolver {
     this.#results.set(txid, { lookup, at });
   }
 
-  /** Takes a slot, true when the caller had to wait in the queue for it */
-  async #acquire(): Promise<boolean> {
+  /** Takes a slot, waiting in the queue for at most `waitMs`, and says whether it waited or got none */
+  async #acquire(waitMs: number): Promise<"free" | "waited" | "none"> {
     if (this.#running < this.#maxConcurrent) {
       this.#running++;
-      return false;
+      return "free";
     }
-    await new Promise<void>((resolve) => this.#queue.push(resolve));
-    return true;
+    if (!(waitMs > 0)) return "none";
+    let grant = (): void => undefined;
+    const granted = new Promise<"waited">((resolve) => {
+      grant = () => resolve("waited");
+    });
+    this.#queue.push(grant);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<"none">((resolve) => {
+      timer = setTimeout(() => resolve("none"), waitMs);
+      timer.unref?.();
+    });
+    const outcome = await Promise.race([granted, expired]);
+    clearTimeout(timer);
+    if (outcome === "waited") return "waited";
+    const at = this.#queue.indexOf(grant);
+    if (at < 0) return "waited";
+    // Still in line when the budget ran out, so it leaves the queue without a slot
+    this.#queue.splice(at, 1);
+    return "none";
   }
 
   #release(): void {

@@ -49,12 +49,15 @@ export class LightwalletdChainView implements ChainView {
     this.#uivk = o.uivk;
     this.#payTo = o.payTo;
     this.#network = zdecryptNetwork(o.network);
-    this.#now = o.now ?? (() => Date.now());
+    // A monotonic clock, so a step of the wall clock can neither freeze the tip nor expire it early
+    this.#now = o.now ?? (() => performance.now());
   }
 
   async tip(): Promise<number> {
     const held = this.#tipRead;
-    if (held !== undefined && this.#now() - held.at < TIP_REUSE_MS) return held.value;
+    const age = held === undefined ? Number.NaN : this.#now() - held.at;
+    // A negative or unreadable age is stale, so a clock that misbehaves can only cost an extra read
+    if (held !== undefined && age >= 0 && age < TIP_REUSE_MS) return held.value;
     const value = await this.#lwd.getTip();
     if (!isBlockHeight(value)) {
       throw new ChainUnavailableError(`lightwalletd reported tip ${value}, which is not a block height`);

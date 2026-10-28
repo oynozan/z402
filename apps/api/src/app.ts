@@ -21,6 +21,7 @@ import {
   ASSET,
   isValidPayTo,
   isZcashNetwork,
+  NETWORK_REGTEST,
   parseZat,
   SCHEME,
   ZCASH_NETWORKS,
@@ -61,6 +62,11 @@ function text(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** localhost, 127.0.0.0/8 or [::1], as a URL spells the host */
+function isLoopback(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+}
+
 /** Refuses a bad option before the facilitator is contacted, naming the field and never quoting its value */
 function checkOptions(o: ApiOptions): void {
   const url = o.facilitatorUrl;
@@ -78,6 +84,12 @@ function checkOptions(o: ApiOptions): void {
     throw new Error("facilitatorToken: must be one token of letters, digits and -._~+/");
   }
   if (!isZcashNetwork(o.network)) throw new Error(`network: expected one of ${ZCASH_NETWORKS.join(", ")}`);
+  // The bearer token and every voucher cross this link, and regtest keeps plaintext for a compose network's hosts
+  if (parsed.protocol === "http:" && o.network !== NETWORK_REGTEST && !isLoopback(parsed.hostname)) {
+    throw new Error(
+      `facilitatorUrl: plaintext http:// is allowed only to a loopback host on ${o.network}; use https://`,
+    );
+  }
   if (!isValidPayTo(o.payTo, o.network)) throw new Error(`payTo: not a shielded-only unified address for ${o.network}`);
   // initialize() never prices the route, so a bad price would otherwise fail every request instead of the start
   if (typeof o.priceZat !== "bigint" || o.priceZat < 1n) throw new Error("priceZat: must be a bigint of at least 1 zat");

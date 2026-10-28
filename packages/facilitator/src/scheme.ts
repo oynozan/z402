@@ -20,6 +20,7 @@ import {
   checkVoucher,
   computeLimit,
   encodeTerms,
+  isDepositDead,
   isValidPayTo,
   isZcashNetwork,
   parseTerms,
@@ -35,7 +36,7 @@ import {
   type VoucherPayload,
   type ZcashNetwork,
 } from "@z402/protocol";
-import { evaluateDeposit } from "./core/evaluate.js";
+import { chainPosition, evaluateDeposit } from "./core/evaluate.js";
 import { LedgerRefusal, type LedgerEvent } from "./core/ledger.js";
 import type { DepositResolver, Lookup } from "./core/resolver.js";
 import { buildSnapshot } from "./core/snapshot.js";
@@ -88,10 +89,11 @@ interface Refusal {
 type Presented =
   | { kind: "none" }
   | { kind: "credited" }
-  | { kind: "refused"; refusal: Refusal; needsLookup: boolean }
+  /** `refresh` asks verify to read the session's deposits again before it answers */
+  | { kind: "refused"; refusal: Refusal; needsLookup: boolean; refresh?: boolean }
   | { kind: "usable"; record: DepositRecord }
   | { kind: "in_flight" }
-  | { kind: "unusable"; refusal: Refusal; retry: boolean };
+  | { kind: "unusable"; refusal: Refusal; retry: boolean; once?: boolean };
 
 type Verdict =
   | {
@@ -105,7 +107,7 @@ type Verdict =
       snapshot: SessionSnapshot;
       lookAgain: boolean;
     }
-  | { ok: false; refusal: Refusal; snapshot: SessionSnapshot; needsLookup: boolean; refresh: boolean };
+  | { ok: false; refusal: Refusal; snapshot: SessionSnapshot; needsLookup: boolean; once: boolean; refresh: boolean };
 
 type Accepted = Extract<Verdict, { ok: true }>;
 
@@ -113,8 +115,9 @@ type Authenticated = { ok: true; voucher: Voucher } | { ok: false; refusal: Refu
 
 const FATAL_LOG = "ledger write failed — facilitator must restart";
 const DEFAULT_REFRESH_WAIT_MS = 5000;
-/** The API gives the facilitator 60 s, so no wait of verify may be longer */
-const MAX_WAIT_MS = 60_000;
+// The API's 60 s for a verify is sized for these two waits and the read that ends the first, 25 s at default deadlines
+const MAX_DEPOSIT_WAIT_MS = 30_000;
+const MAX_REFRESH_WAIT_MS = 5000;
 const UNEXPECTED_VERIFY: Refusal = { code: REASON.unexpectedVerifyError, message: "the facilitator failed to verify" };
 const UNEXPECTED_SETTLE: Refusal = { code: REASON.unexpectedSettleError, message: "the facilitator failed to settle" };
 const POISONED_VERIFY: Refusal = { code: REASON.unexpectedVerifyError, message: "the facilitator must restart" };
@@ -122,6 +125,10 @@ const POISONED_SETTLE: Refusal = { code: REASON.unexpectedSettleError, message: 
 /** One answer for every found deposit a session cannot use, so none of them tells what the merchant's key sees */
 const CANNOT_CREDIT: Refusal = { code: REASON.depositMemoMismatch, message: "the deposit cannot be credited" };
 const DEAD: Refusal = { code: REASON.depositDead, message: "the deposit is dead" };
+const NOT_READ_SINCE_EXPIRY: Refusal = {
+  code: REASON.chainUnavailable,
+  message: "the deposit has not been read since its expiry",
+};
 
 export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator {
   readonly scheme = SCHEME;
@@ -235,13 +242,16 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
   async #prepare(v: Voucher): Promise<Verdict> {
     let verdict = this.#decide(v);
     let lookup: Lookup | undefined;
+    let earlier: Lookup | undefined;
     if (!verdict.ok && verdict.needsLookup && v.depositTxid !== undefined) {
-      lookup = await this.#resolver.lookup(v.depositTxid, this.#config.depositWaitMs);
-      verdict = this.#decide(v, lookup);
+      earlier = this.#resolver.peek(v.depositTxid);
+      // One read settles whether a deposit seen alive before its expiry was mined, so it gets no waiting budget
+      lookup = await this.#resolver.lookup(v.depositTxid, verdict.once ? 0 : this.#config.depositWaitMs);
+      verdict = this.#decide(v, lookup, earlier);
     }
     if (!verdict.ok && verdict.refresh) {
       await this.#refreshed(v.sessionKey);
-      verdict = this.#decide(v, lookup);
+      verdict = this.#decide(v, lookup, earlier);
     }
     return verdict;
   }
@@ -300,15 +310,16 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
   }
 
   /** Judges the voucher on the current state, reading the presented deposit from `fresh` or else the cache */
-  #decide(v: Voucher, fresh?: Lookup): Verdict {
+  #decide(v: Voucher, fresh?: Lookup, earlier?: Lookup): Verdict {
     const { priceZat, terms } = this.#config;
     const cLast = this.#state.session(v.sessionKey)?.cLast ?? 0n;
     const known = v.depositTxid === undefined ? undefined : (fresh ?? this.#resolver.peek(v.depositTxid));
     // The newest tip any read has seen, so an older lookup cannot keep a deposit alive past its expiry
-    const tip = Math.max(this.#watcher.lastTip() ?? 0, known?.kind === "found" ? known.tip : 0);
+    const read = known === undefined || known.kind === "unavailable" ? 0 : known.tip;
+    const tip = Math.max(this.#watcher.lastTip() ?? 0, read);
     // A pending deposit whose lookups keep failing stops counting at its expiry, and only the watcher records it
     const credited = this.#state.depositsOf(v.sessionKey).map((d) => asOfTip(d, tip));
-    const presented = this.#presented(v, known, tip);
+    const presented = this.#presented(v, known, tip, earlier);
     const deposits = presented.kind === "usable" ? [...credited, presented.record] : credited;
     // Projected as if the presented deposit were credited, which the client never takes for an ack
     const snapshot = this.#snapshot(v.sessionKey, cLast, deposits, tip);
@@ -320,7 +331,8 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       return refused({ code: REASON.cumulativeMismatch, message }, snapshot);
     }
     if (presented.kind === "refused") {
-      return refused(presented.refusal, snapshot, { needsLookup: presented.needsLookup, refresh: false });
+      const { needsLookup, refresh = false } = presented;
+      return refused(presented.refusal, snapshot, { needsLookup, once: false, refresh });
     }
     if (check === "ok") {
       const events: LedgerEvent[] = presented.kind === "usable" ? [depositEvent(presented.record)] : [];
@@ -344,7 +356,11 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     // A failure the chain has answered for good is not looked up again
     const definitive = presented.kind === "unusable" && !presented.retry;
     // A refresh reads only credited deposits, so only a credited pending one can raise the limit after it
-    const next = { needsLookup: isNew && !definitive, refresh: credited.some((d) => d.status === "pending") };
+    const next = {
+      needsLookup: isNew && !definitive,
+      once: presented.kind === "unusable" && presented.once === true,
+      refresh: credited.some((d) => d.status === "pending"),
+    };
     if (presented.kind === "unusable") return refused(presented.refusal, snapshot, next);
     const over = `cumulativeZat ${v.cNew} is over the limit ${limit}`;
     return live
@@ -352,27 +368,39 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       : refused({ code: REASON.depositRequired, message: `${over} with nothing pending` }, snapshot, next);
   }
 
-  #presented(v: Voucher, known: Lookup | undefined, tip: number): Presented {
+  /** `earlier` is what the cache held before verify's fresh read, which tells a lost deposit's expiry */
+  #presented(v: Voucher, known: Lookup | undefined, tip: number, earlier?: Lookup): Presented {
     const txid = v.depositTxid;
     if (txid === undefined) return { kind: "none" };
     const record = this.#state.deposit(txid);
-    if (record !== undefined && record.sessionKey !== v.sessionKey) {
-      const refusal = { ...CANNOT_CREDIT, note: `the presented deposit ${txid} is credited to another session` };
-      // Read from the chain when an uncredited txid would be, so the answer time tells nothing either
-      return { kind: "refused", refusal, needsLookup: known?.kind !== "found" };
-    }
-    if (record !== undefined) {
+    // Credited elsewhere, it is answered from the same read an uncredited txid would be, so nothing tells them apart
+    const elsewhere = record !== undefined && record.sessionKey !== v.sessionKey;
+    if (record !== undefined && !elsewhere) {
       if (asOfTip(record, tip).status !== "dead") return { kind: "credited" };
-      return { kind: "refused", refusal: DEAD, needsLookup: false };
+      if (record.status === "dead") return { kind: "refused", refusal: DEAD, needsLookup: false };
+      // Dead only at a tip newer than the watcher's last read of it, so verify has the watcher read it again (R49)
+      return { kind: "refused", refusal: NOT_READ_SINCE_EXPIRY, needsLookup: false, refresh: true };
     }
 
+    if (known?.kind === "found" && elsewhere) {
+      const refusal = { ...CANNOT_CREDIT, note: `the presented deposit ${txid} is credited to another session` };
+      return { kind: "refused", refusal, needsLookup: false };
+    }
     if (known?.kind === "found") {
       const e = evaluateDeposit(known.inspection, v.sessionKey, this.#config.terms, tip, known.tip);
+      // Only a newer tip says it died, and it may have been mined since it was read, so it is read again first
+      if (!e.ok && e.code === REASON.depositDead && chainPosition(known.inspection, known.tip).status !== "dead") {
+        return unusable(NOT_READ_SINCE_EXPIRY.code, NOT_READ_SINCE_EXPIRY.message, true, true);
+      }
       if (!e.ok) return unusable(e.code, CANNOT_CREDIT.message, false);
       return { kind: "usable", record: creditedRecord(txid, v.sessionKey, e, known.tip) };
     }
     if (this.#resolver.inFlight(txid)) return { kind: "in_flight" };
-    if (known?.kind === "not_found") return unusable(REASON.depositNotFound, "the chain has no such tx", true);
+    if (known?.kind === "not_found") {
+      // Gone once a tip read before this read had reached the expiry an earlier read saw, as the watcher would call it
+      if (expiredUnmined(earlier, known.tip)) return unusable(REASON.depositDead, CANNOT_CREDIT.message, false);
+      return unusable(REASON.depositNotFound, "the chain has no such tx", true);
+    }
     // A lookup that rejected unexpectedly or aged out leaves no result, which is as retryable as an outage
     return unusable(REASON.chainUnavailable, known === undefined ? "not looked up" : "the chain is unreadable", true);
   }
@@ -382,7 +410,9 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
   }
 
   #snapshot(sessionKey: string, cumulativeZat: bigint, deposits: DepositRecord[], tip: number): SessionSnapshot {
-    return buildSnapshot({ sessionKey, cumulativeZat, deposits, terms: this.#config.terms, tip });
+    // A client copies a listed dead status, so a death judged only at the tip is listed as the watcher last recorded it
+    const shown = deposits.map((d) => (d.status === "dead" ? (this.#state.deposit(d.txid) ?? d) : d));
+    return buildSnapshot({ sessionKey, cumulativeZat, deposits, shown, terms: this.#config.terms, tip });
   }
 
   /** A failed write may have left part of the batch in the file, so nothing is trusted until a restart */
@@ -397,7 +427,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
 function refused(
   refusal: Refusal,
   snapshot: SessionSnapshot,
-  next: { needsLookup: boolean; refresh: boolean } = { needsLookup: false, refresh: false },
+  next: { needsLookup: boolean; once: boolean; refresh: boolean } = { needsLookup: false, once: false, refresh: false },
 ): Verdict {
   return { ok: false, refusal, snapshot, ...next };
 }
@@ -417,8 +447,15 @@ function settleRefused(
   return { success: false, errorReason: r.code, errorMessage: r.message, transaction: "", network, ...known };
 }
 
-function unusable(code: ReasonCode, message: string, retry: boolean): Presented {
-  return { kind: "unusable", refusal: { code, message }, retry };
+/** True when the lookup saw the deposit unmined and the tip has since reached its expiry */
+function expiredUnmined(seen: Lookup | undefined, tip: number): boolean {
+  if (seen?.kind !== "found" || seen.inspection.location === "mined") return false;
+  return isDepositDead({ minedHeight: null, expiryHeight: seen.inspection.expiryHeight, tip });
+}
+
+/** `once` asks verify for a single fresh read, with no waiting budget */
+function unusable(code: ReasonCode, message: string, retry: boolean, once = false): Presented {
+  return { kind: "unusable", refusal: { code, message }, retry, once };
 }
 
 /** The record a deposit is credited with, its status as the lookup that found it saw it */
@@ -487,13 +524,11 @@ function checkedConfig(c: SchemeConfig): Required<SchemeConfig> {
   } catch (e) {
     throw new Error(`terms: ${e instanceof Error ? e.message : String(e)}`);
   }
-  waitOf("depositWaitMs", c.depositWaitMs);
-  if (c.refreshWaitMs !== undefined) waitOf("refreshWaitMs", c.refreshWaitMs);
+  waitOf("depositWaitMs", c.depositWaitMs, MAX_DEPOSIT_WAIT_MS);
+  if (c.refreshWaitMs !== undefined) waitOf("refreshWaitMs", c.refreshWaitMs, MAX_REFRESH_WAIT_MS);
   return { ...c, terms: { ...c.terms }, refreshWaitMs: c.refreshWaitMs ?? DEFAULT_REFRESH_WAIT_MS };
 }
 
-function waitOf(name: string, ms: number): void {
-  if (!Number.isInteger(ms) || ms < 0 || ms > MAX_WAIT_MS) {
-    throw new Error(`${name}: expected a whole number from 0 to ${MAX_WAIT_MS}`);
-  }
+function waitOf(name: string, ms: number, max: number): void {
+  if (!Number.isInteger(ms) || ms < 0 || ms > max) throw new Error(`${name}: expected a whole number from 0 to ${max}`);
 }

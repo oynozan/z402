@@ -1,7 +1,16 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { format } from "node:util";
 import { x402Facilitator } from "@x402/core/facilitator";
@@ -136,11 +145,13 @@ const creditEvent = () => ({
   confirmations: 0,
 });
 
+/** The types of the ledger's events, after its header */
 const ledgerTypes = (path: string): string[] =>
   readFileSync(path, "utf8")
     .split("\n")
     .filter((l) => l !== "")
-    .map((l) => (JSON.parse(l) as { t: string }).t);
+    .map((l) => (JSON.parse(l) as { t: string }).t)
+    .filter((t) => t !== "ledger");
 
 /** A view whose inspect waits for open() once shut() is called, and `reached` settles when a read is waiting */
 function gated(view: ChainView) {
@@ -589,6 +600,41 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
     });
   });
 
+  /** Writes the lock as a start does that took it over while this facilitator was paused for more than 15 s */
+  function takeOver(ledgerPath: string): void {
+    rmSync(`${ledgerPath}.lock`);
+    const other = { pid: process.pid, host: hostname(), token: "f0f0f0f0f0f0f0f0", since: new Date().toISOString() };
+    writeFileSync(`${ledgerPath}.lock`, JSON.stringify(other));
+  }
+
+  test("settle: a lock another start took refuses the write, adds no line and calls onFatal once", async () => {
+    const ledgerPath = join(scratch, "taken-over.jsonl");
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { url, chain } = await boot({ ledgerPath, onFatal });
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    expect((await verify(url, pay(r, 500n, d1), r)).json.isValid).toBe(true);
+    takeOver(ledgerPath);
+    const before = readFileSync(ledgerPath);
+
+    const res = await settle(url, pay(r, 500n, d1), r);
+    expect(res.json).toMatchObject({ success: false, errorReason: "unexpected_settle_error", transaction: "" });
+    expect(readFileSync(ledgerPath)).toEqual(before);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(String(onFatal.mock.calls[0]?.[0])).toMatch(/ledgerPath: .* is no longer locked by this facilitator/);
+    expect(JSON.parse(readFileSync(`${ledgerPath}.lock`, "utf8"))).toMatchObject({ token: "f0f0f0f0f0f0f0f0" });
+  });
+
+  test("the heartbeat reports a lock another start took, with no write to wait for", { timeout: 15_000 }, async () => {
+    const ledgerPath = join(scratch, "taken-over-idle.jsonl");
+    const onFatal = vi.fn<(err: unknown) => void>();
+    await boot({ ledgerPath, onFatal });
+    takeOver(ledgerPath);
+
+    await vi.waitFor(() => expect(onFatal).toHaveBeenCalledTimes(1), { timeout: 8000, interval: 100 });
+    expect(String(onFatal.mock.calls[0]?.[0])).toMatch(/is no longer locked by this facilitator/);
+  });
+
   test("the watcher's failed commit reaches onFatal as well", async () => {
     const ledgerPath = join(scratch, "watcher-fails.jsonl");
     const onFatal = vi.fn<(err: unknown) => void>();
@@ -861,7 +907,7 @@ describe("startFacilitator", () => {
     ["pollIntervalMs", { pollIntervalMs: 0 }],
     ["pollIntervalMs", { pollIntervalMs: 2 ** 31 }],
     ["depositWaitMs", { depositWaitMs: -1 }],
-    ["depositWaitMs", { depositWaitMs: 60_001 }],
+    ["depositWaitMs", { depositWaitMs: 30_001 }],
     ["host", { host: "" }],
     ["host", { host: " " }],
     ["ledgerPath", { ledgerPath: "" }],
@@ -913,6 +959,47 @@ describe("startFacilitator", () => {
     // A start that got past the lock would write the confirmation in its first poll
     first.chain.mine(1);
     await expect(boot({ ledgerPath }, first.chain)).rejects.toThrow(/^ledgerPath: .*already open/);
+
+    expect(readFileSync(ledgerPath)).toEqual(before);
+  });
+
+  test("a fresh ledger starts with a header naming the network and payTo", async () => {
+    const ledgerPath = join(scratch, "header-fresh.jsonl");
+    await boot({ ledgerPath });
+    const header = { t: "ledger", network: NETWORK, payTo: PAY_TO };
+    expect(readFileSync(ledgerPath, "utf8")).toBe(`${JSON.stringify(header)}\n`);
+  });
+
+  test("a ledger of another payTo is refused and left byte for byte as it was", async () => {
+    const ledgerPath = join(scratch, "header-other.jsonl");
+    const first = await boot({ ledgerPath });
+    await first.handle.close();
+    const before = readFileSync(ledgerPath);
+    const other = `uregtest1${"p".repeat(60)}`;
+
+    await expect(boot({ ledgerPath, payTo: other, chain: first.chain.viewFor(other) })).rejects.toThrow(
+      new RegExp(`^ledgerPath: .* is the ledger of ${NETWORK} ${PAY_TO}, not of this facilitator$`),
+    );
+    expect(readFileSync(ledgerPath)).toEqual(before);
+  });
+
+  test("a ledger written before the header existed still replays on regtest", async () => {
+    const ledgerPath = join(scratch, "header-less.jsonl");
+    writeFileSync(ledgerPath, `${JSON.stringify(creditEvent())}\n`);
+    const { url } = await boot({ ledgerPath });
+    const r = await requirementsOf(url);
+    const res = await verify(url, pay(r, 500n), r);
+    expect(res.json.extra.session).toMatchObject({ pendingZat: "100000", limitZat: "100000" });
+    expect(ledgerTypes(ledgerPath)).toEqual(["deposit"]);
+  });
+
+  test("a refused start never touches the ledger it finds held, not even to cut a torn tail", async () => {
+    const ledgerPath = join(scratch, "held-torn.jsonl");
+    await boot({ ledgerPath });
+    appendFileSync(ledgerPath, '{"t":"voucher","sessionK');
+    const before = readFileSync(ledgerPath);
+
+    await expect(boot({ ledgerPath })).rejects.toThrow(/^ledgerPath: .*already open/);
 
     expect(readFileSync(ledgerPath)).toEqual(before);
   });

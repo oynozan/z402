@@ -5,7 +5,7 @@ import { loadConfig } from "./config.js";
 const SHUTDOWN_MS = 5000;
 
 async function main(): Promise<void> {
-  const options = loadConfig(process.env);
+  const options = loadConfig(process.env, (message) => console.error(`api: warning: ${message}`));
   const api = await startApi(options);
   console.log(`api listening on ${api.url} network=${options.network}`);
 

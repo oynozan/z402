@@ -1,8 +1,18 @@
-import { appendFileSync, mkdirSync, readFileSync, statSync, truncateSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readSync, statSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
-import { DEPOSIT_STATUSES, MAX_MONEY_ZAT, ZAT_RE, type DepositStatus } from "@z402/protocol";
+import {
+  DEPOSIT_STATUSES,
+  isZcashNetwork,
+  MAX_MONEY_ZAT,
+  NETWORK_MAINNET,
+  ZAT_RE,
+  type DepositStatus,
+  type ZcashNetwork,
+} from "@z402/protocol";
 
 export type LedgerEvent =
+  /** The first line of a ledger, naming the facilitator that created it */
+  | { t: "ledger"; network: ZcashNetwork; payTo: string }
   | {
       t: "deposit";
       txid: string;
@@ -33,15 +43,58 @@ export class LedgerRefusal extends Error {
   }
 }
 
+/** The facilitator a ledger belongs to */
+export interface LedgerOwner {
+  network: ZcashNetwork;
+  payTo: string;
+}
+
+/** A ledger that belongs to another facilitator, refused before replay reads past its first line */
+export class LedgerMismatch extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LedgerMismatch";
+  }
+}
+
+/** Refuses the ledger whose first event, undefined when it has none, shows it is not the ledger of `own` */
+export function checkLedgerHeader(first: LedgerEvent | undefined, own: LedgerOwner, path: string): void {
+  if (first === undefined) return;
+  if (first.t === "ledger") {
+    if (first.network === own.network && first.payTo === own.payTo) return;
+    throw new LedgerMismatch(
+      `ledgerPath: ${path} is the ledger of ${first.network} ${first.payTo}, not of this facilitator`,
+    );
+  }
+  // A ledger from before the header existed opens off mainnet, where a mixup moves no real money
+  if (own.network === NETWORK_MAINNET) {
+    throw new LedgerMismatch(
+      `ledgerPath: ${path} has no ledger header; a mainnet facilitator opens only a ledger it created`,
+    );
+  }
+}
+
 /** Append-only JSON Lines log (in memory without a path), unsynced, so appends outlive a crash but not a power loss */
 export class Ledger {
   readonly #path: string | undefined;
+  readonly #chunkBytes: number;
+  readonly #guard: (() => void) | undefined;
   readonly #memory: LedgerEvent[] = [];
   /** The failed write after which every append is refused, since the file and the live state may disagree */
   #broken: { cause: unknown } | undefined;
 
-  constructor(path?: string) {
+  constructor(
+    path?: string,
+    o: {
+      /** How much replay reads at a time, for tests */
+      chunkBytes?: number;
+      /** Runs before every write to the file, and a throw from it refuses that write and every one after */
+      guard?: () => void;
+    } = {},
+  ) {
     this.#path = path;
+    this.#chunkBytes = o.chunkBytes ?? CHUNK_BYTES;
+    this.#guard = o.guard;
     if (path !== undefined) mkdirSync(dirname(path), { recursive: true });
   }
 
@@ -59,6 +112,12 @@ export class Ledger {
       this.#memory.push(...structuredClone(events));
       return;
     }
+    try {
+      this.#guard?.();
+    } catch (e) {
+      this.#broken = { cause: e };
+      throw e;
+    }
     const before = sizeOf(this.#path);
     try {
       appendFileSync(this.#path, events.map((e) => `${JSON.stringify(e)}\n`).join(""), { mode: 0o600 });
@@ -74,51 +133,118 @@ export class Ledger {
 
   /** Must run before the first append to an existing file, since it cuts a torn last line an append would glue onto */
   replay(): LedgerEvent[] {
-    if (this.#path === undefined) return structuredClone(this.#memory);
-    const text = readText(this.#path);
-    if (text === null) return [];
+    return [...this.events()];
+  }
 
-    const lines = text.split("\n");
-    const last = lines.findLastIndex((l) => l.trim() !== "");
-    const events: LedgerEvent[] = [];
-    for (let i = 0; i <= last; i++) {
-      const raw = lines[i] ?? "";
-      if (raw.trim() === "") continue;
-
-      let value: unknown;
-      try {
-        value = JSON.parse(raw);
-      } catch {
-        if (i < last) throw new Error(`ledger line ${i + 1} is not valid JSON`);
-        this.#dropTail(this.#path, lines, i);
-        return events;
-      }
-      if (!isEvent(value)) throw new Error(`ledger line ${i + 1} is not a ledger event`);
-      events.push(value);
+  /** The events one at a time, read in chunks so that neither the file nor its events are ever held whole */
+  *events(): Generator<LedgerEvent> {
+    if (this.#path === undefined) {
+      yield* structuredClone(this.#memory);
+      return;
     }
-    if (last >= 0 && !text.endsWith("\n")) appendFileSync(this.#path, "\n");
-    return events;
+    const path = this.#path;
+    const fd = openIfThere(path);
+    if (fd === undefined) return;
+    let torn: { number: number; start: number } | undefined;
+    let any = false;
+    let ended = true;
+    try {
+      for (const line of linesOf(fd, this.#chunkBytes)) {
+        ended = line.ended;
+        if (line.text !== undefined && line.text.trim() === "") continue;
+        // A bad line that anything but blank lines follows is damage, not a write cut short
+        if (torn !== undefined) throw new Error(`ledger line ${torn.number} is not valid JSON`);
+        any = true;
+        const value = parsed(line.text);
+        if (value === NOT_JSON) {
+          torn = { number: line.number, start: line.start };
+          continue;
+        }
+        if (!isEvent(value)) throw new Error(`ledger line ${line.number} is not a ledger event`);
+        yield value;
+      }
+    } finally {
+      closeSync(fd);
+    }
+    if (torn !== undefined) this.#dropTail(path, torn);
+    else if (any && !ended) appendFileSync(path, "\n");
   }
 
   // Cut the torn bytes off, or the next append would glue onto them
-  #dropTail(path: string, lines: string[], index: number): void {
-    console.warn(`ledger ${path}: dropped a truncated last line (line ${index + 1})`);
-    const kept = lines.slice(0, index).map((l) => `${l}\n`).join("");
-    truncateSync(path, Buffer.byteLength(kept));
+  #dropTail(path: string, torn: { number: number; start: number }): void {
+    console.warn(`ledger ${path}: dropped a truncated last line (line ${torn.number})`);
+    truncateSync(path, torn.start);
+  }
+}
+
+const CHUNK_BYTES = 64 * 1024;
+/** A line longer than this is no event, so its bytes are not kept */
+const MAX_LINE_BYTES = 1024 * 1024;
+const NEWLINE = 0x0a;
+const NOT_JSON = Symbol("not JSON");
+
+interface Line {
+  /** Undefined when the line is over MAX_LINE_BYTES */
+  text: string | undefined;
+  number: number;
+  /** The byte the line starts at, where a torn tail is cut */
+  start: number;
+  /** False only for a last line with no newline after it */
+  ended: boolean;
+}
+
+/** Splits on the newline byte, so a multi-byte character across two chunks is decoded whole */
+function* linesOf(fd: number, chunkBytes: number): Generator<Line> {
+  const chunk = Buffer.alloc(chunkBytes);
+  let parts: Buffer[] = [];
+  let size = 0;
+  let number = 0;
+  let start = 0;
+  let offset = 0;
+  const keep = (piece: Buffer): void => {
+    if (size + piece.length <= MAX_LINE_BYTES) parts.push(Buffer.from(piece));
+    size += piece.length;
+  };
+  const text = (): string | undefined => (size > MAX_LINE_BYTES ? undefined : Buffer.concat(parts).toString("utf8"));
+  for (;;) {
+    const read = readSync(fd, chunk, 0, chunkBytes, offset);
+    if (read === 0) break;
+    let from = 0;
+    for (let i = 0; i < read; i++) {
+      if (chunk[i] !== NEWLINE) continue;
+      keep(chunk.subarray(from, i));
+      yield { text: text(), number: ++number, start, ended: true };
+      parts = [];
+      size = 0;
+      start = offset + i + 1;
+      from = i + 1;
+    }
+    keep(chunk.subarray(from, read));
+    offset += read;
+  }
+  if (size > 0) yield { text: text(), number: ++number, start, ended: false };
+}
+
+function parsed(text: string | undefined): unknown {
+  if (text === undefined) return NOT_JSON;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return NOT_JSON;
+  }
+}
+
+function openIfThere(path: string): number | undefined {
+  try {
+    return openSync(path, "r");
+  } catch (e) {
+    if (isMissing(e)) return undefined;
+    throw e;
   }
 }
 
 function isMissing(e: unknown): boolean {
   return typeof e === "object" && e !== null && "code" in e && e.code === "ENOENT";
-}
-
-function readText(path: string): string | null {
-  try {
-    return readFileSync(path, "utf8");
-  } catch (e) {
-    if (isMissing(e)) return null;
-    throw e;
-  }
 }
 
 function sizeOf(path: string): number {
@@ -130,7 +256,7 @@ function sizeOf(path: string): number {
   }
 }
 
-const KINDS: ReadonlySet<unknown> = new Set(["deposit", "voucher", "status"]);
+const KINDS: ReadonlySet<unknown> = new Set(["ledger", "deposit", "voucher", "status"]);
 
 /** "event N" of a batch, with its type when it is one the ledger knows, and never a value from the event */
 export function nth(e: unknown, index: number): string {
@@ -149,6 +275,8 @@ export function isEvent(x: unknown): x is LedgerEvent {
   if (typeof x !== "object" || x === null) return false;
   const e = x as Record<string, unknown>;
   switch (e.t) {
+    case "ledger":
+      return isZcashNetwork(e.network) && isId(e.payTo);
     case "deposit":
       return (
         isId(e.txid) &&

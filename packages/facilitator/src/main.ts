@@ -16,14 +16,15 @@ const log = (message: string, err?: unknown): void => {
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
+  for (const warning of config.warnings) console.error(`facilitator: warning: ${warning}`);
   const lwd = createLightwalletdClient({ url: config.lwdUrl });
 
   let fatal = false;
-  // A failed ledger write leaves the file and the live state in doubt, so a restart must replay the file
+  // A failed ledger write, or a lock another start took, leaves the file and the live state in doubt
   const onFatal = (err: unknown): void => {
     if (fatal) return;
     fatal = true;
-    log("facilitator: a ledger write failed, exiting so that a restart replays the ledger", err);
+    log("facilitator: the ledger cannot be written, exiting so that a restart replays it", err);
     process.exitCode = 1;
     setTimeout(() => process.exit(1), FATAL_EXIT_MS).unref();
   };

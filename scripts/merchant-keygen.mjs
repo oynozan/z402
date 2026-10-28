@@ -3,13 +3,18 @@
  * Generates the merchant account with `zdecrypt keygen` and saves it as .secrets/merchant-<network>.json.
  *
  *   node scripts/merchant-keygen.mjs --network <regtest|testnet|mainnet> [--force] [--out <absolute path>]
+ *   node scripts/merchant-keygen.mjs --view-only --from <keys file> [--force] [--out <absolute path>]
  *
  * The file holds the seed, which is the only backup of the account. It is created with mode 0600 in a 0700
  * directory. An existing file is replaced only with --force, and the old file is then kept as
  * <file>.replaced-<UTC time> with mode 0600, so no seed is ever destroyed. The keys path is never absent: the new
  * file replaces the old one by an atomic rename, after the old one got a second name or, where the filesystem has
- * no hard links, a copy. A symbolic link is never replaced. --out takes an absolute path outside the repository or
- * inside .secrets/, since a key file anywhere else in the work tree can be committed by accident.
+ * no hard links, a copy. A rename that fails after that never deletes the kept file, since it may have happened
+ * all the same, and the error names both files. A symbolic link is never replaced. --out takes an absolute path
+ * outside the repository or inside .secrets/, since a key file anywhere else in the work tree can be committed by
+ * accident. A filesystem that does not keep mode 0600 (FAT, exFAT) is refused on mainnet and warned about elsewhere.
+ * --view-only makes no key. It reads a keys file and writes .secrets/merchant-<network>.view.json, which holds only
+ * the network, the UIVK and the address, so the facilitator can use it with no seed warning.
  * The only output is the shielded-only address on stdout, plus a backup reminder on stderr. The seed, the UFVK and
  * the UIVK are never printed, and the seed never reaches argv, because zdecrypt draws it from the OS itself.
  * The directory entries are fsynced before the run ends, and a failure there still prints the address, with a warning.
@@ -22,11 +27,13 @@ import {
   constants,
   copyFileSync,
   fchmodSync,
+  fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -40,15 +47,28 @@ const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const ZDECRYPT = join(ROOT, "crates", "zdecrypt", "target", "release", "zdecrypt");
 const SECRETS_DIR = join(ROOT, ".secrets");
 const ADDRESS_PREFIX = { regtest: "uregtest1", testnet: "utest1", mainnet: "u1" };
+// The shapes of a unified incoming viewing key that the facilitator accepts, revision 0 then revision 2
+const UIVK_RE = {
+  regtest: /^(uivkregtest|uviregtest)1[02-9ac-hj-np-z]+$/,
+  testnet: /^(uivktest|uvitest)1[02-9ac-hj-np-z]+$/,
+  mainnet: /^(uivk|uvi)1[02-9ac-hj-np-z]+$/,
+};
 const SEED_RE = /^[0-9a-f]{64}$/;
+/** More rounds than two writers can cause, so a path that keeps changing is reported instead of looped on */
+const MAX_ATTEMPTS = 5;
 
 const USAGE = `usage: node scripts/merchant-keygen.mjs --network <regtest|testnet|mainnet> [--force] [--out <absolute path>]
+       node scripts/merchant-keygen.mjs --view-only --from <keys file> [--force] [--out <absolute path>]
 
-  --network   network of the merchant account (required)
-  --force     replace an existing key file. The old one is kept as <file>.replaced-<UTC time> and set to
-              mode 0600, since key files must be 0600. A symbolic link is refused, replace it by hand
-  --out       write here instead of .secrets/merchant-<network>.json, an absolute path outside the
-              repository or inside its .secrets/ directory
+  --network    network of the merchant account (required, except with --view-only, which reads it from the file)
+  --view-only  make no key. Read the keys file given by --from and write the facilitator's keys file, which holds
+               only network, uivk and orchardOnlyAddress, to .secrets/merchant-<network>.view.json
+  --from       the keys file to read for --view-only
+  --force      replace an existing key file. The old one is kept as <file>.replaced-<UTC time> and set to
+               mode 0600, since key files must be 0600. A symbolic link is refused, replace it by hand.
+               Run one merchant-keygen at a time: two runs on the same key file can lose a key whose address was already printed.
+  --out        write here instead of .secrets/merchant-<network>.json, an absolute path outside the
+               repository or inside its .secrets/ directory
 
 Prints the shielded-only address on stdout. The seed, the UFVK and the UIVK are only written to the file.`;
 
@@ -64,7 +84,7 @@ class Fail extends Error {
 // Errors never repeat a value, since a seed may have been pasted in the wrong place
 function parseArgs(argv) {
   const args = [...argv];
-  const opts = { network: undefined, out: undefined, force: false, help: false };
+  const opts = { network: undefined, out: undefined, from: undefined, force: false, viewOnly: false, help: false };
   while (args.length > 0) {
     const token = args.shift();
     const eq = token.startsWith("--") ? token.indexOf("=") : -1;
@@ -81,11 +101,16 @@ function parseArgs(argv) {
       case "--out":
         opts.out = take();
         break;
+      case "--from":
+        opts.from = take();
+        break;
       case "--force":
+      case "--view-only":
       case "-h":
       case "--help":
         if (eq >= 0) throw new Fail(`${flag} takes no value`, 2);
         if (flag === "--force") opts.force = true;
+        else if (flag === "--view-only") opts.viewOnly = true;
         else opts.help = true;
         break;
       default:
@@ -93,8 +118,12 @@ function parseArgs(argv) {
     }
   }
   if (opts.help) return opts;
-  if (opts.network === undefined) throw new Fail(`--network is required\n\n${USAGE}`, 2);
-  if (!Object.hasOwn(ADDRESS_PREFIX, opts.network)) throw new Fail("--network must be regtest, testnet or mainnet", 2);
+  if (opts.viewOnly && opts.from === undefined) throw new Fail(`--view-only needs --from\n\n${USAGE}`, 2);
+  if (!opts.viewOnly && opts.from !== undefined) throw new Fail(`--from is only for --view-only\n\n${USAGE}`, 2);
+  if (opts.network === undefined && !opts.viewOnly) throw new Fail(`--network is required\n\n${USAGE}`, 2);
+  if (opts.network !== undefined && !Object.hasOwn(ADDRESS_PREFIX, opts.network)) {
+    throw new Fail("--network must be regtest, testnet or mainnet", 2);
+  }
   if (opts.out !== undefined && !isAbsolute(opts.out)) throw new Fail("--out must be an absolute path", 2);
   return opts;
 }
@@ -189,6 +218,37 @@ function generate(network) {
   return { address, text: run.stdout.endsWith("\n") ? run.stdout : `${run.stdout}\n` };
 }
 
+// The three fields of a keys file that the facilitator needs, and nothing the file holds besides, the seed above all
+function readView(from, expected) {
+  const path = resolve(from);
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    throw new Fail(`cannot read ${shown(path)} (${e.code ?? "unknown error"})`);
+  }
+  let keys;
+  try {
+    keys = JSON.parse(text);
+  } catch {
+    throw new Fail(`${shown(path)} is not valid JSON`);
+  }
+  const { network, uivk, orchardOnlyAddress: address } = typeof keys === "object" && keys !== null ? keys : {};
+  if (typeof network !== "string" || !Object.hasOwn(ADDRESS_PREFIX, network)) {
+    throw new Fail(`${shown(path)} has no network of regtest, testnet or mainnet`);
+  }
+  if (expected !== undefined && expected !== network) {
+    throw new Fail(`${shown(path)} holds ${network} keys, not ${expected} keys`, 2);
+  }
+  const sound =
+    typeof uivk === "string" &&
+    UIVK_RE[network].test(uivk) &&
+    typeof address === "string" &&
+    address.startsWith(ADDRESS_PREFIX[network]);
+  if (!sound) throw new Fail(`${shown(path)} has no uivk and orchardOnlyAddress that fit ${network}`);
+  return { network, address, text: `${JSON.stringify({ network, uivk, orchardOnlyAddress: address }, null, 2)}\n` };
+}
+
 /* Storage */
 
 // Link failures that mean this filesystem has no hard links, as FAT and exFAT have none
@@ -202,6 +262,17 @@ function syncFile(path) {
   const fd = openSync(path, "r");
   try {
     fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function syncDir(dir) {
+  const fd = openSync(dir, "r");
+  try {
+    fsyncSync(fd);
+  } catch (e) {
+    if (e.code !== "EINVAL" && e.code !== "ENOTSUP") throw e;
   } finally {
     closeSync(fd);
   }
@@ -230,9 +301,16 @@ function keepOld(target) {
     try {
       chmodSync(name, 0o600);
       if (copied) syncFile(name);
+      // The name must be on disk before the rename, and it must still be there
+      syncDir(dirname(name));
+      lstatSync(name);
     } catch (e) {
+      // Nothing was replaced yet, so the old key is still at the target and this name can go
       rmSync(name, { force: true });
-      if (e.code === "ENOENT") return undefined;
+      // The name existed a moment ago, so a missing one means the old key is not safe and nothing is replaced
+      if (e.code === "ENOENT") {
+        throw new Fail(`${shown(name)} vanished right after the old key was kept, so ${shown(target)} was not replaced`);
+      }
       throw e;
     }
     return name;
@@ -246,10 +324,41 @@ function publish(tmp, target) {
   } catch (e) {
     if (!NO_HARD_LINKS.has(e.code)) throw e;
     throw new Fail(
-      `cannot create ${shown(target)} here, the filesystem has no hard links for the exclusive create ` +
-        "(--force creates it with a rename, and keeps any file that is already there)",
+      `cannot create ${shown(target)} here, the filesystem has no hard links for the exclusive create; ` +
+        "create the file on another filesystem and copy it here",
     );
   }
+}
+
+// A rename that reports an error may still have happened, so the kept file stays whatever the error is
+function replace(tmp, target, kept) {
+  try {
+    renameSync(tmp, target);
+  } catch (e) {
+    throw new Fail(
+      `the rename onto ${shown(target)} failed (${e.code ?? "error"}), and it may still have happened. ` +
+        `The old key is kept as ${shown(kept)}. The state is unknown, ` +
+        `so check which key ${shown(target)} holds before you use it`,
+    );
+  }
+  return kept;
+}
+
+// Takes the target exclusively when nothing is there, and keeps what is there before replacing it
+function place(tmp, target, { force, refusal }) {
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    const kept = force ? keepOld(target) : undefined;
+    if (kept) return replace(tmp, target, kept);
+    try {
+      publish(tmp, target);
+      return undefined;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      // Without --force a file in the way is final, with it a file that appeared since keepOld looked is kept next
+      if (!force) throw refusal;
+    }
+  }
+  throw new Fail(`${shown(target)} kept changing while it was being replaced, so nothing was replaced`);
 }
 
 // The directories that mkdir -p is about to create, deepest first
@@ -257,17 +366,6 @@ function missingDirs(dir) {
   const made = [];
   for (let d = dir; lstatOrNothing(d) === undefined; d = dirname(d)) made.push(d);
   return made;
-}
-
-function syncDir(dir) {
-  const fd = openSync(dir, "r");
-  try {
-    fsyncSync(fd);
-  } catch (e) {
-    if (e.code !== "EINVAL" && e.code !== "ENOTSUP") throw e;
-  } finally {
-    closeSync(fd);
-  }
 }
 
 // A directory that cannot be synced is reported by the caller after the address, since the new key is in place by then
@@ -284,7 +382,7 @@ function syncDirs(dirs) {
 }
 
 // Written to a private temp file first, so a crash never leaves half a seed at the target
-function store(target, text, force) {
+function store(target, text, { force, mainnet, refusal }) {
   const dir = dirname(target);
   const made = missingDirs(dir);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -293,27 +391,29 @@ function store(target, text, force) {
   const tmp = `${target}.${process.pid}.tmp`;
   const fd = openSync(tmp, "wx", 0o600);
   let kept;
+  let modes = true;
   try {
     try {
       fchmodSync(fd, 0o600);
+      // FAT and exFAT accept chmod and keep the mode of their mount, so the mode is read back before a key is written
+      modes = (fstatSync(fd).mode & 0o777) === 0o600;
+      if (!modes && mainnet) {
+        throw new Fail(
+          "this filesystem does not keep file modes, so a mainnet key file would be readable by other users; " +
+            "write it somewhere else",
+          2,
+        );
+      }
       writeFileSync(fd, text);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
-    if (force) kept = keepOld(target);
-    try {
-      // rename replaces the target in one step and link refuses if it exists, and neither follows a symlink
-      if (force) renameSync(tmp, target);
-      else publish(tmp, target);
-    } catch (e) {
-      if (kept) rmSync(kept, { force: true });
-      throw e;
-    }
+    kept = place(tmp, target, { force, refusal });
   } finally {
     rmSync(tmp, { force: true });
   }
-  return { kept, durable: syncDirs([dir, ...made.map((d) => dirname(d))]) };
+  return { kept, durable: syncDirs([dir, ...made.map((d) => dirname(d))]), modes };
 }
 
 function main(argv) {
@@ -322,39 +422,40 @@ function main(argv) {
     console.log(USAGE);
     return;
   }
-  const { network, force } = opts;
-  const target = resolve(opts.out ?? join(SECRETS_DIR, `merchant-${network}.json`));
+  const { force } = opts;
+  const view = opts.viewOnly ? readView(opts.from, opts.network) : undefined;
+  const network = view?.network ?? opts.network;
+  const target = resolve(opts.out ?? join(SECRETS_DIR, `merchant-${network}${view ? ".view" : ""}.json`));
   if (opts.out !== undefined) checkOut(target);
 
   const refusal = new Fail(
-    `refusing to replace ${shown(target)}, which may hold the only copy of a seed (--force replaces it)`,
+    view
+      ? `refusing to replace ${shown(target)} (--force replaces it)`
+      : `refusing to replace ${shown(target)}, which may hold the only copy of a seed (--force replaces it)`,
   );
   const old = lstatOrNothing(target);
   if (old?.isDirectory()) throw new Fail(`${shown(target)} is a directory`);
-  if (old?.isSymbolicLink() && force) throw new Fail("the key file is a symbolic link; replace it by hand", 2);
+  if (old?.isSymbolicLink()) throw new Fail("the key file is a symbolic link; replace it by hand", 2);
   if (old && !force) throw refusal;
 
-  const { address, text } = generate(network);
-  let stored;
-  try {
-    stored = store(target, text, force);
-  } catch (e) {
-    throw e.code === "EEXIST" ? refusal : e;
-  }
-  const { kept, durable } = stored;
+  const { address, text } = view ?? generate(network);
+  const { kept, durable, modes } = store(target, text, { force, mainnet: network === "mainnet", refusal });
 
   const modeOf = (path) => (statSync(path).mode & 0o777).toString(8);
   const where = `${shown(target)} (mode ${modeOf(target)})`;
   console.log(address);
-  if (network === "mainnet") {
+  if (view) {
+    console.error(`Saved ${where}`);
+  } else if (network === "mainnet") {
     console.error(`WARNING: MAINNET keys. The seed in ${where} controls real money and is the only backup.`);
     console.error("Copy it to offline storage now, and never share it, commit it or paste it into a log.");
   } else {
     console.error(`Saved ${where}. Its seed is the only backup of this account, keep a copy somewhere safe.`);
   }
+  if (!modes) console.error("warning: this filesystem does not keep file modes; the key file is readable by other users");
   if (kept) {
     console.error(`The file it replaced was kept as ${shown(kept)} (mode ${modeOf(kept)}).`);
-    if (network === "mainnet") console.error("Its seed may still control funds, so back it up too.");
+    if (network === "mainnet" && !view) console.error("Its seed may still control funds, so back it up too.");
   }
   if (!durable) {
     console.error("warning: the new key is in place but its directory entry may not survive a power loss; run sync");
