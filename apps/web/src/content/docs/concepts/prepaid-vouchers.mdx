@@ -381,7 +381,7 @@ So the agent counts what it can see. It advances its total only when it cannot r
 | `402` and a `PAYMENT-REQUIRED`, or a `PAYMENT-RESPONSE` with `success: false` | An explicit refusal. Nothing was committed. | Unchanged, apart from a resync from the snapshot. |
 | Neither header: a `502` from a facilitator timeout, a `5xx` from the handler, a dropped connection | The outcome is not known. | Advances to the value it attempted. |
 
-If the agent did not advance after an unknown outcome and the facilitator had in fact committed the voucher, the agent would send the same total again. The facilitator would see a delta of zero, refuse it with `z402_cumulative_mismatch`, and the agent would repeat it forever. Moving forward breaks that deadlock. The next voucher covers both calls, because the increment rule only asks for at least the price.
+If the agent did not advance after an unknown outcome and the facilitator had in fact committed the voucher, the agent would send the same total again. The facilitator would see a delta of zero and refuse it with `z402_cumulative_mismatch`, and the agent would take the facilitator's total from the refusal and retry, at the cost of one more round trip. Moving forward avoids that. The next voucher covers both calls, because the increment rule only asks for at least the price.
 
 The result is that a failure after a voucher counts as paid. The agent may pay for a call that failed, by at most one price for each unknown outcome. The cost is bounded, and in return the agent has one rule it can always follow. The same logic lets the agent trust the facilitator's total: vouchers move no money, since the deposit already did, so a facilitator that lies about `c_last` can only refuse service it could refuse anyway.
 

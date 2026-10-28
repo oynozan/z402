@@ -81,25 +81,32 @@ The wallet needs funds for one deposit and its fee for each provider you will pa
 <CodeTabs>
 
 ```bash title="npm"
-npm install --save-exact @z402/client @z402/lightwalletd @z402/protocol @x402/core@2.28.0 @x402/fetch@2.28.0 @x402/extensions@2.28.0
+npm install --save-exact @z402/client @x402/fetch@2.28.0
 ```
 
 ```bash title="pnpm"
-pnpm add --save-exact @z402/client @z402/lightwalletd @z402/protocol @x402/core@2.28.0 @x402/fetch@2.28.0 @x402/extensions@2.28.0
+pnpm add --save-exact @z402/client @x402/fetch@2.28.0
 ```
 
 </CodeTabs>
 
+<Callout type="note">
+
+`@z402/client` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
+
+</Callout>
+
+The examples further down use three more packages. Install each one the same way when you need it: `@z402/lightwalletd`, which is not on npm yet either, and `@x402/core` and `@x402/extensions`, which take the same exact pin.
+
 | Package | You use it for |
 |---|---|
-| `@z402/client` | The scheme, the Zallet wallet and the chain status source |
-| `@z402/lightwalletd` | `createLightwalletdClient`, the gRPC client that the status source reads through |
-| `@z402/protocol` | Types such as `ZcashWallet`, which you need only to write a wallet of your own |
+| `@z402/client` | The scheme, the Zallet wallet, the chain status source, and the wallet and chain types |
 | `@x402/fetch` | `x402Client` and `wrapFetchWithPayment` |
+| `@z402/lightwalletd` | `createLightwalletdClient`, the gRPC client that the status source reads through |
 | `@x402/core` | `HTTPFacilitatorClient` and the header decoders |
 | `@x402/extensions` | `withBazaar`, to read the catalog of services |
 
-Pin the three `@x402` packages to exactly 2.28.0, which `--save-exact` keeps in your `package.json`. The scheme is built and tested against that version, and the protocol pins it too. To run TypeScript directly, use `npx tsx agent.ts`.
+Pin the `@x402` packages to exactly 2.28.0, which `--save-exact` keeps in your `package.json`. The scheme is built and tested against that version, and the protocol pins it too. To run TypeScript directly, use `npx tsx agent.ts`.
 
 ## Create the wallet
 
@@ -154,6 +161,14 @@ The scheme relies on these rules:
 ## Read the chain
 
 The scheme reads the chain for itself only in a few cases: to wait until a pending deposit is mined, to look for a deposit the provider could not find, and to recheck a deposit whose send was uncertain. In each it also learns whether a deposit has died, so that it can replace it. It never reads the chain for an ordinary call.
+
+The status source reads through the gRPC client of `@z402/lightwalletd`. Install it the same way as `@z402/client`:
+
+```bash
+npm install --save-exact @z402/lightwalletd
+```
+
+It is another package of the monorepo and not on npm yet either, so depend on it with `"workspace:*"` until it is.
 
 ```ts
 import { LightwalletdTxStatus } from "@z402/client";

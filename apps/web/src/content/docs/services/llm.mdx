@@ -68,8 +68,8 @@ Starts a stream, or returns the next chunk of one. Paid: 200 zat per call. An un
 Send `prompt` to start a stream, or `stream` to continue one, never both. Any other field is refused.
 
 <Params>
-<Param name="prompt" type="string">Starts a stream. Required to start. 1 to 8,000 characters, not blank, valid Unicode (no lone surrogate).</Param>
-<Param name="system" type="string">A system prompt for the model. Optional, only with `prompt`. Up to 8,000 characters.</Param>
+<Param name="prompt" type="string">Starts a stream. Required to start. 1 to 8,000 characters (an emoji counts as 2), not blank, valid Unicode (no lone surrogate).</Param>
+<Param name="system" type="string">A system prompt for the model. Optional, only with `prompt`. Up to 8,000 characters, counted the same way.</Param>
 <Param name="maxTokens" type="integer">The most output tokens for the whole stream, 1 to 1,024 (`LLM_MAX_TOKENS`). Optional, only with `prompt`. Defaults to 1,024.</Param>
 <Param name="stream" type="string">The id from an earlier answer. Required to continue. Send it alone.</Param>
 </Params>
@@ -348,6 +348,7 @@ Shared by every service:
 | `Z402_NETWORK` | `regtest` | `regtest`, `testnet` or `mainnet`. Must match the facilitator. |
 | `Z402_PRICE_ZAT` | `200` | Zat per chunk, from 1 to the facilitator's `windowZat`. |
 | `PUBLIC_URL`, `HOST`, `PORT` | `http://localhost:4031`, `127.0.0.1`, `4031` | The origin used in the 402 and in the Bazaar, and where the service listens. |
+| `Z402_FACILITATOR_WAIT_MS` | `120000` | How long the service keeps retrying at start while the facilitator does not answer, 0 to 3,600,000. `0` fails at once. |
 
 Its own:
 

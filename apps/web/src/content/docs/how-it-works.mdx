@@ -149,7 +149,13 @@ The agent sends the voucher inside the x402 payment, in the `PAYMENT-SIGNATURE` 
 {
   "x402Version": 2,
   "error": "Payment required",
-  "resource": { "url": "http://api:4021/chunk", "mimeType": "application/json" },
+  "resource": {
+    "url": "http://localhost:4021/chunk",
+    "description": "One numbered chunk of demo data per paid call",
+    "mimeType": "application/json",
+    "serviceName": "Demo API",
+    "tags": ["demo"]
+  },
   "accepts": [ { "scheme": "prepaid-voucher", "...": "the offer above" } ]
 }
 ```
@@ -157,7 +163,13 @@ The agent sends the voucher inside the x402 payment, in the `PAYMENT-SIGNATURE` 
 ```json title="PAYMENT-SIGNATURE"
 {
   "x402Version": 2,
-  "resource": { "url": "http://api:4021/chunk", "mimeType": "application/json" },
+  "resource": {
+    "url": "http://localhost:4021/chunk",
+    "description": "One numbered chunk of demo data per paid call",
+    "mimeType": "application/json",
+    "serviceName": "Demo API",
+    "tags": ["demo"]
+  },
   "accepted": { "scheme": "prepaid-voucher", "...": "the offer, unchanged" },
   "payload": {
     "sessionKey": "7c1e…9d",

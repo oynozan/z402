@@ -62,7 +62,7 @@ How long a block lasts depends on the chain. It is about 25 seconds on the demo'
 | 100 blocks | 1 upload and 9 holds | 5,000 zat |
 | 1,000 blocks, the cap | 1 upload and 99 holds | 50,000 zat |
 
-When the tip is not known, for example while lightwalletd is down, the service starts and answers `GET /health` with 503, and it refuses paid calls. Downloads and deletes keep working and nothing expires. After a chain restart with the directory kept, every expiry is pulled back to at most the new tip plus `DROPBOX_MAX_HOLD_BLOCKS`.
+The service trusts the last tip it read for 60 seconds, so a short lightwalletd outage changes nothing. When the tip is not known, for example when lightwalletd has been down longer, the service starts and answers `GET /health` with 503, and it refuses paid calls. Downloads and deletes keep working and nothing expires. After a chain restart with the directory kept, every expiry is pulled back to at most the new tip plus `DROPBOX_MAX_HOLD_BLOCKS`.
 
 ## The routes
 
@@ -276,17 +276,18 @@ Everything that can be refused is refused on the unpaid first attempt, before a 
 | 400 | `bad_request` | The path is not valid percent-encoding. |
 | 400 | `bad_body` | The body could not be read. |
 | 404 | `unknown_drop` | A hold, download or delete for a drop that is unknown or expired. |
-| 405 | `method_not_allowed` | A method the route does not take. |
+| 404 | `not_found` | Another method on `/v1/drops/:id`, or a path the service has no route for. |
+| 405 | `method_not_allowed` | A method the paid route does not take. `Allow` says `POST`. |
 | 409 | `hold_cap_reached` | A hold would take the drop past `DROPBOX_MAX_HOLD_BLOCKS` beyond the tip. `maxHoldBlocks` says how many. |
 | 409 | `payment_in_flight` | The same voucher is already paying for a call. |
 | 413 | `too_large` | The body is over `DROPBOX_MAX_BYTES` (1 MiB). |
 | 415 | `not_encrypted` | The body does not look like an age file. `reason` says why. |
 | 415 | `unsupported_encoding` | The body has a `Content-Encoding`, which ciphertext never needs. |
-| 429 | `rate_limited` | More than `DROPBOX_RATE_PER_MIN` (30) upload attempts from one client in a minute. `Retry-After` says when to try again. |
+| 429 | `rate_limited` | A client has an allowance of `DROPBOX_RATE_PER_MIN` (30) upload attempts that refills evenly over a minute: a burst of 30, then one every 2 seconds. `Retry-After` says when to try again. |
 | 503 | `not_ready` | The chain tip is not known. |
 | 507 | `storage_full` | The drops on disk would pass `DROPBOX_MAX_TOTAL_BYTES` (256 MiB). |
 
-The rate counts attempts, not uploads. The paid retry of an attempt that passed its checks is not counted, so a client within its rate is never refused once it has paid. A paid attempt that no checked attempt came before counts like any other. An IPv6 client counts per /64.
+The rate counts attempts, not uploads. The paid retry of an attempt that passed its checks is not counted, so a client within its rate is never refused once it has paid. A paid attempt that no checked attempt came before counts like any other. An IPv6 client counts per /64. The client is the connection's address: the drop box does not read `X-Forwarded-For`, so behind a reverse proxy every client counts as the proxy.
 
 ### When a paid call does not deliver
 

@@ -7,6 +7,12 @@ export const meta = {
 
 The package depends on `@x402/core`, pinned to exactly 2.28.0, and on `@z402/protocol`. It is a workspace package (`private`, version `0.0.0`) with one entry point, `@z402/server`.
 
+<Callout type="note">
+
+`@z402/server` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
+
+</Callout>
+
 | Export | Kind | What it is |
 | --- | --- | --- |
 | [`PrepaidVoucherServerScheme`](/docs/reference/server#prepaidvoucherserverscheme) | class | The `prepaid-voucher` scheme, for `x402ResourceServer.register` |

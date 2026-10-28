@@ -221,6 +221,12 @@ Create a package for the server, for example `apps/my-api`. Pin the x402 package
 }
 ```
 
+<Callout type="note">
+
+`@z402/server` and `@z402/protocol` are not on npm yet: they ship TypeScript source and need a build step before they are published. Until then, depend on them from the z402 monorepo with `"workspace:*"`, as above, and run with `tsx` on Node 22 or later.
+
+</Callout>
+
 ```json title="apps/my-api/tsconfig.json"
 {
   "extends": "../../tsconfig.base.json",

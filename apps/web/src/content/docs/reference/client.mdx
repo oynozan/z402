@@ -11,6 +11,12 @@ export const meta = {
 npm install --save-exact @z402/client @x402/fetch@2.28.0
 ```
 
+<Callout type="note">
+
+`@z402/client` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
+
+</Callout>
+
 `@z402/client` is an ES module. It depends on `@x402/core` 2.28.0 and on `@z402/protocol`, and it has no dependency on `@x402/fetch`: install that yourself for `x402Client` and `wrapFetchWithPayment`. The package needs no gRPC or wallet library. It reaches the chain through an object you give it, and Zallet through `fetch`. It also re-exports the seams that a wallet or a chain source of your own implements, so you need no `@z402/protocol` import for them.
 
 ```ts

@@ -113,7 +113,7 @@ Port 4031, 200 zat per output chunk. Ready while the provider lists `LLM_MODEL`.
 
 ### URL to markdown
 
-Port 4032, 1,000 zat per page. It fetches public pages itself and has no provider key. See [URL to markdown](/docs/services/markdown).
+Port 4032, 1,000 zat per page. It fetches public pages itself and has no model provider key. See [URL to markdown](/docs/services/markdown).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -174,6 +174,7 @@ The demo resource server, with one paid route, `GET /chunk`. It reads no `PORT` 
 | `Z402_PRICE_ZAT` | `500` | The price of one call, from 1 to the facilitator's `windowZat`. |
 | `Z402_API_HOST` | `127.0.0.1` | The listen address. Not blank. |
 | `Z402_API_PORT` | `4021` | 0 to 65,535. |
+| `Z402_API_PUBLIC_URL` | none | Where this API is reached, such as `https://api.example.com`. When it is set, the 402 names `<this URL>/chunk` as its resource, and the API declares `GET /chunk` to the facilitator's catalog as soon as it listens and every 30 s after. An absolute `http://` or `https://` URL with no user name, password, query or fragment. Set it on an API whose provider also declares other routes, such as the operator's, because a provider that has declared anything is listed by its declarations alone. Compose sets it. |
 
 ## Website
 
@@ -229,8 +230,9 @@ The agent and the smoke test read flags and no environment variables.
 | `--network <id>` | `zcash:regtest` | The network. |
 | `--zallet-url <url>`, `--zallet-user <user>`, `--zallet-password <pw>` | `http://127.0.0.1:50232`, `zebra`, `zebra` | Zallet, as for the agent. |
 | `--lightwalletd <url>` | `http://127.0.0.1:28137` | Zaino, as for the agent. |
+| `--help`, `-h` | | Print the usage and exit 0. |
 
-Exit status: 0 when every step passed, 1 when a step failed or the wallet could not be used, 2 for a flag error.
+Exit status: 0 when every step passed, 1 when a step failed or the wallet could not be used, 2 for a flag error. Ctrl-C ends a run with 130 and SIGTERM with 143.
 
 ## Compose
 
@@ -249,6 +251,7 @@ Copy `.env.example` to `.env` next to `compose.yaml` and change what you need. E
 | `Z402_DROPBOX_PORT` | `4034` | Host port of `dropbox`. |
 | `Z402_BLOCK_SECONDS` | `25` | Seconds between the blocks the clock mines. Nothing confirms or expires without blocks. |
 | `Z402_PRICE_ZAT` | `500` | The price of the demo API's `GET /chunk`. Compose gives it to the demo API only: each starter service charges its own price. |
+| `Z402_API_PUBLIC_URL` | `http://localhost:4021`, following `Z402_API_PORT` | The origin agents reach the demo API at. Its 402 names `<this URL>/chunk`, and the API lists `GET /chunk` in the service catalog under it. On a server, set its public origin, such as `https://api.example.com`. |
 | `Z402_REGISTRATION_TOKEN` | empty | The token a provider presents to register with the facilitator. A b64token of at least 32 characters, for example from `openssl rand -hex 32`. Empty leaves registration open, which is safe only while the facilitator's port stays unpublished, and every start of the facilitator warns about it. `markdown-register` sends it for provider 2. |
 | `Z402_LLM_HF_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M` | The local chat model, as llama.cpp `-hf <Hugging Face repo>:<quant>`. Needs at least a 10,240-token context. The service asks for the alias `qwen2.5-0.5b-instruct`, which stays. |
 | `Z402_EMBED_HF_MODEL` | `nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M` | The local embedding model. Needs at least a 2,048-token context. The alias `nomic-embed-text` stays. |

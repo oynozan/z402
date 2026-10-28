@@ -179,16 +179,18 @@ Each starter service refuses everything it can before the agent sends a voucher,
 
 | Status | `error` | Service | Meaning |
 | --- | --- | --- | --- |
-| 404 | `not_found` | Every service | A spelling of a paid path that the router would not serve, such as a trailing slash or `//v1/generate`. |
+| 404 | `not_found` | Every service | A spelling of a paid path that no route can match, such as an encoded slash (`/v1/generate%2F`). A trailing slash, a doubled slash (`//v1/generate`), another letter case or a percent-encoded letter is served as the paid route. The drop box also answers `not_found` for a path it has no route for. |
 | 405 | `method_not_allowed` | Every service | A method the route does not serve. The `Allow` header says which one it does. |
 | 409 | `payment_in_flight` | Every service | The same voucher is already paying for a call. |
-| 503 | `not_ready` | Every service | The service is not ready: the model provider does not list the model, or the chain tip is not known. Readiness is cached for 5 s. |
+| 503 | `not_ready` | Every service | The service is not ready: the model provider does not list the model, or the chain tip is not known. Readiness is cached for 5 s, and `llm` and `embeddings` also reuse their provider's answer for 10 s. |
 | 400 | `invalid_request` | `llm`, `embeddings` | The body is not valid. The `message` says why. |
-| 400 | `invalid_url` | `markdown` | No `url`, not an absolute http(s) URL, credentials in it, or a port that is not allowed. |
-| 400 | `empty_body`, `bad_request` | `dropbox` | An upload with no body, or an id that is not valid percent-encoding. |
+| 400 | `invalid_url` | `markdown` | No `url`, not an absolute http(s) URL, over 4,096 characters, credentials in it, or a port that is not allowed. |
+| 400 | `empty_body`, `bad_request`, `bad_body` | `dropbox` | An upload with no body, an id that is not valid percent-encoding, or a body that could not be read. |
 | 403 | `blocked_address` | `markdown` | The host, or a redirect, leads to an address that is not public. |
 | 404 | `unknown_stream` | `llm` | The stream id is not known. |
-| 404 | `unknown_drop` | `dropbox` | A hold for a drop that is unknown or expired. |
+| 401 | `unauthorized` | `dropbox` | A delete without a bearer token. The answer has `WWW-Authenticate: Bearer`. |
+| 403 | `forbidden` | `dropbox` | A delete with the wrong delete token. |
+| 404 | `unknown_drop` | `dropbox` | A hold, a download or a delete for a drop that is unknown or expired. |
 | 409 | `stream_busy` | `llm` | Another call on this stream is in flight. |
 | 409 | `hold_cap_reached` | `dropbox` | A hold would take the drop past `DROPBOX_MAX_HOLD_BLOCKS` beyond the tip. |
 | 410 | `stream_finished` | `llm` | Every chunk was delivered. |

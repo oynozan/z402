@@ -28,7 +28,7 @@ docker compose up -d
 docker compose ps
 ```
 
-`up -d` builds five images, pulls the rest and starts everything in dependency order. The first start downloads about 1 GB of images and two small models (about 580 MB) from Hugging Face. On a 4-CPU VM with a fast link, building the images from nothing took about 1.5 minutes, and `up -d` returned after about 45 seconds once they were built.
+`up -d` builds five images, pulls the rest and starts everything in dependency order. The first start downloads about 1 GB of images and two small models (about 580 MB) from Hugging Face. On a 4-CPU VM with a fast link, building the images from nothing took about 1.5 minutes. Once they were built, `up -d` returned after 45 to 75 seconds, and every service was healthy within two minutes.
 
 | Container | What it is |
 |---|---|
@@ -100,18 +100,19 @@ docker compose run --rm smoke
 llm start 200 31842 ms chunk 0 "Once upon a time, there lived a lighthouse keeper named Elias." (200 zat)
 llm continue 200 1910 ms chunk 1 " Every night he climbed the stairs to light the lamp" (200 zat)
 llm continue 200 1895 ms chunk 2 "..." (done, length) (200 zat)
-markdown get 200 412 ms "Example Domain" 1256 chars (1000 zat)
+markdown get 200 412 ms "Example Domain" 149 chars (1000 zat)
 embeddings embed 200 96 ms 2 vectors, 768 dimensions, model nomic-embed-text, 5 tokens (100 zat)
 dropbox upload 201 40 ms id q3Zs0mYbT7cWpAxK1nGhUw, 1192 bytes, held until block 1052 (500 zat)
 dropbox hold 200 75 ms held until block 1062 (500 zat)
 dropbox fetch 200 5 ms 1192 bytes identical, expires at block 1062
 dropbox delete 204 4 ms deleted, then 404
-session uregtest1qqq…qqqqqq cumulative 1700 zat after 7 paid calls
-session uregtest1ppp…pppppp cumulative 1000 zat after 7 paid calls
+session uregtest1qqq…qqqqqq cumulative 1700 zat
+session uregtest1ppp…pppppp cumulative 1000 zat
+7 paid calls over 2 sessions
 smoke ok: 9 steps passed on llm, markdown, embeddings, dropbox
 ```
 
-Your times, texts and ids will differ. Each line reads `service step status time detail`. The first line is slow because it includes the first deposit: the wallet has to build a proof, which takes 5 to 10 seconds. The two `session` lines are the two providers: the operator, which runs `llm`, `embeddings` and `dropbox`, and provider 2, which runs `markdown`. Each has its own deposit and its own running total. The paid-call count on those lines is that of the whole run. A failed step says `FAIL` and whether the call was charged.
+Your times, texts and ids will differ. Each line reads `service step status time detail`. The first line is slow because it includes the first deposit: the wallet has to build a proof, which takes 5 to 10 seconds. The two `session` lines are the two providers: the operator, which runs `llm`, `embeddings` and `dropbox`, and provider 2, which runs `markdown`. Each has its own deposit and its own running total. A failed step says `FAIL` and whether the call was charged.
 
 `markdown` fetches `https://example.com`, so the `markdown` container needs internet access. To fetch another page, add `--page`:
 
@@ -191,6 +192,7 @@ docker compose run --rm discover
 ```
 
 ```text
+Demo API            GET   http://localhost:4021/chunk              500 zat per chunk         up, 5 paid today
 LLM inference       POST  http://localhost:4031/v1/generate        200 zat per output chunk  up, 3 paid today
 URL to markdown     GET   http://localhost:4032/v1/markdown        1,000 zat per page        up, 6 paid today
 Text embeddings     POST  http://localhost:4033/v1/embeddings      100 zat per 1k tokens     up, 1 paid today
@@ -198,7 +200,7 @@ Encrypted drop box  POST  http://localhost:4034/v1/drops           500 zat per 1
 Encrypted drop box  POST  http://localhost:4034/v1/drops/:id/hold  500 zat per 10 blocks     up, 1 paid today
 ```
 
-Each line ends with the route's description, left out here. `up` means the service declared itself in the last 90 seconds. `paid today` counts calls settled since 00:00 UTC. After the two runs above, `llm` shows the three chunks of the smoke run, and `markdown` shows its one smoke page plus the five the agent fetched. The URLs are the services' public addresses: reach them from your machine, not from inside the compose network.
+Each line ends with the route's description, left out here. `up` means the service declared itself in the last 90 seconds. `paid today` counts calls settled since 00:00 UTC. After the two runs above, `llm` shows the three chunks of the smoke run, and `markdown` shows its one smoke page plus the five the agent fetched. The demo API's `GET /chunk` is listed too, as `Demo API`, and shows the five calls the agent paid it. The URLs are the services' public addresses: reach them from your machine, not from inside the compose network.
 
 `--intent` ranks the list on your side by word overlap, so the catalog never learns what you are looking for:
 

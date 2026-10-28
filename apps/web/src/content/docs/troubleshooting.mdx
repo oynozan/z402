@@ -17,7 +17,7 @@ The demo API has no `/health`. It is up when an unpaid call gets its offer: `cur
 
 <Callout type="tip" title="Read the agent's log first">
 
-The agent prints one line for each paid call. A refusal says `REFUSED` and names the reason code, for example `#126 402  REFUSED z402_deposit_required at limit 125,000`. Lines that start with `  * ` are events of the payment client: deposits, confirmations, waits and refusals it recovers from. The reason code tells you the cause, and [A 402 after paying](#a-402-after-paying) lists what each one means.
+The agent prints one line for each paid call. A refusal says `REFUSED` and names the reason code, for example `#251 402  REFUSED z402_deposit_required at limit 125,000`. Lines that start with `  * ` are events of the payment client: deposits, confirmations, waits and refusals it recovers from. The reason code tells you the cause, and [A 402 after paying](#a-402-after-paying) lists what each one means.
 
 </Callout>
 
@@ -188,7 +188,7 @@ Every starter service refuses what it can before payment, so these answers never
 | 503 `not_ready` | The service's provider (the model) is not ready yet, or `dropbox` does not know the chain tip yet. |
 | 507 `storage_full` | The drop box is full. |
 
-Behind a reverse proxy, every client looks like the proxy to the rate limit. Set `MARKDOWN_TRUST_PROXY=uniquelocal` in `services/markdown/.env`. Each service's own page lists its answers in full.
+Behind a reverse proxy, every client looks like the proxy to the rate limit. Set `MARKDOWN_TRUST_PROXY=uniquelocal` in `services/markdown/.env`. The drop box has no such setting: behind a proxy, all its clients share one allowance of `DROPBOX_RATE_PER_MIN` attempts a minute. Each service's own page lists its answers in full.
 
 ## Providers and keys
 
@@ -287,15 +287,15 @@ The status comes from the age of a service's last declaration, `lastSeen`: `up` 
 
 The listed URLs are the services' public addresses, `http://localhost:<port>` in compose. Reach them from your machine. Inside the compose network, use the service names, such as `http://markdown:4032`.
 
-The demo API's `GET /chunk` is not in the list. It does not declare itself, and its provider, the operator, already declares the other starter services, so its payments do not create catalog items.
+The demo API's `GET /chunk` is in the list too, as `Demo API`, because compose sets `Z402_API_PUBLIC_URL` for the API and that makes it declare the route every 30 seconds. An API with no public URL declares nothing, and its payments do not list it while its provider, the operator, already declares the starter services.
 
 ### smoke FAILED
 
-`smoke` exits 0 when every step passed, 1 when a step failed or the wallet could not be used, and 2 for a flag error. A failed step prints `FAIL`, the reason, and whether the call was charged:
+`smoke` exits 0 when every step passed, 1 when a step failed or the wallet could not be used, and 2 for a flag error. A failed paid step prints `FAIL`, the reason, and whether the call was charged. A failed free step (`dropbox fetch` or `dropbox delete`) prints `FAIL` and the reason:
 
 ```text
 embeddings embed 413 12 ms FAIL expected 200, got 413: too_many_tokens (not charged)
-dropbox hold 502 75 ms FAIL expected 200, got 502: provider_failed (charged 500 zat)
+dropbox hold 404 75 ms FAIL expected 200, got 404: unknown_drop (charged 500 zat)
 smoke FAILED: 2 of 9 steps failed (embeddings embed, dropbox hold)
 ```
 

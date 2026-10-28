@@ -50,7 +50,7 @@ sequenceDiagram
 2. **402.** If the page worked, the service answers with the price.
 3. **Paid retry.** The agent sends the same request with a <Term tip="A message the agent signs for each call. It states the agent's running total, so the facilitator can check it against the deposit.">voucher</Term>. The service verifies it and answers from the cache, so it does not fetch the page a second time. You get the version the unpaid attempt saw, even if the page changed in between.
 
-The service holds a page for your paid retry for as long as `MARKDOWN_CACHE_MS` (60 seconds, 120 under Docker, since a first deposit can take tens of seconds). Other clients' pages cannot push it out of the cache. A client holds at most four pages at a time, and its oldest hold goes first.
+The service holds a page for your paid retry for as long as `MARKDOWN_CACHE_MS` (60 seconds, 120 under Docker, since a first deposit can take tens of seconds). Other clients' pages cannot push it out of the cache. A client holds at most four pages at a time, and its oldest hold goes first. A paid retry that arrives after its hold has run out finds no page and fetches again, so it can fail like an unpaid attempt, with the voucher already signed. The stock client counts that call as paid.
 
 ## The route
 
@@ -192,10 +192,10 @@ Refused addresses are private, loopback, link-local (including 169.254.0.0/16, w
 
 1. jsdom parses the page at its final URL. Scripts never run and nothing else is loaded.
 2. Readability finds the main content. When it finds none, or the document is more than 64 levels deep or has more than 40,000 elements, the whole body is used.
-3. Links and images are made absolute. Other schemes are dropped.
+3. Links and images are made absolute. A link keeps only an `http`, `https` or `mailto` target and an image only an `http` or `https` one. Any other link keeps its text without a target, and any other image is removed.
 4. Turndown writes markdown with `#` headings, fenced code and `-` bullets. Scripts, styles, `noscript`, iframes and forms are removed.
 
-The charset comes from a byte order mark, then `Content-Type`, then a `<meta>` tag, and is UTF-8 otherwise. `text/plain` is returned as it is.
+The charset comes from a byte order mark, then `Content-Type`, then a `<meta>` tag in the first 1 KiB, and is UTF-8 otherwise. `text/plain` is returned as it is.
 
 Conversions run on worker threads (`MARKDOWN_CONVERT_WORKERS`, one by default), each with a heap of `MARKDOWN_WORKER_HEAP_MB` (192) and the same deadline. A page that runs out of either ends only its worker and is refused as `too_large`, so the server itself never stalls or runs out of memory. The heap also sets the page budget: (heap minus 64) times 300 start tags, which is 38,400 by default. Nesting deeper than 512 elements is refused. Long Wikipedia articles have about 22,000 tags.
 
@@ -282,7 +282,7 @@ The ready line goes to stdout. Logs go to stderr.
 markdown listening on http://127.0.0.1:4032 network=zcash:regtest
 ```
 
-The service has no model and no provider key. It fetches public pages itself. A bad value stops the start with a `markdown: <VARIABLE>: ...` line on stderr and exit code 1.
+The service has no model and no model provider key. It fetches public pages itself. A bad value stops the start with a `markdown: <VARIABLE>: ...` line on stderr and exit code 1.
 
 ### Running as provider 2
 
@@ -300,7 +300,7 @@ node scripts/merchant-keygen.mjs --network regtest --out "$PWD/.secrets/markdown
 </Step>
 <Step title="Register the view-only key">
 
-`POST /providers` takes the address and its view-only key (UIVK). The script reads only those two fields from the file, and writes the API key the facilitator issues to a file without printing it.
+`POST /providers` takes the address and its view-only key (UIVK). The script reads only the network, the address and the UIVK from the file, sends those three, and writes the API key the facilitator issues to a file without printing it.
 
 ```bash
 node scripts/register-provider.mjs \
@@ -325,7 +325,7 @@ At start the service calls the facilitator's `GET /providers/me` to prove that i
 
 ### Settings
 
-The variables every service shares (`Z402_NETWORK`, `Z402_FACILITATOR_URL`, `Z402_FACILITATOR_TOKEN`, `Z402_PAY_TO`, `Z402_PRICE_ZAT`, `PUBLIC_URL`, `HOST`, `PORT`) are listed under [LLM inference](/docs/services/llm#settings). Its own:
+The variables every service shares (`Z402_NETWORK`, `Z402_FACILITATOR_URL`, `Z402_FACILITATOR_TOKEN`, `Z402_PAY_TO`, `Z402_PRICE_ZAT`, `PUBLIC_URL`, `HOST`, `PORT`) are listed under [LLM inference](/docs/services/llm#settings). Here `Z402_PRICE_ZAT` defaults to 1000 and `PORT` to 4032. Its own:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -346,7 +346,7 @@ The variables every service shares (`Z402_NETWORK`, `Z402_FACILITATOR_URL`, `Z40
 
 Behind your own reverse proxy, set `MARKDOWN_TRUST_PROXY` so that the rate limit sees client IPs and not the proxy's. `true` is refused, because Express would then take the left-most `X-Forwarded-For` address, which the client writes itself.
 
-Memory is about 330 MB idle with one warm worker, and a busy worker can add up to its heap. With the defaults the worst page brings that to about 520 MB, so a 512 MB limit barely holds it and 768 MB leaves room. The Docker deployment gives it 768 MB.
+Memory is about 330 MB idle with one warm worker, and a busy worker can add up to its heap. With the defaults the worst page brings that to about 520 MB. The Docker deployment gives it 768 MiB.
 
 ## Next steps
 

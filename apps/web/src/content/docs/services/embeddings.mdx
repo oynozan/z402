@@ -157,7 +157,7 @@ Every refusal below is answered on the unpaid first attempt. No <Term tip="A mes
 
 | Status | `error` | When |
 | --- | --- | --- |
-| 400 | `invalid_request` | The body is not JSON, or `input` is missing, is not a string or a list of strings, holds too many strings, or has a blank string or one with an unpaired surrogate. `message` says which. |
+| 400 | `invalid_request` | The body is not JSON, or `input` is missing, is not a string or a list of strings, holds no strings or too many, or has a blank string or one with an unpaired surrogate. `message` says which. |
 | 405 | `method_not_allowed` | Any method but POST. The `Allow` header says POST. |
 | 409 | `payment_in_flight` | The same voucher is already paying for a call. |
 | 413 | `too_many_tokens` | The strings hold more than `EMBEDDINGS_MAX_CHARS` characters in total, or one string holds more than `EMBEDDINGS_MAX_INPUT_CHARS`, or the body is over its size limit. The body carries `maxChars` and, when it is lower, `maxInputChars`. |

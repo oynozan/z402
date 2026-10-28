@@ -130,6 +130,12 @@ Put the service in `services/notes`. The package follows the starter services.
 
 Run `pnpm install` in the repository root so that the workspace links the new package.
 
+<Callout type="note">
+
+`@z402/service-kit` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"`, as above, and run with `tsx` on Node 22 or later.
+
+</Callout>
+
 ### Write the routes and the handlers
 
 ```ts title="services/notes/src/service.ts"
@@ -591,7 +597,7 @@ Pass `ready` when your service depends on something that can be down, such as a 
 await createPaidService({
   env,
   service,
-  // Asked at most once every 5 s. A throw, or an answer that takes over 2 s, counts as not ready
+  // The kit reuses an answer for 5 s, and the Bazaar heartbeat asks on its own beat. A throw, or an answer that takes over 2 s, counts as not ready
   ready: async () => {
     const res = await fetch(`${upstream}/health`, { signal: AbortSignal.timeout(1500) });
     return res.ok;

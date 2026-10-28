@@ -55,7 +55,7 @@ Open `http://localhost:3000`. The services page lists every paid route the facil
 
 Watch it start with `docker compose logs -f wallet-fund facilitator`, or `docker compose logs -f` for everything.
 
-Measured on a 4-CPU arm64 VM with a fast link, building the images from nothing took about 1.5 minutes: the Node image 69 s, 31 s of it compiling `zdecrypt`, and the web image 19 s. With the images built, `up -d` on empty volumes returned after 45 s, and every service was healthy a second later. Funding the agent is most of that, 36 s. A fresh server first downloads about 1 GB of images, plus the crates and npm packages of the build.
+Measured on a 4-CPU arm64 VM with a fast link, building the images from nothing took about 1.5 minutes: the Node image 69 s, 31 s of it compiling `zdecrypt`, and the web image 19 s. With the images built, `up -d` on empty volumes returned after 45 to 75 s, and every service was healthy within two minutes (111 s in the latest run), the model downloads and the LLM's first load included. Funding the agent is most of the wait, 36 to 48 s. A fresh server first downloads about 1 GB of images, plus the crates and npm packages of the build.
 
 ## Start order
 
@@ -161,7 +161,7 @@ The project is named `z402`, so the volumes are `z402_chain`, `z402_keys` and so
 | `facilitator` | 4022 | No. The website serves its catalog at `/discovery/*`. |
 | `zebra`, `zallet`, `zaino`, `llm-model`, `embed-model` | 18232, 28232, 8137, 8080 | No |
 
-Published ports bind to `Z402_PUBLISH_HOST`, which is `0.0.0.0` by default so a server serves them. On a laptop, or behind a reverse proxy, set it to `127.0.0.1`. Behind a proxy, also set `MARKDOWN_TRUST_PROXY=uniquelocal` in `services/markdown/.env`, or its per-client rate limit counts every client as the proxy. Docker's published ports bypass `ufw`.
+Published ports bind to `Z402_PUBLISH_HOST`, which is `0.0.0.0` by default so a server serves them. On a laptop, or behind a reverse proxy, set it to `127.0.0.1`. Behind a proxy, also set `MARKDOWN_TRUST_PROXY=uniquelocal` in `services/markdown/.env`, or its per-client rate limit counts every client as the proxy. The drop box has no such setting, so behind a proxy all its clients share one allowance of `DROPBOX_RATE_PER_MIN` attempts a minute. Docker's published ports bypass `ufw`.
 
 ## Settings
 
@@ -169,7 +169,7 @@ Four files change the stack. Every variable is in [Configuration](/docs/referenc
 
 | File | What goes in it |
 | --- | --- |
-| `.env` next to `compose.yaml` | Compose settings: the bind address, host ports, block time, registration token and models. Copy it from `.env.example`. |
+| `.env` next to `compose.yaml` | Compose settings: the bind address, host ports, block time, the demo API's price and public URL, registration token and models. Copy it from `.env.example`. |
 | `docker/env/<name>.env` | The Docker defaults of a service: the local model URLs, and limits that fit the local models. |
 | `services/<name>/.env` | A service's own limits and provider keys, and `PUBLIC_URL`. Copy it from `services/<name>/.env.example`. |
 | `compose.yaml` | What cannot change from outside: `HOST`, `PORT`, the network, the facilitator URL, and the token and `payTo` files. |
@@ -178,7 +178,7 @@ For a service's own environment the strongest source is `compose.yaml`, then `se
 
 An empty value counts as unset, so `NAME=` brings back the service's own default. Leave out any `127.0.0.1` URL copied from an example, because inside a container that address is the container itself.
 
-On a server, set `PUBLIC_URL` in each `services/<name>/.env` to the origin agents reach the service at, for example `https://llm.example.com` or `http://203.0.113.7:4031`. It is the resource URL in every 402 and in the catalog. Change it together with the host port.
+On a server, set `PUBLIC_URL` in each `services/<name>/.env` to the origin agents reach the service at, for example `https://llm.example.com` or `http://203.0.113.7:4031`. It is the resource URL in every 402 and in the catalog. Change it together with the host port. The demo API's is `Z402_API_PUBLIC_URL` in `.env` (default `http://localhost:` and its published port), and it is what lists the API's `GET /chunk` in the catalog.
 
 `docker compose up -d` recreates a service whose settings changed.
 
@@ -225,7 +225,7 @@ flowchart TD
   R --> W[Write payTo and api-key]
 ```
 
-The job registers again only when there is no stored key, when the facilitator no longer knows it (a 401, for example after the `facilitator-data` volume was deleted), or when you ask with `--rotate`. It says so. If `markdown` was running, run `docker compose restart markdown`, because a server reads its key only when it starts.
+The job registers again only when there is no stored key, when the facilitator no longer knows it (a 401, for example after the `facilitator-data` volume was deleted), when the stored key belongs to another `payTo` or network, or when you ask with `--rotate`. It says so. If `markdown` was running, run `docker compose restart markdown`, because a server reads its key only when it starts.
 
 When the facilitator refuses the registration, the job exits 1 and `markdown` does not start. `docker compose logs markdown-register` says why:
 

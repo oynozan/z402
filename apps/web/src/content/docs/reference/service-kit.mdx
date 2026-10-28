@@ -7,6 +7,12 @@ export const meta = {
 
 The package is a workspace package (`private`, version `0.0.0`). It depends on `@x402/core`, `@x402/express` and `@x402/extensions`, all pinned to exactly 2.28.0, on `express` 5.3.0, and on `@z402/protocol` and `@z402/server`. The testing entry point also needs `@x402/fetch`, `@z402/client`, `@z402/facilitator` and `@z402/testkit`.
 
+<Callout type="note">
+
+`@z402/service-kit` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
+
+</Callout>
+
 ## Entry points
 
 | Entry point | Source | Exports |
@@ -436,7 +442,7 @@ function startTestStack(o: TestStackOptions): Promise<TestStack>;
 It starts, in order:
 
 1. A `FakeChain` with an expiry delta of 40 blocks.
-2. The real facilitator on an in-memory ledger, polling every 50 ms, with the demo terms, the stack's price and the token `TEST_TOKEN`, paid at `TEST_PAY_TO`.
+2. The real facilitator on an in-memory ledger, polling every 50 ms, with the demo terms and the token `TEST_TOKEN`, paid at `TEST_PAY_TO`.
 3. With `catalog`, a stub Bazaar in front of the facilitator.
 4. Your service, built by `build(env)`, on `127.0.0.1` and a free port.
 5. A paying client: `PrepaidVoucherScheme` with a `MockWallet`, in the stock x402 fetch wrapper.
@@ -458,12 +464,12 @@ type Built = Express | { app: Express; close?(): Promise<void> };
 
 <Params>
   <Param name="build" type="(env: ServiceEnv) => Promise<Built>" required>Builds your service from the stack's settings. Return the Express app, or `{ app, close }` to have `close` run when the stack closes.</Param>
-  <Param name="priceZat" type="bigint">The price of one call. It becomes `env.priceZat` and the price the stack's facilitator is configured with. Default 500.</Param>
+  <Param name="priceZat" type="bigint">The default price of one call. It becomes `env.priceZat`: what every route that sets no `priceZat` charges, and what `/health` reports. The kit checks it against the demo terms' `windowZat`, 100,000. The stack's facilitator ignores it, because each provider prices its own routes and the amount in each `402` is what is paid. Default 500.</Param>
   <Param name="env" type="Partial<ServiceEnv>">Overrides of the settings that `build` receives.</Param>
   <Param name="catalog" type="boolean">Puts a stub Bazaar in front of the facilitator and lets the service declare to it. Without it the stack sets `declareIntervalMs` to 0, and the service declares nothing.</Param>
 </Params>
 
-The `env` that `build` receives is: `network` `TEST_NETWORK`, `facilitatorUrl` the stack's facilitator (or the stub, with `catalog`), `facilitatorToken` `TEST_TOKEN`, `payTo` `TEST_PAY_TO`, `priceZat`, `publicUrl` `TEST_PUBLIC_URL`, `host` `127.0.0.1`, `port` `0`, and your overrides on top. The `402`s therefore name `http://service.test` as their resource, while the service listens at `stack.url`.
+The `env` that `build` receives is: `network` `TEST_NETWORK`, `facilitatorUrl` the stack's facilitator (or the stub, with `catalog`), `facilitatorToken` `TEST_TOKEN`, `payTo` `TEST_PAY_TO`, `priceZat`, `publicUrl` `TEST_PUBLIC_URL`, `host` `127.0.0.1`, `port` `0`, `declareIntervalMs` `0` unless the stack has a `catalog`, and your overrides on top. The `402`s therefore name `http://service.test` as their resource, while the service listens at `stack.url`.
 
 ### TestStack
 
@@ -583,11 +589,11 @@ const TEST_PUBLIC_URL: string; // http://service.test
 | Message starts with | Cause |
 | --- | --- |
 | `Z402_FACILITATOR_URL is required`, `Z402_PAY_TO is required` | A required variable is missing |
-| `Z402_FACILITATOR_TOKEN: <reason>` | The key is refused (`401` or `403`), or is not one token. With `_FILE`, the name is `Z402_FACILITATOR_TOKEN_FILE` |
+| `Z402_FACILITATOR_TOKEN: <reason>`, `Z402_FACILITATOR_TOKEN_FILE: <reason>` | The key is refused (`401` or `403`), which always names `Z402_FACILITATOR_TOKEN`, or is not one token, which names `Z402_FACILITATOR_TOKEN_FILE` when the key came from the file |
 | `Z402_PAY_TO: <reason>` | The address is not valid for the network, or the key belongs to another address, or the facilitator serves another network |
-| `Z402_FACILITATOR_URL: cannot read /supported from ...` | The facilitator is unreachable. The kit waits and then fails |
+| `Z402_FACILITATOR_URL: cannot reach ...`, `... did not answer /providers/me within ... ms`, `... answered /providers/me with <status>` (a `5xx`, `408` or `429`), `cannot read /supported from ...` | The facilitator is unreachable, slow or failing. The kit waits and then fails |
 | `Z402_FACILITATOR_URL: ... advertises terms this service cannot use (...)` | The scheme's support check failed. The reasons are listed |
-| `Z402_FACILITATOR_URL: ... is not a facilitator ...` | `/supported` answered with a `4xx` other than `401` or `403`, or with a body that is not a facilitator's |
+| `Z402_FACILITATOR_URL: ... has no /providers/me (404) ...`, `... answered /providers/me with <status>` (another `4xx`), `... with a body that is not {providerId, network, payTo}`, `... is not a facilitator ...` | `/providers/me` answered `404`, another `4xx` or a body that is not a provider's, or `/supported` answered with a `4xx` other than `401` or `403`, or with a body that is not a facilitator's. The kit fails at once |
 | `Z402_NETWORK: ... offers prepaid-voucher on <networks>, not on <network>` | The facilitator does not serve the service's network |
 | `Z402_PRICE_ZAT: <METHOD> <path> would cost <price> zat, outside 1 to <windowZat>, the facilitator's windowZat` | A price is out of range, whether it came from the variable or from `priceZat` |
 | `PUBLIC_URL: must not contain credentials`, `PUBLIC_URL: with <path> it makes a resource URL over 2048 characters` | The public URL breaks the catalog's rules |
