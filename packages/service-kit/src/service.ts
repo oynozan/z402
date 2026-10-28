@@ -273,6 +273,17 @@ function routeConfig(env: ServiceEnv, s: ServiceDefinition, r: PaidRoute, tags: 
   };
 }
 
+/** Asks the facilitator once without initialize(), which warns on the console for every facilitator that fails */
+async function loadTerms(facilitator: FacilitatorClient, http: x402HTTPResourceServer): Promise<void> {
+  try {
+    await facilitator.getSupported();
+  } catch (cause) {
+    // The error initialize() throws for a facilitator that failed, so startupError reads both alike
+    throw new Error("Failed to initialize: no supported payment kinds loaded from any facilitator.", { cause });
+  }
+  await http.initialize();
+}
+
 async function readiness(ready: PaidServiceOptions["ready"]): Promise<boolean> {
   if (ready === undefined) return true;
   let timer: NodeJS.Timeout | undefined;
@@ -296,7 +307,8 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
   checkDefinition(service);
   const tags = service.tags === undefined ? undefined : sanitizeTags(service.tags);
 
-  const server = new x402ResourceServer(facilitatorClient(env))
+  const facilitator = facilitatorClient(env);
+  const server = new x402ResourceServer(facilitator)
     .register(env.network, new PrepaidVoucherServerScheme({ payTo: env.payTo, network: env.network }))
     .registerExtension(bazaarResourceServerExtension);
   const routes: RoutesConfig = Object.fromEntries(service.routes.map((r) => [r.path, routeConfig(env, service, r, tags)]));
@@ -306,7 +318,7 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
   const deadline = Date.now() + (o.facilitatorWaitMs ?? env.facilitatorWaitMs ?? FACILITATOR_WAIT_MS);
   for (let attempt = 1; ; attempt++) {
     try {
-      await http.initialize();
+      await loadTerms(facilitator, http);
       break;
     } catch (e) {
       const { error, wait } = startupError(e, server, env);

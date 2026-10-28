@@ -451,6 +451,28 @@ describe("start-up", () => {
     expect((await fetch(`${listening.url}/v1/echo`, post({ text: "hi" }))).status).toBe(402);
   }, 30_000);
 
+  test("a start that waits for the facilitator logs one line, and the SDK warns about no retry", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const failing = await answering((_req, res) => void res.status(503).json({ error: "starting" }));
+      const down = `http://127.0.0.1:${await freePort()}`;
+      for (const url of [failing.url, down]) {
+        const log: string[] = [];
+        const starting = createPaidService({
+          env: envAt(url),
+          service: DEFINITION,
+          facilitatorWaitMs: 4_500,
+          log: (m) => log.push(m),
+        });
+        await expect(starting).rejects.toThrow(/^Z402_FACILITATOR_URL: cannot read \/supported /);
+        expect(log).toEqual([expect.stringMatching(/; waiting for it$/)]);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  }, 30_000);
+
   test("a facilitator that takes the connection but never answers does not hold the start past the wait", async () => {
     const silent = netServer((socket) => void socket.on("error", () => undefined));
     await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
