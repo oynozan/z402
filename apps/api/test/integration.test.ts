@@ -120,6 +120,16 @@ async function paidChunk(res: Response): Promise<unknown> {
 }
 
 /** The bazaar extension a 402 to a GET carries, written out and not built, with the first price in its example */
+/** The resource GET /chunk's 402 names at `url`, with the names the catalog shows */
+const resourceAt = (url: string) => ({
+  url,
+  description: "One numbered chunk of demo data per paid call",
+  mimeType: "application/json",
+  serviceName: "Demo API",
+  tags: ["demo"],
+});
+/** The extensions GET /chunk's 402 carries: the bazaar extension, and the unit the catalog sells by */
+const extensionsOf = (price: string) => ({ bazaar: bazaarOf(price), z402: { unit: "chunk" } });
 const bazaarOf = (price: string) => ({
   info: {
     input: { type: "http", method: "GET" },
@@ -230,7 +240,7 @@ describe("paid /chunk through the whole stack", () => {
     expect(await refusalOf(res)).toEqual({
       x402Version: 2,
       error: "Payment required",
-      resource: { url: `${s.api.url}/chunk`, description: "", mimeType: "application/json" },
+      resource: resourceAt(`${s.api.url}/chunk`),
       accepts: [
         {
           scheme: "prepaid-voucher",
@@ -248,7 +258,7 @@ describe("paid /chunk through the whole stack", () => {
           },
         },
       ],
-      extensions: { bazaar: bazaarOf("500") },
+      extensions: extensionsOf("500"),
     });
   });
 
@@ -544,7 +554,7 @@ describe("the bazaar extension of GET /chunk", () => {
     expect(bazaar.schema.properties.input.properties.method).toEqual({ type: "string", enum: ["GET"] });
     expect(bazaar.schema.properties.input.properties.type).toEqual({ type: "string", const: "http" });
     expect(Object.keys(bazaar.schema.properties.output.properties)).toEqual(["type", "example"]);
-    expect(required.extensions).toEqual({ bazaar: bazaarOf("500") });
+    expect(required.extensions).toEqual(extensionsOf("500"));
   });
 
   test("the stock validator of @x402/extensions finds nothing wrong with it", async () => {
@@ -572,7 +582,7 @@ describe("the bazaar extension of GET /chunk", () => {
 
     expect(example).toEqual({ chunk: 1, cumulativeZat: "800", data: "chunk-1" });
     expect(await paidChunk(await p.chunk())).toEqual(example);
-    expect(required.extensions).toEqual({ bazaar: bazaarOf("800") });
+    expect(required.extensions).toEqual(extensionsOf("800"));
   });
 
   test("a stock client echoes the extension in its payment, and the paid flow works as before", async () => {
@@ -590,7 +600,7 @@ describe("the bazaar extension of GET /chunk", () => {
     expect(s.sent).toHaveLength(3);
     for (const header of s.sent) {
       const payment = decodePaymentSignatureHeader(header);
-      expect(payment.extensions).toEqual({ bazaar: bazaarOf("500") });
+      expect(payment.extensions).toEqual(extensionsOf("500"));
       expect(payment.resource?.url).toBe(`${s.api.url}/chunk`);
     }
     expect(s.client.refusals).toEqual([]);
@@ -1119,7 +1129,7 @@ describe("declaring GET /chunk to the facilitator's Bazaar", { timeout: LONG }, 
     const facilitator = await facilitatorOn(new FakeChain({ expiryDelta: 40 }));
     const api = await declaring(facilitator.url, { publicUrl: `${PUBLIC_URL}/` });
     const required = await refusalOf(await fetch(`${api.url}/chunk`));
-    expect(required.resource).toEqual({ url: `${PUBLIC_URL}/chunk`, description: "", mimeType: "application/json" });
+    expect(required.resource).toEqual(resourceAt(`${PUBLIC_URL}/chunk`));
 
     // Without a public URL it is the URL the request came to, as it was
     const bare = await apiOn(facilitator.url);
@@ -1198,7 +1208,7 @@ describe("declaring GET /chunk to the facilitator's Bazaar", { timeout: LONG }, 
 
     const required = await refusalOf(await fetch(`${api.url}/chunk`));
     expect(required.accepts[0]).toMatchObject({ payTo: PAY_TO, amount: "700" });
-    // No empty description and no key the 402 does not carry
+    // Exactly what the 402 carries, and no key it does not
     expect(stub.declarations[0]?.body).toStrictEqual({
       items: [
         {
@@ -1207,7 +1217,10 @@ describe("declaring GET /chunk to the facilitator's Bazaar", { timeout: LONG }, 
           x402Version: 2,
           accepts: required.accepts,
           mimeType: "application/json",
-          extensions: { bazaar: bazaarOf("700") },
+          description: "One numbered chunk of demo data per paid call",
+          serviceName: "Demo API",
+          tags: ["demo"],
+          extensions: extensionsOf("700"),
         },
       ],
     });

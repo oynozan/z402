@@ -119,7 +119,7 @@ On regtest with the default terms that is:
 }
 ```
 
-`payTo` is the merchant's address, and `termsVersion` is an opaque id that the facilitator derives from the terms alone, so every provider of a facilitator reads the same one. The `resource.url` of the 402 is the URL the request came to, or `<Z402_API_PUBLIC_URL>/chunk` when that is set. A client whose authenticated voucher is refused gets a corrective 402, whose `accepts[0].extra.session` carries its session's limits. A request without a `PAYMENT-SIGNATURE` header gets the plain 402. Next to `accepts` the 402 has `extensions.bazaar` (the next section).
+`payTo` is the merchant's address, and `termsVersion` is an opaque id that the facilitator derives from the terms alone, so every provider of a facilitator reads the same one. The `resource.url` of the 402 is the URL the request came to, or `<Z402_API_PUBLIC_URL>/chunk` when that is set. A client whose authenticated voucher is refused gets a corrective 402, whose `accepts[0].extra.session` carries its session's limits. A request without a `PAYMENT-SIGNATURE` header gets the plain 402. Next to `accepts` the 402 has `extensions.bazaar` (the next section). Its `resource` also names the route for the catalog, in the shape the service kit gives its routes: `serviceName` "Demo API", `tags` ["demo"] and a one-line `description`, and `extensions.z402` gives the unit of sale, `{"unit":"chunk"}`. The website shows the row as Demo API, in the demo category, per chunk.
 
 To pay it, run the agent (`scripts/demo.sh honest`, see `docs/demo.md`).
 
