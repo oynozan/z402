@@ -1,4 +1,4 @@
-import { startTestStack, TEST_PAY_TO, type TestStack } from "@z402/service-kit/testing";
+import { startTestStack, TEST_PAY_TO, type TestStack } from "@z402-net/service-kit/testing";
 import { MockWallet } from "@z402/testkit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULTS, type Flags } from "../src/flags.js";

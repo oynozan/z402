@@ -1,4 +1,4 @@
-import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402/service-kit";
+import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402-net/service-kit";
 import { loadEmbeddingsConfig } from "./config.js";
 import { createEmbeddingsService } from "./service.js";
 

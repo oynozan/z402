@@ -99,4 +99,4 @@ pnpm exec tsc --noEmit
 pnpm exec vitest run
 ```
 
-The service tests make real paid calls through the in-process stack of `@z402/service-kit/testing`. `test/fixtures.ts` holds files written by the age reference implementation, with keys that were thrown away.
+The service tests make real paid calls through the in-process stack of `@z402-net/service-kit/testing`. `test/fixtures.ts` holds files written by the age reference implementation, with keys that were thrown away.

@@ -44,8 +44,8 @@ A deposit is a payment to the provider's address. Whatever is left of a window w
 At most what it deposits, and the agent decides how much that can be. `maxDepositZat` makes the scheme refuse any offer whose window is larger than the number you set. It defaults to 1,000,000 zat. `maxDeposits` caps how many deposits the agent makes to each provider.
 
 ```ts title="zcash.ts"
-import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
+import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
 
 export const zcashClientScheme = new PrepaidVoucherScheme({
   wallet: new ZalletRpcWallet({ url: "http://127.0.0.1:50232", user: "zebra", password: "zebra" }),
@@ -122,14 +122,14 @@ Yes. A provider sets a price for each route, any whole number of zat from 1 up t
 
 ### How do I test without a chain?
 
-`@z402/testkit` has `FakeChain`, an in-memory chain, and `MockWallet`. `@z402/service-kit/testing` starts a real facilitator on a `FakeChain` together with a stock paying client, so a test can make real paid calls in one process.
+`@z402/testkit` has `FakeChain`, an in-memory chain, and `MockWallet`. `@z402-net/service-kit/testing` starts a real facilitator on a `FakeChain` together with a stock paying client, so a test can make real paid calls in one process. Both are available inside the z402 repository only: `@z402/testkit` and the `@z402/facilitator` that the stack starts are packages of the repository that are not published.
 
 ### Can I use my own wallet?
 
 The scheme talks to a wallet through a small interface, `ZcashWallet`. It has one method, `sendDeposit`, which pays the amount to the address with the memo and returns the txid. The package ships `ZalletRpcWallet`, which pays from a Zallet account. For another wallet, implement the interface:
 
 ```ts title="wallet.ts"
-import type { ZcashWallet } from "@z402/protocol";
+import type { ZcashWallet } from "@z402-net/protocol";
 
 export const wallet: ZcashWallet = {
   async sendDeposit({ to, amountZat, memo }) {

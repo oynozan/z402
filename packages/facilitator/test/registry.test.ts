@@ -16,7 +16,7 @@ import {
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { inspect } from "node:util";
-import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET, type ZcashNetwork } from "@z402/protocol";
+import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET, type ZcashNetwork } from "@z402-net/protocol";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { keyDigest } from "../src/providers/apiKey.js";
 import { openRegistry, ProviderRegistry, RegistryError, type ProviderEntry } from "../src/providers/registry.js";

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { withBazaar } from "@x402/extensions/bazaar";
-import type { SessionSnapshot } from "@z402/protocol";
+import type { SessionSnapshot } from "@z402-net/protocol";
 import { afterEach, expect, test } from "vitest";
 import { CLOSE_TIMEOUT_MS, paidSnapshot, PAY_TO, PAY_TO_2, startRail, type Rail } from "../src/harness.js";
 

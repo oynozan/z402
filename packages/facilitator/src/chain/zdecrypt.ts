@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET, type ZcashNetwork } from "@z402/protocol";
+import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET, type ZcashNetwork } from "@z402-net/protocol";
 
 /** The bare network names the zdecrypt CLI accepts */
 export type ZdecryptNetwork = "regtest" | "testnet" | "mainnet";

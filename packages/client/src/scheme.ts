@@ -28,7 +28,7 @@ import {
   type Terms,
   type TxStatusSource,
   type ZcashWallet,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { systemClock, type Clock } from "./clock.js";
 import { DepositStatusUnknownError, DepositUncertainError } from "./errors.js";
 import type { ClientEvent } from "./events.js";

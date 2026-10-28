@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import { ASSET, DEMO_TERMS, encodeTerms, NETWORK_REGTEST, REASON, SCHEME, type ChainView } from "@z402/protocol";
+import { ASSET, DEMO_TERMS, encodeTerms, NETWORK_REGTEST, REASON, SCHEME, type ChainView } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import { providerId } from "../src/providers/id.js";

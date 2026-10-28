@@ -1,4 +1,4 @@
-import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402/service-kit";
+import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402-net/service-kit";
 import { loadDropboxConfig } from "./config.js";
 import { createDropboxService } from "./service.js";
 

@@ -10,7 +10,7 @@
  * attempt and its paid retry cost one token, and a paid retry is never refused for the rate limit. A miss that joins a
  * fetch of the same URL already in flight takes no token either.
  */
-import { createPaidService, type PaidService, type ServiceEnv } from "@z402/service-kit";
+import { createPaidService, type PaidService, type ServiceEnv } from "@z402-net/service-kit";
 import type { Express, NextFunction, Request, Response } from "express";
 import type { MarkdownConfig } from "./config.js";
 import { maxTagsFor, type ConvertLimits, type Converted } from "./convert.js";

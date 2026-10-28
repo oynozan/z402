@@ -1,8 +1,8 @@
-import * as protocol from "@z402/protocol";
+import * as protocol from "@z402-net/protocol";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import * as client from "../src/index.js";
 
-describe("@z402/client exports", () => {
+describe("@z402-net/client exports", () => {
   it("re-exports the protocol's ChainUnavailableError, so a custom chain source and the scheme agree on it", () => {
     expect(client.ChainUnavailableError).toBe(protocol.ChainUnavailableError);
   });

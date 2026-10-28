@@ -4,7 +4,7 @@
  * service verifies it and settles. Only the lightwalletd side is left out, as the first calls ride on the credit that
  * the facilitator gives a deposit it sees in the mempool.
  */
-import { startTestStack, type TestStack } from "@z402/service-kit/testing";
+import { startTestStack, type TestStack } from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeServices, type FakeOptions } from "./fakes.js";
 import { cleanup, GC_PRELOAD, listen, refusedUrl, start } from "./process.js";

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { inspect } from "node:util";
 import { gzipSync } from "node:zlib";
-import { NETWORK_REGTEST, NETWORK_TESTNET } from "@z402/protocol";
+import { NETWORK_REGTEST, NETWORK_TESTNET } from "@z402-net/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { checkProvider, ProviderCheckError } from "../src/index.js";
 

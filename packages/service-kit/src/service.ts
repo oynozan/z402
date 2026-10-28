@@ -26,8 +26,8 @@ import {
   sanitizeTags,
   type DeclareDiscoveryExtensionInput,
 } from "@x402/extensions/bazaar";
-import { ASSET, parseTerms, parseVoucherPayload, SCHEME, ZCASH_NETWORKS } from "@z402/protocol";
-import { checkProvider, PrepaidVoucherServerScheme, ProviderCheckError, type ProviderCheckField } from "@z402/server";
+import { ASSET, parseTerms, parseVoucherPayload, SCHEME, ZCASH_NETWORKS } from "@z402-net/protocol";
+import { checkProvider, PrepaidVoucherServerScheme, ProviderCheckError, type ProviderCheckField } from "@z402-net/server";
 import express, { type Express, type Request, type RequestHandler } from "express";
 import {
   declarationBodies,

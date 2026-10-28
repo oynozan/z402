@@ -1,5 +1,5 @@
-import type { ClientEvent } from "@z402/client";
-import type { SessionSnapshot } from "@z402/protocol";
+import type { ClientEvent } from "@z402-net/client";
+import type { SessionSnapshot } from "@z402-net/protocol";
 import { afterEach, expect, test } from "vitest";
 import { CLOSE_TIMEOUT_MS, paidSnapshot, PAY_TO, startStack, type Stack } from "../src/harness.js";
 

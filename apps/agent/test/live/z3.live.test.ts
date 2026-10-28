@@ -8,8 +8,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { InsufficientFundsError, ZalletRpcWallet } from "@z402/client";
-import { depositMemo, generateSeed, publicKeyFromSeed } from "@z402/protocol";
+import { InsufficientFundsError, ZalletRpcWallet } from "@z402-net/client";
+import { depositMemo, generateSeed, publicKeyFromSeed } from "@z402-net/protocol";
 import { zainoTxStatus } from "../../src/chain.js";
 import { loadZ3Rpc, pollUntil, Z3_DEFAULTS, type Z3Rpc } from "../../src/z3.js";
 

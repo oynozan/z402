@@ -2,7 +2,7 @@
 
 Text embeddings for agents, billed per call: one paid call embeds up to about 1,000 tokens. It asks any OpenAI-compatible provider (Ollama by default) and answers in the OpenAI shape. Design: `docs/superpowers/specs/2026-10-27-z402-services-design.md` §4.3.
 
-`POST /v1/embeddings` costs 100 zat, or `Z402_PRICE_ZAT` when set, and is paid with `prepaid-voucher` through `@z402/service-kit`. While the provider lists the model, the route is declared to the facilitator's catalog every 30 s.
+`POST /v1/embeddings` costs 100 zat, or `Z402_PRICE_ZAT` when set, and is paid with `prepaid-voucher` through `@z402-net/service-kit`. While the provider lists the model, the route is declared to the facilitator's catalog every 30 s.
 
 ```json
 { "input": "The quick brown fox" }

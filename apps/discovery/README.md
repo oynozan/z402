@@ -33,7 +33,7 @@ An empty variable counts as unset. A problem exits 1 with a `discovery: ...` lin
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DISCOVERY_SERVICES` | none | Comma-separated URLs of services built on `@z402/service-kit`, for example `http://llm:4031,http://markdown:4032`. At least this or `DISCOVERY_TARGETS` is required. |
+| `DISCOVERY_SERVICES` | none | Comma-separated URLs of services built on `@z402-net/service-kit`, for example `http://llm:4031,http://markdown:4032`. At least this or `DISCOVERY_TARGETS` is required. |
 | `DISCOVERY_TARGETS` | none | Comma-separated `METHOD url` entries for paid routes that are not built on the kit, for example `GET http://api:4021/chunk`. They get the route probe only, and are listed after the services. |
 | `DISCOVERY_REFRESH_MS` | `30000` | Time between refreshes, 1000 or more. While anything is down or not ready the next one comes after 5 s at most, so a service that starts late is listed quickly. |
 | `DISCOVERY_TIMEOUT_MS` | `5000` | The deadline of each request, body included. |
@@ -80,4 +80,4 @@ pnpm --filter @z402/discovery test
 pnpm --filter @z402/discovery typecheck
 ```
 
-The tests run a real kit-based paid service with its facilitator in the test process (`@z402/service-kit/testing`) and point the catalog at it, read the endpoint with the stock client, and use fake services that hang, trickle, redirect and send malformed 402s. `main.test.ts` runs `src/main.ts` as a child process.
+The tests run a real kit-based paid service with its facilitator in the test process (`@z402-net/service-kit/testing`) and point the catalog at it, read the endpoint with the stock client, and use fake services that hang, trickle, redirect and send malformed 402s. `main.test.ts` runs `src/main.ts` as a child process.

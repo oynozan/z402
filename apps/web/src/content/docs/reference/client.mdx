@@ -1,33 +1,33 @@
 export const meta = {
-  title: "@z402/client",
-  description: "Every export of @z402/client: the prepaid-voucher scheme, the Zallet wallet, the chain status source, events, errors and the lower-level parts.",
+  title: "@z402-net/client",
+  description: "Every export of @z402-net/client: the prepaid-voucher scheme, the Zallet wallet, the chain status source, events, errors and the lower-level parts.",
 };
 
-`@z402/client` is the paying side of z402. Its main export, `PrepaidVoucherScheme`, plugs into the stock x402 client. For each provider it makes the deposits, signs a voucher for every call, and reads the outcome of each call to decide what to do next. [Pay from an agent](/docs/guides/pay-from-an-agent) shows it at work. This page lists everything the package exports.
+`@z402-net/client` is the paying side of z402. Its main export, `PrepaidVoucherScheme`, plugs into the stock x402 client. For each provider it makes the deposits, signs a voucher for every call, and reads the outcome of each call to decide what to do next. [Pay from an agent](/docs/guides/pay-from-an-agent) shows it at work. This page lists everything the package exports.
 
 ## Install and import
 
 ```bash
-npm install --save-exact @z402/client @x402/fetch@2.28.0
+npm install --save-exact @z402-net/client @z402-net/lightwalletd @x402/fetch@2.28.0 @x402/core@2.28.0
 ```
 
 <Callout type="note">
 
-`@z402/client` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
+`@z402-net/client` and `@z402-net/lightwalletd` are not published to npm yet. Until they are, depend on them from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
 
 </Callout>
 
-`@z402/client` is an ES module. It depends on `@x402/core` 2.28.0 and on `@z402/protocol`, and it has no dependency on `@x402/fetch`: install that yourself for `x402Client` and `wrapFetchWithPayment`. The package needs no gRPC or wallet library. It reaches the chain through an object you give it, and Zallet through `fetch`. It also re-exports the seams that a wallet or a chain source of your own implements, so you need no `@z402/protocol` import for them.
+`@z402-net/client` is an ES module. It depends on `@z402-net/protocol`, which is installed with it, and it takes `@x402/core` as a peer dependency at exactly 2.28.0, so you install that yourself. It has no dependency on `@x402/fetch`: install that yourself for `x402Client` and `wrapFetchWithPayment`. The package needs no gRPC or wallet library. It reaches the chain through an object you give it, such as the client from `@z402-net/lightwalletd`, and Zallet through `fetch`. It also re-exports the seams that a wallet or a chain source of your own implements, so you need no `@z402-net/protocol` import for them.
 
 ```ts
 import {
   LightwalletdTxStatus,
   PrepaidVoucherScheme,
   ZalletRpcWallet,
-} from "@z402/client";
+} from "@z402-net/client";
 
 // For a wallet or a chain source of your own
-import { ChainUnavailableError, type TxStatus, type TxStatusSource, type ZcashWallet } from "@z402/client";
+import { ChainUnavailableError, type TxStatus, type TxStatusSource, type ZcashWallet } from "@z402-net/client";
 ```
 
 ## At a glance
@@ -49,9 +49,9 @@ import { ChainUnavailableError, type TxStatus, type TxStatusSource, type ZcashWa
 | [`DepositStatusUnknownError`](#errors) | class | A deposit may exist and cannot be found. |
 | [`DepositUncertainError`](#errors) | class | A deposit with a known txid may or may not have been broadcast. |
 | [`InsufficientFundsError`](#errors) | class | The wallet could not fund the deposit. |
-| [`ZcashWallet`](#zcashwallet-and-txstatussource), [`DepositRequest`](#zcashwallet-and-txstatussource) | interfaces | What a wallet of your own implements, and the request it receives. Re-exported from `@z402/protocol`. |
-| [`TxStatusSource`](#zcashwallet-and-txstatussource), [`TxStatus`](#zcashwallet-and-txstatussource) | interface, type | What a chain source of your own implements, and what its `status` answers. Re-exported from `@z402/protocol`. |
-| [`ChainUnavailableError`](#zcashwallet-and-txstatussource) | class | What a chain source throws for an answer that is not definitive. Re-exported from `@z402/protocol`. |
+| [`ZcashWallet`](#zcashwallet-and-txstatussource), [`DepositRequest`](#zcashwallet-and-txstatussource) | interfaces | What a wallet of your own implements, and the request it receives. Re-exported from `@z402-net/protocol`. |
+| [`TxStatusSource`](#zcashwallet-and-txstatussource), [`TxStatus`](#zcashwallet-and-txstatussource) | interface, type | What a chain source of your own implements, and what its `status` answers. Re-exported from `@z402-net/protocol`. |
+| [`ChainUnavailableError`](#zcashwallet-and-txstatussource) | class | What a chain source throws for an answer that is not definitive. Re-exported from `@z402-net/protocol`. |
 | [`Session`](#lower-level-exports) | class | The state of one provider's session. |
 | [`LocalDeposit`](#deposit-states) | interface | One deposit as the session records it. |
 | [`waitForConfirmation`](#lower-level-exports) | function | Polls the chain until a transaction is mined, dead or timed out. |
@@ -407,7 +407,7 @@ type RawTx =
   | { found: true; raw: Uint8Array; location: "mempool" | "mined" | "orphaned"; height: number | null };
 ```
 
-It adapts a lightwalletd client, for example the one from `createLightwalletdClient` in `@z402/lightwalletd`, to the `TxStatusSource` the scheme reads. It is typed against the two methods above, so the package depends on neither `@z402/lightwalletd` nor gRPC.
+It adapts a lightwalletd client, for example the one from `createLightwalletdClient` in `@z402-net/lightwalletd`, to the `TxStatusSource` the scheme reads. It is typed against the two methods above, so the package depends on neither `@z402-net/lightwalletd` nor gRPC.
 
 | Method | Result |
 |---|---|
@@ -429,10 +429,10 @@ The constructors are `new DepositUncertainError(txid, { message?, cause? })`, `n
 
 ## ZcashWallet and TxStatusSource
 
-These are the two seams the scheme needs. They are defined in `@z402/protocol`, and `@z402/client` re-exports them, with `DepositRequest`, `TxStatus` and `ChainUnavailableError`: the very same objects, not copies. A wallet or a chain source of your own needs no other import:
+These are the two seams the scheme needs. They are defined in `@z402-net/protocol`, and `@z402-net/client` re-exports them, with `DepositRequest`, `TxStatus` and `ChainUnavailableError`: the very same objects, not copies. A wallet or a chain source of your own needs no other import:
 
 ```ts
-import { ChainUnavailableError, type DepositRequest, type TxStatus, type TxStatusSource, type ZcashWallet } from "@z402/client";
+import { ChainUnavailableError, type DepositRequest, type TxStatus, type TxStatusSource, type ZcashWallet } from "@z402-net/client";
 ```
 
 ```ts

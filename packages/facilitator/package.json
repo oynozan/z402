@@ -14,8 +14,8 @@
   },
   "dependencies": {
     "@x402/core": "2.28.0",
-    "@z402/lightwalletd": "workspace:*",
-    "@z402/protocol": "workspace:*",
+    "@z402-net/lightwalletd": "workspace:*",
+    "@z402-net/protocol": "workspace:*",
     "express": "5.3.0"
   },
   "devDependencies": {

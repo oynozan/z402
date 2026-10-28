@@ -3,14 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { LightdInfo } from "@z402/lightwalletd";
+import type { LightdInfo } from "@z402-net/lightwalletd";
 import {
   ChainUnavailableError,
   NETWORK_MAINNET,
   NETWORK_REGTEST,
   NETWORK_TESTNET,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { startFakeLwd, type FakeLwd } from "../../lightwalletd/test/support/fakeLwd.js";
 import { keyDigest } from "../src/providers/apiKey.js";

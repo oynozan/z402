@@ -59,7 +59,7 @@ describe("the IA", () => {
     expect(findDocPage(["components"])?.hidden).toBe(true);
     expect(findDocPage(["services", "index"])).toBeNull();
     expect(findDocPage(["nope"])).toBeNull();
-    expect(findDocByHref("/docs/reference/client#install")?.title).toBe("@z402/client");
+    expect(findDocByHref("/docs/reference/client#install")?.title).toBe("@z402-net/client");
     expect(findDocByHref("/docs/")?.file).toBe("index");
     expect(findDocByHref("/services")).toBeNull();
   });

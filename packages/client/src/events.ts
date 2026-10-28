@@ -1,4 +1,4 @@
-import type { SessionSnapshot } from "@z402/protocol";
+import type { SessionSnapshot } from "@z402-net/protocol";
 
 /** What `onEvent` receives, for the demo log and tests (design §3.6), amounts are zat strings */
 export type ClientEvent =

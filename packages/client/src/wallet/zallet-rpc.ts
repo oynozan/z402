@@ -1,4 +1,4 @@
-import { TXID_RE, type DepositRequest, type ZcashWallet } from "@z402/protocol";
+import { TXID_RE, type DepositRequest, type ZcashWallet } from "@z402-net/protocol";
 import { systemClock, type Clock } from "../clock.js";
 import { DepositStatusUnknownError, ZalletRpcError } from "../errors.js";
 import { Mutex } from "../mutex.js";

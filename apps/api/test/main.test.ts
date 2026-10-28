@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import { startFacilitator } from "@z402/facilitator";
-import { DEMO_TERMS, NETWORK_REGTEST } from "@z402/protocol";
+import { DEMO_TERMS, NETWORK_REGTEST } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterEach, expect, test, vi } from "vitest";
 

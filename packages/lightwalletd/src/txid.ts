@@ -1,4 +1,4 @@
-import { TXID_RE } from "@z402/protocol";
+import { TXID_RE } from "@z402-net/protocol";
 
 export function txidToFilterHash(txid: string): Buffer {
   if (!TXID_RE.test(txid)) throw new TypeError("txid must be 64 lowercase hex characters");

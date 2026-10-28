@@ -36,7 +36,7 @@ import {
   type Terms,
   type VoucherPayload,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { chainPosition, evaluateDeposit } from "./core/evaluate.js";
 import { LedgerRefusal, type LedgerEvent } from "./core/ledger.js";
 import type { DepositResolver, Lookup } from "./core/resolver.js";

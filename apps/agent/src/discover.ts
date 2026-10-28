@@ -9,7 +9,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { withBazaar, type DiscoveryResource } from "@x402/extensions/bazaar";
-import { ASSET } from "@z402/protocol";
+import { ASSET } from "@z402-net/protocol";
 import { DISCOVER_USAGE, FlagError, parseDiscoverFlags, type DiscoverFlags } from "./flags.js";
 import { formatZat } from "./log.js";
 

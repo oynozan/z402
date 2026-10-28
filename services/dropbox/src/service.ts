@@ -5,7 +5,7 @@
  * checked at the same time may not all fit. An upload is undone when its delivery fails, and a hold is applied only
  * once its delivery succeeded, with its drop kept through any expiry that lands while it settles.
  */
-import { createLightwalletdClient, type LightwalletdClient } from "@z402/lightwalletd";
+import { createLightwalletdClient, type LightwalletdClient } from "@z402-net/lightwalletd";
 import {
   ConfigError,
   createPaidService,
@@ -13,7 +13,7 @@ import {
   type PaidRoute,
   type PaidService,
   type ServiceEnv,
-} from "@z402/service-kit";
+} from "@z402-net/service-kit";
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { isAgeEncrypted } from "./age.js";
 import type { DropboxConfig } from "./config.js";

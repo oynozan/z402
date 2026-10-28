@@ -5,7 +5,7 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { startTestStack, TEST_PAY_TO, TEST_TOKEN, type TestStack } from "@z402/service-kit/testing";
+import { startTestStack, TEST_PAY_TO, TEST_TOKEN, type TestStack } from "@z402-net/service-kit/testing";
 import express from "express";
 import { afterEach, expect, test } from "vitest";
 

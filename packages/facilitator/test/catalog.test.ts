@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEMO_TERMS, NETWORK_REGTEST } from "@z402/protocol";
+import { DEMO_TERMS, NETWORK_REGTEST } from "@z402-net/protocol";
 import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from "vitest";
 import {
   Catalog,

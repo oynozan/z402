@@ -1,5 +1,5 @@
 /** The start-up check that a resource server's API key and its payTo belong together (design §4.6) */
-import { isZcashNetwork } from "@z402/protocol";
+import { isZcashNetwork } from "@z402-net/protocol";
 
 /** The setting a failed check points at, named as the caller's own options are */
 export type ProviderCheckField = "facilitatorToken" | "payTo" | "facilitatorUrl";

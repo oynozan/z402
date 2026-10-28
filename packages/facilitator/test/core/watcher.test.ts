@@ -1,4 +1,4 @@
-import { ChainUnavailableError, type ChainView } from "@z402/protocol";
+import { ChainUnavailableError, type ChainView } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { Ledger, type LedgerEvent } from "../../src/core/ledger.js";

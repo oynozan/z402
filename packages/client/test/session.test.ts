@@ -1,5 +1,5 @@
 import type { SettleResponse } from "@x402/core/types";
-import { REASON } from "@z402/protocol";
+import { REASON } from "@z402-net/protocol";
 import { describe, expect, it } from "vitest";
 import { Session } from "../src/session.js";
 import { localDeposit, NETWORK, PAY_TO, SEED, snapshot, snapshotDeposit, txid } from "./fixtures.js";

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { inspect } from "node:util";
 import { x402Facilitator } from "@x402/core/facilitator";
 import type { PaymentPayload, PaymentRequirements, SchemeNetworkFacilitator } from "@x402/core/types";
-import { ASSET, DEMO_TERMS, encodeTerms, NETWORK_REGTEST, SCHEME, type Terms } from "@z402/protocol";
+import { ASSET, DEMO_TERMS, encodeTerms, NETWORK_REGTEST, SCHEME, type Terms } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import {

@@ -1,5 +1,5 @@
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import { publicKeyFromSeed, signVoucher } from "@z402/protocol";
+import { publicKeyFromSeed, signVoucher } from "@z402-net/protocol";
 
 /** The protocol test-vector seed 000102…1f (packages/protocol/test/vectors.json) */
 export const SEED = Uint8Array.from({ length: 32 }, (_, i) => i);

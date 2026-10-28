@@ -5,7 +5,7 @@
  * Every refusal that can be decided without the provider is made in `prepare`, so it reaches the client on its unpaid
  * first attempt. The provider is first called once a start call is paid, so nothing is generated for free.
  */
-import { createPaidService, onDelivered, type PaidRoute, type ServiceEnv } from "@z402/service-kit";
+import { createPaidService, onDelivered, type PaidRoute, type ServiceEnv } from "@z402-net/service-kit";
 import express, { type Express, type Request, type RequestHandler, type Response } from "express";
 import type { LlmConfig } from "./config.js";
 import { listsModel, OpenAiProvider, type ChatMessage, type LlmProvider } from "./provider.js";

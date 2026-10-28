@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { startTestStack, TEST_PAY_TO, TEST_TOKEN, type TestStack } from "@z402/service-kit/testing";
+import { startTestStack, TEST_PAY_TO, TEST_TOKEN, type TestStack } from "@z402-net/service-kit/testing";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 

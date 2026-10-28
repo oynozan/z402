@@ -21,7 +21,7 @@ import {
   type ReasonCode,
   type Terms,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { Catalog } from "./discovery/catalog.js";
 import { mountBazaar } from "./discovery/routes.js";

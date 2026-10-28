@@ -45,13 +45,13 @@ describe("heading anchors", () => {
     const mod = await compileDoc(`${META}
 ## The deposit, explained!
 
-### Using \`paidFetch\` with @z402/client
+### Using \`paidFetch\` with @z402-net/client
 
 ## What's a UIVK? (and why)
 `);
     expect(mod.docData.toc).toEqual([
       { depth: 2, id: "the-deposit-explained", text: "The deposit, explained!" },
-      { depth: 3, id: "using-paidfetch-with-z402client", text: "Using paidFetch with @z402/client" },
+      { depth: 3, id: "using-paidfetch-with-z402-netclient", text: "Using paidFetch with @z402-net/client" },
       { depth: 2, id: "whats-a-uivk-and-why", text: "What's a UIVK? (and why)" },
     ]);
     const slugger = new GithubSlugger();

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { brotliCompressSync, gzipSync } from "node:zlib";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import type { DepositRequest, TxStatusSource, ZcashWallet } from "@z402/protocol";
+import type { DepositRequest, TxStatusSource, ZcashWallet } from "@z402-net/protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   createDropboxService,
@@ -27,7 +27,7 @@ import {
   TEST_TOKEN,
   type TestStack,
   type TestStackOptions,
-} from "@z402/service-kit/testing";
+} from "@z402-net/service-kit/testing";
 import { ageFile, armor } from "./support.js";
 
 class FakeTips implements TipSource {

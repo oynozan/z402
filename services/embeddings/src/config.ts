@@ -1,4 +1,4 @@
-import { ConfigError, read, readInt, readOrFile, readUrl, type Env } from "@z402/service-kit";
+import { ConfigError, read, readInt, readOrFile, readUrl, type Env } from "@z402-net/service-kit";
 
 export interface EmbeddingsConfig {
   /** Without a trailing slash */

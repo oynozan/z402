@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigError } from "@z402/service-kit";
+import { ConfigError } from "@z402-net/service-kit";
 import { describe, expect, test } from "vitest";
 import { DEFAULT_BASE_URL, DEFAULT_MODEL, loadEmbeddingsConfig } from "../src/index.js";
 

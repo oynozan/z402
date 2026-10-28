@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
 import { startFacilitator } from "@z402/facilitator";
-import { DEMO_TERMS } from "@z402/protocol";
+import { DEMO_TERMS } from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import express, { type Request, type Response } from "express";
 import { afterEach, describe, expect, test, vi } from "vitest";

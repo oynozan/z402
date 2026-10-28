@@ -1,5 +1,5 @@
 /**
- * A minimal prepaid-voucher client scheme for the stock x402 client, standing in for @z402/client in these tests.
+ * A minimal prepaid-voucher client scheme for the stock x402 client, standing in for @z402-net/client in these tests.
  * It signs `synced + price` on every call, attaches the pending deposit until a successful settle acknowledges it
  * (protocol.md v1.1 section 7.3), and resyncs once from a corrective 402 on z402_cumulative_mismatch.
  */
@@ -22,7 +22,7 @@ import {
   signVoucher,
   ZEC_DECIMALS,
   type SessionSnapshot,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 
 /** A successful settle as the client saw it */
 export interface Settled {

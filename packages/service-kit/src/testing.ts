@@ -11,7 +11,7 @@ import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { PaymentRequired } from "@x402/core/types";
 import { isValidIconUrl } from "@x402/extensions/bazaar";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { PrepaidVoucherScheme } from "@z402/client";
+import { PrepaidVoucherScheme } from "@z402-net/client";
 import { startFacilitator, type FacilitatorHandle } from "@z402/facilitator";
 import {
   ASSET,
@@ -22,7 +22,7 @@ import {
   SCHEME,
   ZAT_RE,
   type Terms,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { FakeChain, MockWallet } from "@z402/testkit";
 import express, { type Express } from "express";
 import type { ServiceEnv } from "./env.js";

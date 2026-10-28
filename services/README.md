@@ -48,10 +48,10 @@ pnpm --filter @z402/agent discover --discovery http://localhost:3000 --intent "t
 
 ## Adding a service
 
-Build it on [`@z402/service-kit`](../packages/service-kit/src/service.ts): give `loadServiceEnv` the service's price,
+Build it on [`@z402-net/service-kit`](../packages/service-kit/src/service.ts): give `loadServiceEnv` the service's price,
 describe the paid routes as data (`createPaidService`), put every check that can fail in the route's `prepare`
 handlers so it runs before payment, apply side effects only in `onDelivered(res, { ok })`, and close the kit's service
-when the process stops. The kit lists the routes in the facilitator's catalog by itself. Its `@z402/service-kit/testing`
+when the process stops. The kit lists the routes in the facilitator's catalog by itself. Its `@z402-net/service-kit/testing`
 stack makes real paid calls in tests, and with `catalog: true` it also checks the declarations against the catalog's
 rules. The rules are in [the design spec](../docs/superpowers/specs/2026-10-27-z402-services-design.md), sections 3 and
 4, and [the multi-provider design](../docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md), section 4.4.

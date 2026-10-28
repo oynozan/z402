@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { format, inspect } from "node:util";
 import { x402Facilitator } from "@x402/core/facilitator";
-import { NETWORK_REGTEST } from "@z402/protocol";
+import { NETWORK_REGTEST } from "@z402-net/protocol";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { API_KEY_RE, keyDigest } from "../../src/providers/apiKey.js";
 import { providerId } from "../../src/providers/id.js";

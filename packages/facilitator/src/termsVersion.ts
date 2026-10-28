@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { encodeTerms, type Terms } from "@z402/protocol";
+import { encodeTerms, type Terms } from "@z402-net/protocol";
 
 /** The opaque id of the rail's terms, which the API copies into requirements and checks only for its format */
 export function termsVersion(terms: Terms): string {

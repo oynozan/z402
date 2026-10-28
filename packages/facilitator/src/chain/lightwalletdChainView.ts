@@ -1,11 +1,11 @@
-import type { LightwalletdClient, RawTx } from "@z402/lightwalletd";
+import type { LightwalletdClient, RawTx } from "@z402-net/lightwalletd";
 import {
   ChainUnavailableError,
   TXID_RE,
   type ChainView,
   type TxInspection,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import {
   ZdecryptError,
   zdecryptDecrypt,

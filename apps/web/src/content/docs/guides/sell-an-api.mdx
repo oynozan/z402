@@ -41,7 +41,7 @@ sequenceDiagram
 ## What you need
 
 - **Node.js 22 or later.**
-- **The z402 repository.** `@z402/server` and `@z402/protocol` are packages of its pnpm workspace (`private`, version `0.0.0`), so a server that uses them is a package in the same workspace, like the ones under `apps/` and `services/`.
+- **The z402 repository.** `@z402-net/server` and `@z402-net/protocol` are packages of its pnpm workspace and are not published to npm yet, so a server that uses them is a package in the same workspace, like the ones under `apps/` and `services/`.
 - **A facilitator.** You need its URL, and its registration token if the operator asks for one. The demo stack's facilitator listens on `http://127.0.0.1:4022` after `scripts/demo.sh up`.
 - **A public address for your server**, once you go live. Locally, `http://127.0.0.1` is enough.
 
@@ -211,8 +211,8 @@ Create a package for the server, for example `apps/my-api`. Pin the x402 package
     "@x402/core": "2.28.0",
     "@x402/express": "2.28.0",
     "@x402/extensions": "2.28.0",
-    "@z402/protocol": "workspace:*",
-    "@z402/server": "workspace:*",
+    "@z402-net/protocol": "workspace:*",
+    "@z402-net/server": "workspace:*",
     "express": "5.3.0"
   },
   "devDependencies": {
@@ -223,7 +223,7 @@ Create a package for the server, for example `apps/my-api`. Pin the x402 package
 
 <Callout type="note">
 
-`@z402/server` and `@z402/protocol` are not on npm yet: they ship TypeScript source and need a build step before they are published. Until then, depend on them from the z402 monorepo with `"workspace:*"`, as above, and run with `tsx` on Node 22 or later.
+`@z402-net/server` and `@z402-net/protocol` are not published to npm yet. Until they are, depend on them from the z402 monorepo with `"workspace:*"`, as above, and run with `tsx` on Node 22 or later.
 
 </Callout>
 
@@ -246,8 +246,8 @@ import {
 } from "@x402/core/server";
 import { paymentMiddlewareFromHTTPServer } from "@x402/express";
 import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
-import { ASSET, NETWORK_REGTEST, SCHEME } from "@z402/protocol";
-import { PrepaidVoucherServerScheme } from "@z402/server";
+import { ASSET, NETWORK_REGTEST, SCHEME } from "@z402-net/protocol";
+import { PrepaidVoucherServerScheme } from "@z402-net/server";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 
 export interface Settings {
@@ -351,7 +351,7 @@ export async function createApp(s: Settings): Promise<{ app: Express; http: x402
 What each part does:
 
 - **The facilitator client** sends your API key on all three of its calls: `verify`, `settle` and `supported`. Always pass `url`. If it is empty, the x402 SDK sends payments to x402.org.
-- **`PrepaidVoucherServerScheme`** is registered for the network. It turns a price into a requirement, copies the rail's terms into every `402`, and adds the session's limits to the `402` that follows a refused voucher. [`@z402/server`](/docs/reference/server) lists every member.
+- **`PrepaidVoucherServerScheme`** is registered for the network. It turns a price into a requirement, copies the rail's terms into every `402`, and adds the session's limits to the `402` that follows a refused voucher. [`@z402-net/server`](/docs/reference/server) lists every member.
 - **The route keys have no verb.** A request of any method must pay before it reaches a handler. A key such as `"GET /v1/count"` charges only `GET`, and Express runs a `GET` handler for `HEAD` too, so a `HEAD` request would skip payment.
 - **`price: { amount, asset: "ZEC" }`** is the only price form the scheme accepts. The amount is a whole number of zat as a string, with no leading zero.
 - **`resource`** is the public URL of the route. It goes into the `402` and into your Bazaar listing. Without it, the SDK builds the URL from the request's protocol, `Host` header and path, so behind a proxy it can be an internal address.
@@ -392,8 +392,8 @@ One deposit is one window, so a deposit pays for about `windowZat / price` calls
 Before your server listens, ask the facilitator whether your key and your address belong together. `checkProvider` calls `GET /providers/me` with your key and compares the answer with your `payTo` and network. If they differ, it throws a `ProviderCheckError` that names the setting to fix.
 
 ```ts title="check.ts"
-import { NETWORK_REGTEST } from "@z402/protocol";
-import { checkProvider, ProviderCheckError } from "@z402/server";
+import { NETWORK_REGTEST } from "@z402-net/protocol";
+import { checkProvider, ProviderCheckError } from "@z402-net/server";
 import type { Settings } from "./app.js";
 
 /** Waits for a facilitator that is still starting, and gives up at once on a mistake of ours */
@@ -468,10 +468,10 @@ Only a failure that nothing before payment could predict, such as an upstream th
 
 ### Side effects after delivery
 
-Do nothing that cannot be undone until the call is paid and delivered. The middleware settles after your handler, and turns a refused settlement into a `402`, so a `2xx` at the end of the response is the only sign that the call was paid. `onDelivered` from `@z402/service-kit` runs `ok` or `failed`, exactly one of them, once the response is over. Add `@z402/service-kit` to your dependencies as `workspace:*` to use it.
+Do nothing that cannot be undone until the call is paid and delivered. The middleware settles after your handler, and turns a refused settlement into a `402`, so a `2xx` at the end of the response is the only sign that the call was paid. `onDelivered` from `@z402-net/service-kit` runs `ok` or `failed`, exactly one of them, once the response is over. Add `@z402-net/service-kit` to your dependencies as `workspace:*` to use it.
 
 ```ts
-import { onDelivered } from "@z402/service-kit";
+import { onDelivered } from "@z402-net/service-kit";
 
 let sold = 0;
 app.post("/v1/count", (req, res) => {
@@ -715,7 +715,7 @@ Listing needs no account, and a shielded-only `payTo` links nothing to you on-ch
 
 <Cards>
   <Card title="Build with the service kit" href="/docs/guides/service-kit">Describe routes as data, and get start-up checks, listing, health and tests for free.</Card>
-  <Card title="@z402/server" href="/docs/reference/server">Every member of the scheme, and every outcome of checkProvider.</Card>
+  <Card title="@z402-net/server" href="/docs/reference/server">Every member of the scheme, and every outcome of checkProvider.</Card>
   <Card title="Facilitator API" href="/docs/reference/facilitator-api">Every route of the facilitator, with requests and answers.</Card>
   <Card title="Discovery" href="/docs/concepts/discovery">How agents find your routes, and how liveness is read.</Card>
 </Cards>

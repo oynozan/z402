@@ -1,11 +1,11 @@
-import type { LightwalletdClient, RawTx } from "@z402/lightwalletd";
+import type { LightwalletdClient, RawTx } from "@z402-net/lightwalletd";
 import {
   ChainUnavailableError,
   NETWORK_MAINNET,
   NETWORK_REGTEST,
   NETWORK_TESTNET,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { afterAll, describe, expect, test, vi } from "vitest";
 import { cachedTip, LightwalletdChainView } from "../../src/chain/lightwalletdChainView.js";
 import { ZdecryptError } from "../../src/chain/zdecrypt.js";

@@ -1,8 +1,8 @@
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { SettleResponse } from "@x402/core/types";
 import { decodePaymentResponseHeader } from "@x402/fetch";
-import type { ClientEvent } from "@z402/client";
-import { parseSessionSnapshot, REASON, type SessionSnapshot } from "@z402/protocol";
+import type { ClientEvent } from "@z402-net/client";
+import { parseSessionSnapshot, REASON, type SessionSnapshot } from "@z402-net/protocol";
 import type { Flags } from "./flags.js";
 
 export function formatZat(zat: string | bigint): string {

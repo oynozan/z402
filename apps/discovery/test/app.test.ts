@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { withBazaar } from "@x402/extensions/bazaar";
-import { TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
+import { TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, test } from "vitest";
 import { createApp } from "../src/app.js";
 import { startDiscovery, type DiscoveryHandle } from "../src/index.js";

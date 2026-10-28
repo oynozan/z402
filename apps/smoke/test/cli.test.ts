@@ -1,4 +1,4 @@
-import { startTestStack, TEST_PAY_TO, type TestStack } from "@z402/service-kit/testing";
+import { startTestStack, TEST_PAY_TO, type TestStack } from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { smokeMain, summaryLines, type CliIo } from "../src/cli.js";
 import { USAGE } from "../src/flags.js";

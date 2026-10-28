@@ -1,4 +1,4 @@
-import { PrepaidVoucherScheme, ZalletRpcWallet } from "@z402/client";
+import { PrepaidVoucherScheme, ZalletRpcWallet } from "@z402-net/client";
 import { zainoTxStatus } from "./chain.js";
 import { FlagError, type Flags } from "./flags.js";
 import { formatEvent, formatZat } from "./log.js";

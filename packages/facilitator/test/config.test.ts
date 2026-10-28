@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET } from "@z402/protocol";
+import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET } from "@z402-net/protocol";
 import { afterAll, describe, expect, test } from "vitest";
 import { ConfigError, isValidUivk, loadConfig } from "../src/config.js";
 

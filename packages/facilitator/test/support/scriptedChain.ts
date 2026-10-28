@@ -1,4 +1,4 @@
-import type { ChainView, TxInspection } from "@z402/protocol";
+import type { ChainView, TxInspection } from "@z402-net/protocol";
 
 const NOT_FOUND: TxInspection = { found: false };
 

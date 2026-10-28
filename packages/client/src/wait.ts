@@ -5,7 +5,7 @@ import {
   NOT_FOUND_DEAD_MS,
   type TxStatus,
   type TxStatusSource,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import type { Clock } from "./clock.js";
 
 export interface WaitOptions {

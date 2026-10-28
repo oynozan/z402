@@ -28,8 +28,8 @@ import {
   SCHEME,
   ZCASH_NETWORKS,
   type ZcashNetwork,
-} from "@z402/protocol";
-import { checkProvider, PrepaidVoucherServerScheme, ProviderCheckError } from "@z402/server";
+} from "@z402-net/protocol";
+import { checkProvider, PrepaidVoucherServerScheme, ProviderCheckError } from "@z402-net/server";
 import express, { type Express, type Request, type RequestHandler, type Response } from "express";
 import {
   CHUNK_PATH,

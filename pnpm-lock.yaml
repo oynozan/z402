@@ -32,13 +32,13 @@ importers:
       '@x402/fetch':
         specifier: 2.28.0
         version: 2.28.0
-      '@z402/client':
+      '@z402-net/client':
         specifier: workspace:*
         version: link:../../packages/client
-      '@z402/lightwalletd':
+      '@z402-net/lightwalletd':
         specifier: workspace:*
         version: link:../../packages/lightwalletd
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
     devDependencies:
@@ -60,10 +60,10 @@ importers:
       '@x402/express':
         specifier: 2.28.0
         version: 2.28.0(express@5.3.0)(typescript@7.0.2)
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@z402/server':
+      '@z402-net/server':
         specifier: workspace:*
         version: link:../../packages/server
       express:
@@ -98,7 +98,7 @@ importers:
       '@types/express':
         specifier: 5.0.6
         version: 5.0.6
-      '@z402/service-kit':
+      '@z402-net/service-kit':
         specifier: workspace:*
         version: link:../../packages/service-kit
 
@@ -113,18 +113,18 @@ importers:
       '@x402/fetch':
         specifier: 2.28.0
         version: 2.28.0
+      '@z402-net/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@z402-net/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@z402/api':
         specifier: workspace:*
         version: link:../api
-      '@z402/client':
-        specifier: workspace:*
-        version: link:../../packages/client
       '@z402/facilitator':
         specifier: workspace:*
         version: link:../../packages/facilitator
-      '@z402/protocol':
-        specifier: workspace:*
-        version: link:../../packages/protocol
       '@z402/testkit':
         specifier: workspace:*
         version: link:../../packages/testkit
@@ -137,20 +137,20 @@ importers:
       '@x402/fetch':
         specifier: 2.28.0
         version: 2.28.0
-      '@z402/client':
+      '@z402-net/client':
         specifier: workspace:*
         version: link:../../packages/client
-      '@z402/lightwalletd':
+      '@z402-net/lightwalletd':
         specifier: workspace:*
         version: link:../../packages/lightwalletd
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
     devDependencies:
       '@types/express':
         specifier: 5.0.6
         version: 5.0.6
-      '@z402/service-kit':
+      '@z402-net/service-kit':
         specifier: workspace:*
         version: link:../../packages/service-kit
       '@z402/testkit':
@@ -226,13 +226,13 @@ importers:
 
   packages/client:
     dependencies:
-      '@x402/core':
-        specifier: 2.28.0
-        version: 2.28.0
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
+      '@x402/core':
+        specifier: 2.28.0
+        version: 2.28.0
       '@x402/fetch':
         specifier: 2.28.0
         version: 2.28.0
@@ -245,10 +245,10 @@ importers:
       '@x402/core':
         specifier: 2.28.0
         version: 2.28.0
-      '@z402/lightwalletd':
+      '@z402-net/lightwalletd':
         specifier: workspace:*
         version: link:../lightwalletd
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../protocol
       express:
@@ -270,7 +270,7 @@ importers:
       '@grpc/proto-loader':
         specifier: 0.8.1
         version: 0.8.1
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../protocol
 
@@ -282,12 +282,13 @@ importers:
 
   packages/server:
     dependencies:
+      '@z402-net/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
       '@x402/core':
         specifier: 2.28.0
         version: 2.28.0
-      '@z402/protocol':
-        specifier: workspace:*
-        version: link:../protocol
 
   packages/service-kit:
     dependencies:
@@ -300,10 +301,10 @@ importers:
       '@x402/extensions':
         specifier: 2.28.0
         version: 2.28.0(typescript@7.0.2)
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../protocol
-      '@z402/server':
+      '@z402-net/server':
         specifier: workspace:*
         version: link:../server
       express:
@@ -316,7 +317,7 @@ importers:
       '@x402/fetch':
         specifier: 2.28.0
         version: 2.28.0
-      '@z402/client':
+      '@z402-net/client':
         specifier: workspace:*
         version: link:../client
       '@z402/facilitator':
@@ -328,7 +329,7 @@ importers:
 
   packages/testkit:
     dependencies:
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../protocol
 
@@ -337,13 +338,13 @@ importers:
       '@x402/extensions':
         specifier: 2.28.0
         version: 2.28.0(typescript@7.0.2)
-      '@z402/lightwalletd':
+      '@z402-net/lightwalletd':
         specifier: workspace:*
         version: link:../../packages/lightwalletd
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@z402/service-kit':
+      '@z402-net/service-kit':
         specifier: workspace:*
         version: link:../../packages/service-kit
       express:
@@ -362,10 +363,10 @@ importers:
       '@x402/extensions':
         specifier: 2.28.0
         version: 2.28.0(typescript@7.0.2)
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@z402/service-kit':
+      '@z402-net/service-kit':
         specifier: workspace:*
         version: link:../../packages/service-kit
       express:
@@ -384,10 +385,10 @@ importers:
       '@x402/extensions':
         specifier: 2.28.0
         version: 2.28.0(typescript@7.0.2)
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@z402/service-kit':
+      '@z402-net/service-kit':
         specifier: workspace:*
         version: link:../../packages/service-kit
       express:
@@ -409,10 +410,10 @@ importers:
       '@x402/extensions':
         specifier: 2.28.0
         version: 2.28.0(typescript@7.0.2)
-      '@z402/protocol':
+      '@z402-net/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@z402/service-kit':
+      '@z402-net/service-kit':
         specifier: workspace:*
         version: link:../../packages/service-kit
       express:

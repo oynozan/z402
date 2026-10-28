@@ -66,7 +66,7 @@ The process that mines a block on a timer. On regtest blocks exist only when som
 
 ### Client scheme
 
-`PrepaidVoucherScheme` in `@z402/client`: the x402 client scheme that keeps the sessions, decides when to deposit and signs each voucher. One `register` call adds it to the stock x402 client. See [`@z402/client`](/docs/reference/client).
+`PrepaidVoucherScheme` in `@z402-net/client`: the x402 client scheme that keeps the sessions, decides when to deposit and signs each voucher. One `register` call adds it to the stock x402 client. See [`@z402-net/client`](/docs/reference/client).
 
 ### Confirmation
 
@@ -303,18 +303,18 @@ A private Zcash test chain that you run yourself. The demo uses it through the Z
 
 ### Resource server
 
-The paid API that answers 402 and talks to the facilitator. The starter services and `apps/api` are resource servers. See [`@z402/server`](/docs/reference/server).
+The paid API that answers 402 and talks to the facilitator. The starter services and `apps/api` are resource servers. See [`@z402-net/server`](/docs/reference/server).
 
 
 ## S
 
 ### Server scheme
 
-`PrepaidVoucherServerScheme` in `@z402/server`: the x402 server scheme that builds each route's offer, copies the facilitator's terms into it and adds the session snapshot to a corrective 402.
+`PrepaidVoucherServerScheme` in `@z402-net/server`: the x402 server scheme that builds each route's offer, copies the facilitator's terms into it and adds the session snapshot to a corrective 402.
 
 ### Service kit
 
-`@z402/service-kit`: the library that turns a description of paid routes into an Express app with the payment, `/health` and the Bazaar declarations. See [Build with the service kit](/docs/guides/service-kit).
+`@z402-net/service-kit`: the library that turns a description of paid routes into an Express app with the payment, `/health` and the Bazaar declarations. See [Build with the service kit](/docs/guides/service-kit).
 
 ### Session
 

@@ -2,7 +2,7 @@
  * The LLM service's own variables (design §4.1). An empty variable counts as unset, and every error names the variable
  * at fault without quoting a secret.
  */
-import { ConfigError, read, readInt, readOrFile, readUrl, type Env } from "@z402/service-kit";
+import { ConfigError, read, readInt, readOrFile, readUrl, type Env } from "@z402-net/service-kit";
 
 export interface LlmConfig {
   /** OpenAI-compatible API root without a trailing slash, e.g. http://127.0.0.1:11434/v1 */

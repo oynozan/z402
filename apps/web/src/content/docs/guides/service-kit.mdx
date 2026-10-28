@@ -3,7 +3,7 @@ export const meta = {
   description: "Describe your routes as data and write plain Express handlers. The kit adds payment, the Bazaar listing, health checks and tests. A complete example.",
 };
 
-`@z402/service-kit` is what the four starter services are built on. You describe your paid routes as data and write ordinary Express handlers. The kit does the rest.
+`@z402-net/service-kit` is what the four starter services are built on. You describe your paid routes as data and write ordinary Express handlers. The kit does the rest.
 
 | The kit does this | So you do not |
 | --- | --- |
@@ -12,13 +12,13 @@ export const meta = {
 | **Refusals.** Answers a wrong method (`405`), a service that is not ready (`503`) and a second copy of a voucher already in flight (`409`) before anyone pays | Remember each of them |
 | **Listing.** Declares every route to the facilitator's Bazaar at start and every 30 s while the service is ready | Build the declaration, or the heartbeat |
 | **Health.** Serves `GET /health` with the routes, their prices and the calls delivered today | Write a health route |
-| **Tests.** A test stack makes real paid calls in-process, against the real facilitator on a fake chain | Mock the payment |
+| **Tests.** In the z402 repository, a test stack makes real paid calls in-process, against the real facilitator on a fake chain | Mock the payment |
 
 To add payment to an existing Express API by hand instead, read [Sell an API](/docs/guides/sell-an-api).
 
 <Callout type="note" title="A workspace package">
 
-`@z402/service-kit` is a package of the z402 workspace (`private`, version `0.0.0`), like the services under `services/`. Build your service as a package in the same workspace.
+`@z402-net/service-kit` is a package of the z402 workspace, like the services under `services/`, and it is not published to npm yet. Build your service as a package in the same workspace.
 
 </Callout>
 
@@ -112,7 +112,7 @@ Put the service in `services/notes`. The package follows the starter services.
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@z402/service-kit": "workspace:*",
+    "@z402-net/service-kit": "workspace:*",
     "express": "5.3.0"
   },
   "devDependencies": {
@@ -132,7 +132,7 @@ Run `pnpm install` in the repository root so that the workspace links the new pa
 
 <Callout type="note">
 
-`@z402/service-kit` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"`, as above, and run with `tsx` on Node 22 or later.
+`@z402-net/service-kit` is not published to npm yet. Until it is, depend on it from the z402 monorepo with `"workspace:*"`, as above, and run with `tsx` on Node 22 or later.
 
 </Callout>
 
@@ -140,7 +140,7 @@ Run `pnpm install` in the repository root so that the workspace links the new pa
 
 ```ts title="services/notes/src/service.ts"
 import { randomBytes } from "node:crypto";
-import { createPaidService, onDelivered, type PaidRoute, type ServiceEnv } from "@z402/service-kit";
+import { createPaidService, onDelivered, type PaidRoute, type ServiceEnv } from "@z402-net/service-kit";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 
 const MAX_CHARS = 2000;
@@ -293,7 +293,7 @@ What to notice:
 ### Write the entry point
 
 ```ts title="services/notes/src/main.ts"
-import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402/service-kit";
+import { loadDotEnv, loadServiceEnv, runMain, serve } from "@z402-net/service-kit";
 import { createNotesService } from "./service.js";
 
 const PORT = 4040;
@@ -418,10 +418,16 @@ The `z402` extension carries the billing unit and the note. The `bazaar` extensi
 
 ### Test it
 
-`@z402/service-kit/testing` starts a fake chain, the real facilitator on an in-memory ledger, your service, and a stock x402 fetch that pays with a mock wallet. A call made with `paidFetch` is a real paid call: a deposit, a voucher, verification, your handler and settlement. It needs no Docker and no network.
+`@z402-net/service-kit/testing` starts a fake chain, the real facilitator on an in-memory ledger, your service, and a stock x402 fetch that pays with a mock wallet. A call made with `paidFetch` is a real paid call: a deposit, a voucher, verification, your handler and settlement. It needs no Docker and no network.
+
+<Callout type="note" title="In the z402 repository only">
+
+`@z402-net/service-kit/testing` is available inside the z402 repository only. It runs the repository's own facilitator and fake chain, `@z402/facilitator` and `@z402/testkit`, which are not published, so the package leaves this entry point out when it is published. Write the test in a service that is a package of the z402 workspace, as this one is.
+
+</Callout>
 
 ```ts title="services/notes/test/service.test.ts"
-import { declarationRefusal, railOf, startTestStack, TEST_PAY_TO, type TestStack } from "@z402/service-kit/testing";
+import { declarationRefusal, railOf, startTestStack, TEST_PAY_TO, type TestStack } from "@z402-net/service-kit/testing";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createNotesService, type NotesService } from "../src/service.js";
 
@@ -634,7 +640,7 @@ The kit reuses an answer for 5 s, and treats a `ready` that throws or takes long
 Your own settings use the same helpers. `read` returns a variable or `undefined`, `readInt` checks a whole number in a range, `readUrl` checks an `http(s)` URL, and `readOrFile` also takes a `_FILE` form. A `ConfigError` stops the start with a message that names the variable.
 
 ```ts
-import { ConfigError, read, readInt, type Env } from "@z402/service-kit";
+import { ConfigError, read, readInt, type Env } from "@z402-net/service-kit";
 
 export interface NotesConfig {
   /** Most characters one note may hold */
@@ -678,7 +684,7 @@ The kit lists every paid route in the facilitator's Bazaar, with no code from yo
 </Callout>
 
 <Cards>
-  <Card title="@z402/service-kit" href="/docs/reference/service-kit">Every export, option, variable and limit.</Card>
+  <Card title="@z402-net/service-kit" href="/docs/reference/service-kit">Every export, option, variable and limit.</Card>
   <Card title="Starter services" href="/docs/services">The four services built with the kit, and their prices.</Card>
   <Card title="Sell an API" href="/docs/guides/sell-an-api">The same wiring by hand, and the going-live checklist.</Card>
   <Card title="Discovery" href="/docs/concepts/discovery">How agents find the routes the kit lists.</Card>

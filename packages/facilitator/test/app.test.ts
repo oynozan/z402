@@ -24,7 +24,7 @@ import {
   SCHEME,
   type ChainView,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import {

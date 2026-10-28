@@ -5,9 +5,9 @@
  * each merchant it pays, so the services that share a merchant share them.
  */
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet, type PrepaidVoucherSchemeOptions } from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
-import type { TxStatusSource, ZcashWallet } from "@z402/protocol";
+import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet, type PrepaidVoucherSchemeOptions } from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
+import type { TxStatusSource, ZcashWallet } from "@z402-net/protocol";
 import type { Flags } from "./flags.js";
 import { formatEvent } from "./log.js";
 

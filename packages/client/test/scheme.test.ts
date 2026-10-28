@@ -17,7 +17,7 @@ import {
   type SnapshotDeposit,
   type TxStatusSource,
   type ZcashWallet,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { FakeChain, MockWallet } from "@z402/testkit";
 import { describe, expect, it } from "vitest";
 import {

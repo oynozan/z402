@@ -1,6 +1,6 @@
 /** The DROPBOX_* settings, while the variables every paid service shares are loadServiceEnv's */
 import { resolve } from "node:path";
-import { ConfigError, read, readInt, readUrl, type Env } from "@z402/service-kit";
+import { ConfigError, read, readInt, readUrl, type Env } from "@z402-net/service-kit";
 import { MAX_POLL_MS } from "./tip.js";
 
 export interface DropboxConfig {

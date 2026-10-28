@@ -7,7 +7,7 @@ import {
   zeroConfEligible,
   type FoundInspection,
   type Terms,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import type { DepositRecord, Evaluation } from "./types.js";
 
 /** Where an inspection puts a deposit at the tip, dead when it is unmined past its expiry */

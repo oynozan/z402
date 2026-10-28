@@ -1,15 +1,19 @@
 export const meta = {
-  title: "@z402/server",
+  title: "@z402-net/server",
   description: "The provider-side payment scheme for the x402 resource server, the start-up check that an API key and an address belong together, and its error type.",
 };
 
-`@z402/server` is the provider side of the z402 payment scheme. A provider's resource server registers `PrepaidVoucherServerScheme` with the stock x402 `x402ResourceServer`, and calls `checkProvider` once before it listens.
+`@z402-net/server` is the provider side of the z402 payment scheme. A provider's resource server registers `PrepaidVoucherServerScheme` with the stock x402 `x402ResourceServer`, and calls `checkProvider` once before it listens.
 
-The package depends on `@x402/core`, pinned to exactly 2.28.0, and on `@z402/protocol`. It is a workspace package (`private`, version `0.0.0`) with one entry point, `@z402/server`.
+```bash
+npm install --save-exact @z402-net/server @z402-net/protocol @x402/core@2.28.0
+```
+
+The package has one entry point, `@z402-net/server`. It depends on `@z402-net/protocol`, which is installed with it, and takes `@x402/core` as a peer dependency at exactly 2.28.0, so you install that yourself. The example below imports `NETWORK_REGTEST` from `@z402-net/protocol` as well, which is why the line names it.
 
 <Callout type="note">
 
-`@z402/server` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
+`@z402-net/server` and `@z402-net/protocol` are not published to npm yet. Until they are, depend on them from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
 
 </Callout>
 
@@ -25,8 +29,8 @@ The package depends on `@x402/core`, pinned to exactly 2.28.0, and on `@z402/pro
 
 ```ts
 import { HTTPFacilitatorClient, x402ResourceServer } from "@x402/core/server";
-import { NETWORK_REGTEST } from "@z402/protocol";
-import { PrepaidVoucherServerScheme } from "@z402/server";
+import { NETWORK_REGTEST } from "@z402-net/protocol";
+import { PrepaidVoucherServerScheme } from "@z402-net/server";
 
 const payTo = "uregtest1...";
 const server = new x402ResourceServer(new HTTPFacilitatorClient({ url: "https://facilitator.example" })).register(
@@ -35,7 +39,7 @@ const server = new x402ResourceServer(new HTTPFacilitatorClient({ url: "https://
 );
 ```
 
-[Sell an API](/docs/guides/sell-an-api) builds a complete server on these two exports. [`@z402/service-kit`](/docs/reference/service-kit) wires them for you.
+[Sell an API](/docs/guides/sell-an-api) builds a complete server on these two exports. [`@z402-net/service-kit`](/docs/reference/service-kit) wires them for you.
 
 ## PrepaidVoucherServerScheme
 
@@ -229,7 +233,7 @@ Each message starts with `<field>: `. Callers branch on `field` and `retryable` 
 A busy or slow facilitator, `408` and `429`, answers later, so those count as retryable like `5xx`.
 
 ```ts
-import { checkProvider, ProviderCheckError } from "@z402/server";
+import { checkProvider, ProviderCheckError } from "@z402-net/server";
 
 try {
   await checkProvider({ facilitatorUrl, token, payTo, network: "zcash:regtest" });
@@ -257,7 +261,7 @@ type ProviderCheckField = "facilitatorToken" | "payTo" | "facilitatorUrl";
 
 `name` is `ProviderCheckError` and `message` is `<field>: <reason>`. `field` is the setting at fault, named as the options of `checkProvider` are. `retryable` is true when the facilitator may only be starting or briefly down, so asking again later can succeed. Retry only while it is true. Every other outcome is a mistake of yours, and asking again changes nothing.
 
-[`@z402/service-kit`](/docs/reference/service-kit) maps `field` to the variable that sets it: `facilitatorToken` to `Z402_FACILITATOR_TOKEN`, `payTo` to `Z402_PAY_TO` and `facilitatorUrl` to `Z402_FACILITATOR_URL`. It retries while `retryable` is true.
+[`@z402-net/service-kit`](/docs/reference/service-kit) maps `field` to the variable that sets it: `facilitatorToken` to `Z402_FACILITATOR_TOKEN`, `payTo` to `Z402_PAY_TO` and `facilitatorUrl` to `Z402_FACILITATOR_URL`. It retries while `retryable` is true.
 
 ## The facilitator route
 

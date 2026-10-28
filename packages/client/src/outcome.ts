@@ -1,5 +1,5 @@
 import type { PaymentResponseContext } from "@x402/core/client";
-import { parseSessionSnapshot, REASON, type SessionSnapshot } from "@z402/protocol";
+import { parseSessionSnapshot, REASON, type SessionSnapshot } from "@z402-net/protocol";
 
 export type Outcome =
   | { kind: "paid"; snapshot?: SessionSnapshot; transaction: string }

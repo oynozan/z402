@@ -1,4 +1,4 @@
-import type { ClientEvent } from "@z402/client";
+import type { ClientEvent } from "@z402-net/client";
 import { describe, expect, it } from "vitest";
 import { formatEvent, shortAddress, shortHex } from "../src/log.js";
 

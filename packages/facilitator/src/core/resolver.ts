@@ -1,4 +1,4 @@
-import { ChainUnavailableError, type ChainView, type FoundInspection } from "@z402/protocol";
+import { ChainUnavailableError, type ChainView, type FoundInspection } from "@z402-net/protocol";
 
 /** `tip` was read before the inspect, so an unmined or missing answer speaks for a chain at least that high */
 export type Lookup =

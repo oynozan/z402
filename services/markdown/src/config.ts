@@ -1,5 +1,5 @@
 /** This service's own variables (design §4.2). The shared Z402_* ones are read by loadServiceEnv from the kit. */
-import { ConfigError, read, readInt, type Env } from "@z402/service-kit";
+import { ConfigError, read, readInt, type Env } from "@z402-net/service-kit";
 import express from "express";
 
 export interface MarkdownConfig {

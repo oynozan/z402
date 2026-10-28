@@ -7,6 +7,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@z402/protocol": "workspace:*"
+    "@z402-net/protocol": "workspace:*"
   }
 }

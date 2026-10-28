@@ -1,8 +1,8 @@
 /**
  * LightwalletdTxStatus, the client's TxStatusSource over a lightwalletd-like client (design §5). The input is
- * typed structurally, so the client never depends on `@z402/lightwalletd` or on gRPC.
+ * typed structurally, so the client never depends on `@z402-net/lightwalletd` or on gRPC.
  */
-import { ChainUnavailableError, expiryHeightFromRawTx, type TxStatus, type TxStatusSource } from "@z402/protocol";
+import { ChainUnavailableError, expiryHeightFromRawTx, type TxStatus, type TxStatusSource } from "@z402-net/protocol";
 
 /** `RawTx` of protocol.md §15, where `height` is set only when `location` is `mined` */
 export type RawTx =

@@ -4,7 +4,7 @@ import {
   NOT_FOUND_DEAD_MS,
   type FoundInspection,
   type TxInspection,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { chainPosition } from "./evaluate.js";
 import { DEAD_RECHECK_BLOCKS, type DepositRecord } from "./types.js";
 

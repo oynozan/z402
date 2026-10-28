@@ -11,7 +11,7 @@ The whole integration is three lines. The rest of this page is what goes into `w
 
 ```ts
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { PrepaidVoucherScheme } from "@z402/client";
+import { PrepaidVoucherScheme } from "@z402-net/client";
 
 const scheme = new PrepaidVoucherScheme({ wallet, chain });
 const client = new x402Client().register("zcash:regtest", scheme); // the one line that adds Zcash
@@ -81,30 +81,32 @@ The wallet needs funds for one deposit and its fee for each provider you will pa
 <CodeTabs>
 
 ```bash title="npm"
-npm install --save-exact @z402/client @x402/fetch@2.28.0
+npm install --save-exact @z402-net/client @z402-net/lightwalletd @x402/fetch@2.28.0 @x402/core@2.28.0
 ```
 
 ```bash title="pnpm"
-pnpm add --save-exact @z402/client @x402/fetch@2.28.0
+pnpm add --save-exact @z402-net/client @z402-net/lightwalletd @x402/fetch@2.28.0 @x402/core@2.28.0
 ```
 
 </CodeTabs>
 
 <Callout type="note">
 
-`@z402/client` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
+`@z402-net/client` and `@z402-net/lightwalletd` are not published to npm yet. Until they are, depend on them from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
 
 </Callout>
 
-The examples further down use three more packages. Install each one the same way when you need it: `@z402/lightwalletd`, which is not on npm yet either, and `@x402/core` and `@x402/extensions`, which take the same exact pin.
+What each package is for:
 
 | Package | You use it for |
 |---|---|
-| `@z402/client` | The scheme, the Zallet wallet, the chain status source, and the wallet and chain types |
+| `@z402-net/client` | The scheme, the Zallet wallet, the chain status source, and the wallet and chain types |
+| `@z402-net/lightwalletd` | `createLightwalletdClient`, the gRPC client that the status source reads through |
 | `@x402/fetch` | `x402Client` and `wrapFetchWithPayment` |
-| `@z402/lightwalletd` | `createLightwalletdClient`, the gRPC client that the status source reads through |
-| `@x402/core` | `HTTPFacilitatorClient` and the header decoders |
-| `@x402/extensions` | `withBazaar`, to read the catalog of services |
+| `@x402/core` | The peer that `@z402-net/client` takes at exactly 2.28.0, so you install it yourself. `HTTPFacilitatorClient` and the header decoders come from it too |
+| `@z402-net/protocol` | Installed with `@z402-net/client`. Add it yourself only to import from it, as the starter services' `paid-fetch.ts` does for `NETWORK_REGTEST` |
+
+`@x402/extensions`, for `withBazaar`, is needed only to read the catalog of services. [Find services in the Bazaar](#find-services-in-the-bazaar) installs it.
 
 Pin the `@x402` packages to exactly 2.28.0, which `--save-exact` keeps in your `package.json`. The scheme is built and tested against that version, and the protocol pins it too. To run TypeScript directly, use `npx tsx agent.ts`.
 
@@ -113,7 +115,7 @@ Pin the `@x402` packages to exactly 2.28.0, which `--save-exact` keeps in your `
 The scheme does not hold money. It asks a wallet to send each deposit. `ZalletRpcWallet` does that through the JSON-RPC interface of [Zallet](https://github.com/zcash/zallet), the RPC wallet that replaces the wallet inside `zcashd`.
 
 ```ts
-import { ZalletRpcWallet } from "@z402/client";
+import { ZalletRpcWallet } from "@z402-net/client";
 
 const wallet = new ZalletRpcWallet({
   url: "http://127.0.0.1:50232", // Zallet's JSON-RPC
@@ -136,7 +138,7 @@ What the wallet does for each deposit:
 
 ### Bring your own wallet
 
-`ZalletRpcWallet` is the only wallet in the package, and it is built and tested against Zallet on the regtest stack. The demo agent's `--wallet zingo` option is a placeholder for a mainnet wallet that does not exist yet. For anything else, write an object that fits this interface. `@z402/client` exports both types:
+`ZalletRpcWallet` is the only wallet in the package, and it is built and tested against Zallet on the regtest stack. The demo agent's `--wallet zingo` option is a placeholder for a mainnet wallet that does not exist yet. For anything else, write an object that fits this interface. `@z402-net/client` exports both types:
 
 ```ts
 interface DepositRequest {
@@ -162,17 +164,11 @@ The scheme relies on these rules:
 
 The scheme reads the chain for itself only in a few cases: to wait until a pending deposit is mined, to look for a deposit the provider could not find, and to recheck a deposit whose send was uncertain. In each it also learns whether a deposit has died, so that it can replace it. It never reads the chain for an ordinary call.
 
-The status source reads through the gRPC client of `@z402/lightwalletd`. Install it the same way as `@z402/client`:
-
-```bash
-npm install --save-exact @z402/lightwalletd
-```
-
-It is another package of the monorepo and not on npm yet either, so depend on it with `"workspace:*"` until it is.
+The status source reads through the gRPC client of `@z402-net/lightwalletd`, which the [install line](#install) above added. It is not published to npm yet either, so depend on it with `"workspace:*"` until it is.
 
 ```ts
-import { LightwalletdTxStatus } from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
+import { LightwalletdTxStatus } from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
 
 const lightwalletd = createLightwalletdClient({ url: "http://127.0.0.1:28137" });
 const chain = new LightwalletdTxStatus(lightwalletd);
@@ -190,7 +186,7 @@ The lightwalletd endpoint you read through learns your IP address and the txids 
 
 ```ts
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { PrepaidVoucherScheme } from "@z402/client";
+import { PrepaidVoucherScheme } from "@z402-net/client";
 
 const scheme = new PrepaidVoucherScheme({
   wallet,
@@ -235,7 +231,7 @@ A paid answer carries a `PAYMENT-RESPONSE` header: base64 JSON, the provider's s
 
 ```ts
 import { decodePaymentResponseHeader } from "@x402/fetch";
-import { snapshotFromExtra } from "@z402/client";
+import { snapshotFromExtra } from "@z402-net/client";
 
 const header = res.headers.get("PAYMENT-RESPONSE");
 if (header !== null) {
@@ -338,7 +334,7 @@ To accept a window above 1,000,000 zat, raise `maxDepositZat` as well, because b
 To bound the money across all providers, count in the wallet, which sees every deposit. This wrapper refuses a deposit that would take the total past a budget. The scheme records the refusal as a failed deposit (`deposit_failed`). A background deposit then does not happen, and the scheme tries again at the next trigger. Once the headroom no longer covers a call, the deposit is made inline, and that call throws `Failed to create payment payload: ...` before any voucher is sent.
 
 ```ts
-import { DepositStatusUnknownError, DepositUncertainError, type ZcashWallet } from "@z402/client";
+import { DepositStatusUnknownError, DepositUncertainError, type ZcashWallet } from "@z402-net/client";
 
 function withBudget(wallet: ZcashWallet, budgetZat: bigint): ZcashWallet {
   let committed = 0n;
@@ -420,7 +416,7 @@ When a payment cannot be built, the stock wrapper throws a plain `Error` whose m
 The events carry the details. This handler logs the three that matter most:
 
 ```ts
-import { PrepaidVoucherScheme } from "@z402/client";
+import { PrepaidVoucherScheme } from "@z402-net/client";
 
 const scheme = new PrepaidVoucherScheme({
   wallet,
@@ -490,7 +486,19 @@ What to know before you abort:
 
 ## Find services in the Bazaar
 
-Providers list their routes in the facilitator's public catalog, the x402 Bazaar, and the website serves it at `/discovery/resources`. Read it with the stock Bazaar client. Nothing in this call is specific to z402.
+Providers list their routes in the facilitator's public catalog, the x402 Bazaar, and the website serves it at `/discovery/resources`. Read it with the stock Bazaar client. Nothing in this call is specific to z402. It needs one more package, `@x402/extensions`, which takes the same exact pin:
+
+<CodeTabs>
+
+```bash title="npm"
+npm install --save-exact @x402/extensions@2.28.0
+```
+
+```bash title="pnpm"
+pnpm add --save-exact @x402/extensions@2.28.0
+```
+
+</CodeTabs>
 
 ```ts
 import { HTTPFacilitatorClient } from "@x402/core/server";
@@ -556,7 +564,7 @@ Every field is text that a provider wrote. The 402 that a route returns stays au
 
 ## A complete agent
 
-This agent finds a route for two tasks in the catalog, pays both, and prints what each call cost. The routes belong to two providers, so it makes two deposits. A wallet budget bounds its deposits, a policy on the client caps the price of a call, `Ctrl-C` ends it cleanly, and a few lines print the events that matter. It is about 150 lines and needs nothing beyond the packages installed above.
+This agent finds a route for two tasks in the catalog, pays both, and prints what each call cost. The routes belong to two providers, so it makes two deposits. A wallet budget bounds its deposits, a policy on the client caps the price of a call, `Ctrl-C` ends it cleanly, and a few lines print the events that matter. It is about 150 lines and needs nothing beyond the packages installed above and `@x402/extensions`.
 
 ```ts title="agent.ts"
 import { decodePaymentRequiredHeader } from "@x402/core/http";
@@ -571,8 +579,8 @@ import {
   ZalletRpcWallet,
   snapshotFromExtra,
   type ZcashWallet,
-} from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
+} from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
 
 const NETWORK = "zcash:regtest";
 const BAZAAR_URL = "http://localhost:3000"; // the website, which serves the facilitator's catalog
@@ -761,7 +769,7 @@ What the example does, step by step:
 ## Next steps
 
 <Cards>
-  <Card title="@z402/client reference" href="/docs/reference/client">Every export, option, event and error of the client package.</Card>
+  <Card title="@z402-net/client reference" href="/docs/reference/client">Every export, option, event and error of the client package.</Card>
   <Card title="Errors and reason codes" href="/docs/reference/errors">All 19 codes, with their meaning and the client's action.</Card>
   <Card title="Prepaid vouchers" href="/docs/concepts/prepaid-vouchers">Why the running total, the window and the credit work as they do.</Card>
   <Card title="Discovery" href="/docs/concepts/discovery">How services list themselves, and what the catalog can and cannot tell you.</Card>

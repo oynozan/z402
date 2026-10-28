@@ -16,7 +16,7 @@ import {
   ProtocolError,
   type Terms,
   type ZcashNetwork,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 import { MAX_PAY_TO_LENGTH } from "./payTo.js";
 
 /** The repository root, found from this file and never from the working directory, which `pnpm --filter` changes */

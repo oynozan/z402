@@ -1,17 +1,56 @@
 {
-  "name": "@z402/server",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@z402-net/server",
+  "version": "0.1.0",
+  "description": "The provider side of z402 for x402 resource servers: the prepaid-voucher scheme and the start-up provider check",
+  "keywords": [
+    "x402",
+    "zcash",
+    "shielded",
+    "payments",
+    "agents"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oynozan/z402.git",
+    "directory": "packages/server"
+  },
+  "homepage": "https://z402.net/docs/reference/server",
+  "bugs": "https://github.com/oynozan/z402/issues",
   "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@x402/core": "2.28.0",
-    "@z402/protocol": "workspace:*"
+    "@z402-net/protocol": "workspace:*"
+  },
+  "peerDependencies": {
+    "@x402/core": "2.28.0"
+  },
+  "devDependencies": {
+    "@x402/core": "2.28.0"
   }
 }

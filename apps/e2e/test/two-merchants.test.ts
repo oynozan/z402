@@ -1,4 +1,4 @@
-import type { SessionSnapshot } from "@z402/protocol";
+import type { SessionSnapshot } from "@z402-net/protocol";
 import { afterEach, expect, test } from "vitest";
 import { CLOSE_TIMEOUT_MS, paidSnapshot, PAY_TO, PAY_TO_2, startMerchants, type MultiStack } from "../src/harness.js";
 

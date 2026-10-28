@@ -6,7 +6,7 @@ import {
   encodePaymentResponseHeader,
 } from "@x402/core/http";
 import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402/core/types";
-import { DEMO_TERMS, encodeTerms, NETWORK_REGTEST, SCHEME, type SessionSnapshot } from "@z402/protocol";
+import { DEMO_TERMS, encodeTerms, NETWORK_REGTEST, SCHEME, type SessionSnapshot } from "@z402-net/protocol";
 import { PAY_TO } from "../fixtures.js";
 
 export type MerchantReply =
