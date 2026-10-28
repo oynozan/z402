@@ -1,6 +1,7 @@
 packages:
   - packages/*
   - apps/*
+  - services/*
 allowBuilds:
   esbuild: false
   protobufjs: false

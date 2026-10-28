@@ -1,0 +1,29 @@
+{
+  "name": "@z402/service-kit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@x402/core": "2.28.0",
+    "@x402/express": "2.28.0",
+    "@x402/extensions": "2.28.0",
+    "@z402/protocol": "workspace:*",
+    "@z402/server": "workspace:*",
+    "express": "5.3.0"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@x402/fetch": "2.28.0",
+    "@z402/client": "workspace:*",
+    "@z402/facilitator": "workspace:*",
+    "@z402/testkit": "workspace:*"
+  }
+}
