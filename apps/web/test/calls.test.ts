@@ -40,9 +40,19 @@ describe("exampleUrl", () => {
   test("fills in the example query and path parameters", () => {
     expect(exampleUrl(MARKDOWN)).toBe("http://localhost:4032/v1/markdown?url=https%3A%2F%2Fexample.com");
     expect(exampleUrl(HOLD)).toBe("http://localhost:4034/v1/drops/example/hold");
-    expect(exampleUrl({ ...HOLD, url: "http://a.test/v1/[id]", input: input({ pathParams: { id: "a b" } }) })).toBe(
-      "http://a.test/v1/a%20b",
+    expect(exampleUrl({ ...HOLD, url: "http://a.test/v1/[id]", input: input({ pathParams: { id: "a-b_c.1~" } }) })).toBe(
+      "http://a.test/v1/a-b_c.1~",
     );
+  });
+
+  test("keeps the template's parameter for a path example that names the value, such as <drop id>", () => {
+    const named = (id: string) => ({ ...HOLD, input: input({ bodyType: "json", body: {}, pathParams: { id } }) });
+    expect(exampleUrl(named("<drop id>"))).toBe("http://localhost:4034/v1/drops/:id/hold");
+    expect(exampleUrl(named("{id}"))).toBe("http://localhost:4034/v1/drops/:id/hold");
+    expect(exampleUrl({ ...HOLD, url: "http://a.test/v1/[id]", input: input({ pathParams: { id: "a b" } }) })).toBe(
+      "http://a.test/v1/[id]",
+    );
+    expect(curlCommand(named("<drop id>"))).toContain("'http://localhost:4034/v1/drops/:id/hold'");
   });
 
   test("leaves a parameter without an example, and a URL it cannot parse", () => {
