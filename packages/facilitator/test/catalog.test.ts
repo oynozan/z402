@@ -938,16 +938,9 @@ describe("recordPaid: a settled payment", () => {
 });
 
 describe("recordPaid: a provider that never declared is listed from its payments", () => {
-  test("creates the item from the requirements, the sanitized resource and the bazaar extension", () => {
+  test("creates the item from the requirements, the sanitized resource, the mimeType and the bazaar extension", () => {
     const c = make();
-    const resource = {
-      url: "http://127.0.0.1:4021/chunk?session=s1",
-      description: "A chunk of text",
-      mimeType: "text/plain",
-      serviceName: "chunk",
-      tags: ["demo"],
-      iconUrl: "https://cdn.example.com/chunk.png",
-    };
+    const resource = { url: "http://127.0.0.1:4021/chunk?session=s1", mimeType: "text/plain" };
     c.recordPaid(P1, pay({ resource, extensions: { bazaar: bazaar("GET"), other: { x: 1 } } }), accept());
     expect(one(everything(c))).toStrictEqual({
       resource: "http://127.0.0.1:4021/chunk",
@@ -955,11 +948,7 @@ describe("recordPaid: a provider that never declared is listed from its payments
       x402Version: 2,
       accepts: [ACCEPT_500],
       lastUpdated: ISO0,
-      description: "A chunk of text",
       mimeType: "text/plain",
-      serviceName: "chunk",
-      tags: ["demo"],
-      iconUrl: "https://cdn.example.com/chunk.png",
       extensions: { bazaar: bazaar("GET") },
       paidCallsToday: 1,
     });
@@ -981,12 +970,12 @@ describe("recordPaid: a provider that never declared is listed from its payments
 
   test("a further payment counts the item and changes nothing else, whatever it echoes", () => {
     const c = make();
-    c.recordPaid(P1, pay({ resource: { url: "http://127.0.0.1:4021/chunk", description: "first" } }), accept());
+    c.recordPaid(P1, pay({ resource: { url: "http://127.0.0.1:4021/chunk", mimeType: "text/plain" } }), accept());
     const created = one(everything(c));
     advance(MINUTE);
     c.recordPaid(
       P1,
-      pay({ resource: { url: "http://127.0.0.1:4021/chunk", description: "second", serviceName: "x" } }),
+      pay({ resource: { url: "http://127.0.0.1:4021/chunk", mimeType: "text/html", description: "second" } }),
       accept(),
     );
     expect(one(everything(c))).toStrictEqual({
@@ -1037,41 +1026,29 @@ describe("recordPaid: a provider that never declared is listed from its payments
     expect(everything(c)).toStrictEqual([]);
   });
 
-  test("drops invalid resource metadata field by field and keeps the rest", () => {
+  test.each<[string, Record<string, unknown>]>([
+    ["a mimeType over 128 characters", { mimeType: "m".repeat(129) }],
+    ["a null mimeType", { mimeType: null }],
+    ["a numeric mimeType", { mimeType: 5 }],
+  ])("drops %s and still lists the item", (_name, bad) => {
     const c = make();
-    const resource = {
-      url: "http://127.0.0.1:4021/chunk",
-      description: "kept",
-      mimeType: "m".repeat(129),
-      serviceName: "s".repeat(33),
-      tags: ["ok", "bad\ttag"],
-      iconUrl: "http://localhost/i.png",
-    };
-    c.recordPaid(P1, pay({ resource }), accept());
+    c.recordPaid(P1, pay({ resource: { url: "http://127.0.0.1:4021/chunk", ...bad } }), accept());
     expect(one(everything(c))).toStrictEqual({
       resource: "http://127.0.0.1:4021/chunk",
       type: "http",
       x402Version: 2,
       accepts: [ACCEPT_500],
       lastUpdated: ISO0,
-      description: "kept",
       extensions: { bazaar: bazaar("GET") },
       paidCallsToday: 1,
     });
   });
 
-  test.each<[string, Record<string, unknown>]>([
-    ["a description over 512 characters", { description: "d".repeat(513) }],
-    ["a null description", { description: null }],
-    ["a numeric serviceName", { serviceName: 5 }],
-    ["6 tags", { tags: ["a", "b", "c", "d", "e", "f"] }],
-    ["tags that are not an array", { tags: "a" }],
-    ["an iconUrl with userinfo", { iconUrl: "https://u:p@cdn.example.com/i.png" }],
-  ])("drops %s", (_name, bad) => {
+  test("keeps a mimeType of exactly 128 characters", () => {
     const c = make();
-    c.recordPaid(P1, pay({ resource: { url: "http://127.0.0.1:4021/chunk", ...bad } }), accept());
-    const [field] = Object.keys(bad);
-    expect(field! in one(everything(c))).toBe(false);
+    const mimeType = "m".repeat(128);
+    c.recordPaid(P1, pay({ resource: { url: "http://127.0.0.1:4021/chunk", mimeType } }), accept());
+    expect(one(everything(c)).mimeType).toBe(mimeType);
   });
 
   test("creates nothing when the bazaar extension is over 8192 bytes", () => {
@@ -1112,6 +1089,155 @@ describe("recordPaid: a provider that never declared is listed from its payments
       description: "now declared",
       lastSeen: "2026-10-28T12:01:00.000Z",
       paidCallsToday: 1,
+    });
+  });
+});
+
+describe("recordPaid: an item created from a payment keeps only what the server verified", () => {
+  const hostile = {
+    description: "<script>alert(document.cookie)</script> Official support desk, send funds here",
+    serviceName: "PayPal Support",
+    tags: ["paypal", "support"],
+    iconUrl: "https://tracker.attacker.example/pixel.gif?uid=visitor",
+  };
+  const echoed = { url: "http://127.0.0.1:4021/chunk", mimeType: "text/plain", ...hostile };
+  const FIELDS = Object.keys(hostile);
+
+  test("takes no description, serviceName, tags or iconUrl from the payer, however valid they are", () => {
+    const c = make();
+    c.recordPaid(P1, pay({ resource: echoed }), accept());
+    const item = one(everything(c));
+    for (const field of FIELDS) expect(item).not.toHaveProperty(field);
+    expect(item).toStrictEqual({
+      resource: "http://127.0.0.1:4021/chunk",
+      type: "http",
+      x402Version: 2,
+      accepts: [ACCEPT_500],
+      lastUpdated: ISO0,
+      mimeType: "text/plain",
+      extensions: { bazaar: bazaar("GET") },
+      paidCallsToday: 1,
+    });
+  });
+
+  test("writes none of them to the file, and a search by their text finds nothing", async () => {
+    const c = make({ file: file() });
+    c.recordPaid(P1, pay({ resource: echoed }), accept());
+    await c.flush();
+    const text = readFileSync(file(), "utf8");
+    for (const word of ["PayPal", "support", "tracker.attacker", "Official"]) expect(text).not.toContain(word);
+    expect(c.search(parseSearchQuery({ query: "paypal" })).resources).toStrictEqual([]);
+    expect(c.search(parseSearchQuery({ query: "official" })).resources).toStrictEqual([]);
+  });
+
+  test("takes no extension but bazaar, and that one only while { bazaar } is at most 8192 bytes", () => {
+    const c = make();
+    const extensions = { bazaar: bazaar("GET"), z402: { note: "FAKE" }, "x402-other": { x: 1 } };
+    c.recordPaid(P1, pay({ extensions }), accept());
+    expect(one(everything(c)).extensions).toStrictEqual({ bazaar: bazaar("GET") });
+    // The wrapper around bazaar takes 11 of the 8192 bytes
+    c.recordPaid(P1, pay({ resource: { url: "http://h/big" }, extensions: { bazaar: sized(8181) } }), accept());
+    c.recordPaid(P1, pay({ resource: { url: "http://h/huge" }, extensions: { bazaar: sized(8182) } }), accept());
+    expect(resources(c)).toStrictEqual(["http://127.0.0.1:4021/chunk", "http://h/big"]);
+  });
+
+  test("a provider that declared keeps every field it declared, beside one that is listed from payments", () => {
+    const c = make();
+    const optional = {
+      description: "A chunk of text",
+      mimeType: "text/plain",
+      serviceName: "chunk",
+      tags: ["demo", "text"],
+      iconUrl: "https://cdn.example.com/chunk.png",
+      extensions: { bazaar: bazaar("GET"), z402: { note: "kept" } },
+    };
+    c.declare(P1, body(decl(optional)));
+    c.recordPaid(P2, pay({ resource: echoed }), accept({}, P2));
+    const items = everything(c);
+    const declared = items.find((i) => i.accepts[0]?.payTo === PAY_TO);
+    const listed = items.find((i) => i.accepts[0]?.payTo === OTHER_PAY_TO);
+    expect(declared).toMatchObject(optional);
+    for (const field of FIELDS) expect(listed).not.toHaveProperty(field);
+  });
+
+  describe("at most 8 items per provider", () => {
+    const urls = (n: number, from = 0) => Array.from({ length: n }, (_, i) => `http://h/${from + i}`);
+    const paidFor = (c: Catalog, p: CatalogProvider, list: string[]) => {
+      for (const url of list) c.recordPaid(p, pay({ resource: { url } }), accept({}, p));
+    };
+
+    test("the 9th distinct resource from payments creates nothing", () => {
+      const c = make();
+      paidFor(c, P1, urls(9));
+      expect(resources(c)).toStrictEqual(urls(8));
+    });
+
+    test("a payment for a resource that is listed still counts when the provider is at the cap", () => {
+      const c = make();
+      paidFor(c, P1, urls(9));
+      paidFor(c, P1, ["http://h/3", "http://h/3"]);
+      expect(everything(c).map((i) => [i.resource, i.paidCallsToday])).toContainEqual(["http://h/3", 3]);
+      expect(resources(c)).toStrictEqual(urls(8));
+    });
+
+    test("the cap is per provider", () => {
+      const c = make();
+      paidFor(c, P1, urls(9));
+      paidFor(c, P2, urls(9));
+      expect(everything(c)).toHaveLength(16);
+      expect(c.list(parseListQuery({ payTo: PAY_TO, limit: "100" })).pagination.total).toBe(8);
+      expect(c.list(parseListQuery({ payTo: OTHER_PAY_TO, limit: "100" })).pagination.total).toBe(8);
+    });
+
+    test("is logged once per provider, however often it is hit, and never names a URL", () => {
+      const c = make();
+      paidFor(c, P1, urls(12));
+      paidFor(c, P1, urls(12, 20));
+      expect(log).toHaveBeenCalledTimes(1);
+      paidFor(c, P2, urls(12));
+      expect(log).toHaveBeenCalledTimes(2);
+      const lines = log.mock.calls.map((call) => String(call[0]));
+      expect(lines[0]).toContain(P1.id);
+      expect(lines[1]).toContain(P2.id);
+      expect(lines.join("\n")).not.toContain("h/");
+    });
+
+    test("is not logged for a payment that could not list an item anyway", () => {
+      const c = make();
+      paidFor(c, P1, urls(8));
+      c.recordPaid(P1, pay({ resource: { url: "http://h/no-bazaar" }, extensions: undefined }), accept());
+      c.recordPaid(P1, pay({ resource: { url: "http://h/no-terms" } }), accept({ amount: "0" }));
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    test("is set by maxPaymentItemsPerProvider", () => {
+      const c = make({ maxPaymentItemsPerProvider: 2 });
+      paidFor(c, P1, urls(3));
+      expect(resources(c)).toStrictEqual(urls(2));
+    });
+
+    test("counts the items that payments created and no declared one", () => {
+      const declaredItem = (resource: string) => ({
+        providerId: P1.id,
+        resource,
+        method: "GET",
+        accepts: [ACCEPT_500],
+        source: "declared",
+        firstListed: ISO0,
+        lastSeen: ISO0,
+        paidCount: 0,
+      });
+      const lost = { version: 1, declared: [], items: [declaredItem("http://h/d1"), declaredItem("http://h/d2")] };
+      writeFileSync(file(), JSON.stringify(lost));
+      const c = make({ file: file(), maxPaymentItemsPerProvider: 1 });
+      paidFor(c, P1, ["http://h/p1", "http://h/p2"]);
+      expect(resources(c)).toStrictEqual(["http://h/d1", "http://h/d2", "http://h/p1"]);
+    });
+
+    test("is no limit on what a provider declares, which the per-provider cap alone bounds", () => {
+      const c = make();
+      c.declare(P1, body(...urls(20).map((resource) => decl({ resource }))));
+      expect(everything(c)).toHaveLength(20);
     });
   });
 });
@@ -1815,7 +1941,7 @@ describe("persistence", () => {
         decl({ resource: "http://127.0.0.1:4021/b" }),
       ),
     );
-    a.recordPaid(P2, pay({ resource: { url: "http://h/paid", description: "from payment" } }), accept({}, P2));
+    a.recordPaid(P2, pay({ resource: { url: "http://h/paid", mimeType: "text/plain" } }), accept({}, P2));
     advance(MINUTE);
     a.recordPaid(P1, pay(), accept());
     const before = a.list(ALL);
@@ -2358,6 +2484,8 @@ describe("options", () => {
     ["a maxPerProvider of 0", { maxPerProvider: 0 }, /^maxPerProvider: /],
     ["a fractional maxPerProvider", { maxPerProvider: 1.5 }, /^maxPerProvider: /],
     ["a maxTotal of 0", { maxTotal: 0 }, /^maxTotal: /],
+    ["a maxPaymentItemsPerProvider of 0", { maxPaymentItemsPerProvider: 0 }, /^maxPaymentItemsPerProvider: /],
+    ["a fractional maxPaymentItemsPerProvider", { maxPaymentItemsPerProvider: 1.5 }, /^maxPaymentItemsPerProvider: /],
     ["a negative writeDelayMs", { writeDelayMs: -1 }, /^writeDelayMs: /],
     ["a fractional writeDelayMs", { writeDelayMs: 0.5 }, /^writeDelayMs: /],
   ])("load refuses %s", (_name, o, field) => {

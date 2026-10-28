@@ -1,6 +1,7 @@
 /**
  * What the Bazaar catalog accepts (design §4.4). A declaration is checked whole and strictly, and one bad item refuses
- * the call. A payment's client-echoed data goes through the same field checks, but a field that fails is dropped and
+ * the call. A payment lists less, since its payer echoes the resource and the extensions and nothing checks them: only
+ * the mimeType and the bazaar extension are read, through the same field checks, and a field that fails is dropped and
  * nothing is refused. Messages name a field and a rule and never a value, since a value may carry a query string.
  */
 import type { Network } from "@x402/core/types";
@@ -437,7 +438,8 @@ export function paymentFields(p: CatalogProvider, requirements: unknown, payment
   try {
     return {
       accepts: [parseAccept(p, requirements, "requirements")],
-      ...parseMeta(payment.info, "resource", true),
+      // The mimeType alone, since a payer echoes the rest and nothing checks it
+      ...parseMeta({ mimeType: payment.info.mimeType }, "resource", true),
       extensions: parseExtensions({ bazaar: payment.bazaar }, "extensions"),
     };
   } catch (e) {

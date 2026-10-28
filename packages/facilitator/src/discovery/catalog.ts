@@ -4,10 +4,11 @@
  * Items are keyed by provider, canonical resource and method, and come from two sources. A provider's declaration is
  * validated whole and upserts its items, which is also its liveness signal. A settled payment bumps the matching item,
  * and lists a new one only for a provider that has never declared, since the resource and extension of a payment are
- * echoed by the payer. A provider's first declaration removes the payment-sourced items it does not declare itself,
- * and is written to the file before declare returns, so that a crash cannot reopen a declaring provider to payment
- * listings. Every other change is written after a short delay (temp file, fsync, rename). If the file is lost, a
- * provider can be listed from payments only until its next declaration, which removes those items again.
+ * echoed by the payer. That item holds the URL, the terms the server verified, the bazaar extension and the mimeType,
+ * and a provider has at most a few of them. A provider's first declaration removes the payment-sourced items it does
+ * not declare itself, and is written to the file before declare returns, so that a crash cannot reopen a declaring
+ * provider to payment listings. Every other change is written after a short delay (temp file, fsync, rename). If the
+ * file is lost, a provider can be listed from payments only until its next declaration, which removes those items.
  */
 import { randomBytes } from "node:crypto";
 import {
@@ -68,6 +69,8 @@ export interface CatalogOptions {
   maxPerProvider?: number;
   /** Items in all, default 4096 */
   maxTotal?: number;
+  /** Items one provider may have that its payments listed, default 8 */
+  maxPaymentItemsPerProvider?: number;
   /** How long after a change the file is written, default 2000 */
   writeDelayMs?: number;
 }
@@ -104,6 +107,7 @@ export interface SearchResult {
 
 const DEFAULT_MAX_PER_PROVIDER = 128;
 const DEFAULT_MAX_TOTAL = 4096;
+const DEFAULT_MAX_PAYMENT_ITEMS_PER_PROVIDER = 8;
 const DEFAULT_WRITE_DELAY_MS = 2000;
 /** The longest delay setTimeout honours, past which Node fires it after 1 ms */
 const MAX_TIMER_MS = 2_147_483_647;
@@ -123,6 +127,7 @@ function checkOptions(o: CatalogOptions): void {
   }
   wholeNumber("maxPerProvider", o.maxPerProvider, 1);
   wholeNumber("maxTotal", o.maxTotal, 1);
+  wholeNumber("maxPaymentItemsPerProvider", o.maxPaymentItemsPerProvider, 1);
   wholeNumber("writeDelayMs", o.writeDelayMs, 0, MAX_TIMER_MS);
 }
 
@@ -186,6 +191,7 @@ export class Catalog {
   readonly #log: Log;
   readonly #maxPerProvider: number;
   readonly #maxTotal: number;
+  readonly #maxPaymentItemsPerProvider: number;
   readonly #writeDelayMs: number;
   readonly #items = new Map<string, Stored>();
   /** Providers that ever declared, whose payments therefore never create an item */
@@ -203,6 +209,7 @@ export class Catalog {
     this.#log = o.log ?? stderr;
     this.#maxPerProvider = o.maxPerProvider ?? DEFAULT_MAX_PER_PROVIDER;
     this.#maxTotal = o.maxTotal ?? DEFAULT_MAX_TOTAL;
+    this.#maxPaymentItemsPerProvider = o.maxPaymentItemsPerProvider ?? DEFAULT_MAX_PAYMENT_ITEMS_PER_PROVIDER;
     this.#writeDelayMs = o.writeDelayMs ?? DEFAULT_WRITE_DELAY_MS;
   }
 
@@ -314,6 +321,10 @@ export class Catalog {
     if (this.#declaring.has(p.id)) return;
     const fields = paymentFields(p, requirements, payment);
     if (fields === undefined) return;
+    if (this.#paymentItems(p) >= this.#maxPaymentItemsPerProvider) {
+      this.#warnOnce(p, "payments");
+      return;
+    }
     const full = this.#full(...this.#counts(p));
     if (full !== undefined) {
       this.#warnOnce(p, full);
@@ -350,6 +361,13 @@ export class Catalog {
   /** How many items this provider lists, and how many all providers do */
   #counts(p: CatalogProvider): [own: number, all: number] {
     return [[...this.#items.values()].filter((item) => item.providerId === p.id).length, this.#items.size];
+  }
+
+  /** How many items of this provider were listed by its payments */
+  #paymentItems(p: CatalogProvider): number {
+    let n = 0;
+    for (const item of this.#items.values()) if (item.providerId === p.id && item.source === "payment") n++;
+    return n;
   }
 
   /** Which cap one more item of this provider would break, if any */
@@ -392,15 +410,18 @@ export class Catalog {
     }
   }
 
-  #warnOnce(p: CatalogProvider, cap: "provider" | "total"): void {
-    const scope = cap === "provider" ? `provider ${p.id}` : "total";
+  #warnOnce(p: CatalogProvider, cap: "provider" | "total" | "payments"): void {
+    const scope = cap === "total" ? cap : `${cap} ${p.id}`;
     if (this.#warned.has(scope)) return;
     this.#warned.add(scope);
-    this.#say(
-      cap === "provider"
-        ? `catalog: provider ${p.id} is at its limit of ${this.#maxPerProvider} items, so new items are not listed`
-        : `catalog: the catalog is at its limit of ${this.#maxTotal} items, so new items are not listed`,
-    );
+    const limit = {
+      provider: `provider ${p.id} is at its limit of ${this.#maxPerProvider} items, so new items are not listed`,
+      payments:
+        `provider ${p.id} is at its limit of ${this.#maxPaymentItemsPerProvider} items listed from payments, ` +
+        "so new ones are not listed",
+      total: `the catalog is at its limit of ${this.#maxTotal} items, so new items are not listed`,
+    }[cap];
+    this.#say(`catalog: ${limit}`);
   }
 
   /** A logger that throws must not break a declaration or a settle */
