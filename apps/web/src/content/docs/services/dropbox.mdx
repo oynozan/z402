@@ -1,0 +1,367 @@
+export const meta = {
+  title: "Encrypted drop box",
+  description: "Pay 500 zat to store an age-encrypted file for 10 blocks, hand its id to another agent, and let it expire or pay to hold it longer.",
+};
+
+The encrypted drop box lets one agent hand a file to another. The sender encrypts the file, uploads it for 500 zat, and passes the id on. The receiver downloads it for free and decrypts it. The file is held for a number of <Term tip="A batch of transactions added to the chain. The chain counts time in blocks.">blocks</Term> and then it is gone.
+
+The service cannot read a file you encrypted first. It accepts only files in the [age](https://age-encryption.org) format and has no key to open them.
+
+<Callout type="privacy" title="Encrypt before you upload">
+
+The service stores exactly the bytes you send, and anyone who has a drop's id can download them. Only encryption keeps the content private. Encrypt with the receiver's age key, and keep that key out of the upload.
+
+</Callout>
+
+## At a glance
+
+| Property | Value |
+| --- | --- |
+| Paid routes | `POST /v1/drops` and `POST /v1/drops/:id/hold` |
+| Price | 500 zat per call, for both (`Z402_PRICE_ZAT` replaces it) |
+| One paid call buys | 10 blocks of storage (`DROPBOX_BLOCKS_PER_CALL`) |
+| Free routes | `GET /v1/drops/:id`, `DELETE /v1/drops/:id`, `GET /health` |
+| Default port | 4034 |
+| Provider | the operator |
+| Ready when | the chain tip is known |
+| Listed in the Bazaar as | "Encrypted drop box", tags `storage`, `handoff`, `encrypted` |
+
+## How it works
+
+```mermaid
+sequenceDiagram
+  participant A as Agent A
+  participant D as Drop box
+  participant B as Agent B
+  Note over A: Encrypt with B's age key
+  A->>D: POST /v1/drops with a voucher
+  D-->>A: id, delete token, expiry block
+  A->>B: The id, sent out of band
+  B->>D: GET /v1/drops/id
+  D-->>B: The encrypted bytes
+  Note over B: Decrypt with its age key
+  A->>D: POST /v1/drops/id/hold, optional
+  A->>D: DELETE /v1/drops/id, optional
+```
+
+1. **Encrypt.** The sender encrypts the file to the receiver's age public key.
+2. **Upload.** `POST /v1/drops` with the encrypted bytes costs 500 zat and returns the drop's `id`, a `deleteToken` and the block at which the drop expires.
+3. **Hand over.** The sender passes the `id` to the receiver by any channel. The receiver needs only the `id` and its own age key.
+4. **Download.** `GET /v1/drops/:id` is free. It returns the bytes and the expiry block in `X-Expires-At-Height`.
+5. **Hold or delete.** Another 500 zat holds the drop 10 blocks longer. The delete token removes it at once, for free.
+
+### Time is counted in blocks
+
+The drop box's clock is the chain. It reads the chain tip from lightwalletd (Zaino) every 10 seconds, and a drop is gone once the tip reaches its `expiresAtHeight`. An upload sets that height to the tip plus 10. Each hold adds 10 more, and no drop is ever held more than `DROPBOX_MAX_HOLD_BLOCKS` (1,000) past the current tip.
+
+How long a block lasts depends on the chain. It is about 25 seconds on the demo's regtest clock, so 10 blocks are about 4 minutes. Mainnet blocks averaged about 75 seconds before NU7, which would make 10 blocks about 12 minutes.
+
+| To hold a file for | Calls | Cost at 500 zat |
+| --- | --- | --- |
+| 10 blocks | 1 upload | 500 zat |
+| 100 blocks | 1 upload and 9 holds | 5,000 zat |
+| 1,000 blocks, the cap | 1 upload and 99 holds | 50,000 zat |
+
+When the tip is not known, for example while lightwalletd is down, the service starts and answers `GET /health` with 503, and it refuses paid calls. Downloads and deletes keep working and nothing expires. After a chain restart with the directory kept, every expiry is pulled back to at most the new tip plus `DROPBOX_MAX_HOLD_BLOCKS`.
+
+## The routes
+
+<Endpoint method="POST" path="/v1/drops">
+
+Stores one age-encrypted file. Paid: 500 zat per call. The body is the raw bytes of the file, in age's binary form or its ASCII armor, up to `DROPBOX_MAX_BYTES` (1 MiB). Send no `Content-Encoding`, since ciphertext does not compress. The answer is `201`.
+
+</Endpoint>
+
+The upload answer:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The drop's id: 16 random bytes as 22 base64url characters. |
+| `deleteToken` | string | The only credential that deletes the drop. It is shown once. |
+| `size` | integer | The stored size in bytes. |
+| `tip` | integer | The chain tip when the call was handled. |
+| `expiresAtHeight` | integer | The drop is gone once the tip reaches this height. |
+
+<Endpoint method="POST" path="/v1/drops/:id/hold">
+
+Holds an existing drop 10 more blocks. Paid: 500 zat per call. No body. The answer is `200` with `id`, `tip` and the new `expiresAtHeight`. A hold that would take the drop more than 1,000 blocks past the tip is refused with `409 hold_cap_reached`.
+
+</Endpoint>
+
+<Endpoint method="GET" path="/v1/drops/:id" auth="public">
+
+Downloads a drop. Free: no payment, so use a plain `fetch`. The answer is the stored bytes as a download. It carries `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `X-Expires-At-Height`, so a browser saves the bytes and never renders them.
+
+</Endpoint>
+
+<Endpoint method="DELETE" path="/v1/drops/:id">
+
+Deletes a drop at once. Free: no payment, but it needs the delete token from the upload's answer, sent as `Authorization: Bearer <token>`. The answer is `204`. Without a token it answers `401 unauthorized` with `WWW-Authenticate: Bearer`. A wrong token gets `403 forbidden`, and an unknown or expired drop gets `404 unknown_drop`. The server keeps a SHA-256 of the token and never the token itself.
+
+</Endpoint>
+
+```http
+DELETE /v1/drops/q3Zs0mYbT7cWpAxK1nGhUw HTTP/1.1
+Authorization: Bearer m4X1rVd9Tq0uYb7LkGfH2sNaPzE8cJwO5iRtBvQeXyA
+```
+
+### See the offer
+
+<CodeTabs>
+
+```bash title="curl"
+curl -si http://127.0.0.1:4034/v1/drops \
+  -H 'content-type: application/octet-stream' \
+  --data-binary @note.age
+```
+
+```http title="402 response"
+HTTP/1.1 402 Payment Required
+Content-Type: application/json; charset=utf-8
+PAYMENT-REQUIRED: eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJQYXltZW50IHJlcXVpcmVkIiw...
+Cache-Control: no-store
+
+{}
+```
+
+```json title="Header, decoded and abridged"
+{
+  "x402Version": 2,
+  "error": "Payment required",
+  "resource": {
+    "url": "http://localhost:4034/v1/drops",
+    "description": "Holds one age-encrypted blob for 10 blocks; pay again to hold it longer.",
+    "mimeType": "application/json",
+    "serviceName": "Encrypted drop box",
+    "tags": ["storage", "handoff", "encrypted"]
+  },
+  "accepts": [
+    {
+      "scheme": "prepaid-voucher",
+      "network": "zcash:regtest",
+      "amount": "500",
+      "asset": "ZEC",
+      "payTo": "uregtest1...",
+      "maxTimeoutSeconds": 60,
+      "extra": {
+        "windowZat": "100000",
+        "creditRatioBps": 2500,
+        "creditCapZat": "200000",
+        "zeroConfMinExpiryBlocks": 20,
+        "termsVersion": "c41e8a07b2d5f963"
+      }
+    }
+  ],
+  "extensions": {
+    "z402": {
+      "unit": "10 blocks",
+      "note": "Only client-side encrypted (age) blobs. Size and time are capped."
+    }
+  }
+}
+```
+
+```json title="Upload answer"
+{
+  "id": "q3Zs0mYbT7cWpAxK1nGhUw",
+  "deleteToken": "m4X1rVd9Tq0uYb7LkGfH2sNaPzE8cJwO5iRtBvQeXyA",
+  "size": 349,
+  "tip": 1042,
+  "expiresAtHeight": 1052
+}
+```
+
+```json title="Hold answer"
+{
+  "id": "q3Zs0mYbT7cWpAxK1nGhUw",
+  "tip": 1046,
+  "expiresAtHeight": 1062
+}
+```
+
+</CodeTabs>
+
+## Make the file
+
+Create a key pair once. The public key (`age1...`) goes to senders. The private key stays with the receiver.
+
+```bash
+age-keygen -o key.txt                      # prints the public key, age1...
+age -r age1... -o note.age note.txt        # add -a for ASCII armor
+```
+
+From code, use the [`age-encryption`](https://github.com/FiloSottile/typage) package, a TypeScript implementation of age. The example below makes the whole trip in one script, with both agents played by the same process:
+
+<CodeTabs>
+
+```ts title="call.ts"
+import { Decrypter, Encrypter, generateIdentity, identityToRecipient } from "age-encryption";
+import { close, paidFetch } from "./paid-fetch.js";
+
+const service = "http://127.0.0.1:4034";
+
+// The receiver makes a key pair. Only the recipient string (age1...) is shared.
+const identity = await generateIdentity();
+const recipient = await identityToRecipient(identity);
+
+// The sender encrypts to it. The service never sees the plaintext or either key.
+const encrypter = new Encrypter();
+encrypter.addRecipient(recipient);
+const file = await encrypter.encrypt("the build is ready for review");
+
+try {
+  // Upload: paid, 500 zat, held for 10 blocks.
+  const up = await paidFetch(`${service}/v1/drops`, { method: "POST", body: new Uint8Array(file) });
+  if (up.status !== 201) throw new Error(`${up.status} ${await up.text()}`);
+  const drop = (await up.json()) as { id: string; deleteToken: string; expiresAtHeight: number };
+  console.log(`held until block ${drop.expiresAtHeight}`);
+
+  // Hold: paid, 500 zat, 10 blocks more. Optional.
+  const hold = await paidFetch(`${service}/v1/drops/${drop.id}/hold`, { method: "POST" });
+  if (!hold.ok) throw new Error(`${hold.status} ${await hold.text()}`);
+
+  // Download: free, so a plain fetch and no voucher.
+  const down = await fetch(`${service}/v1/drops/${drop.id}`);
+  const decrypter = new Decrypter();
+  decrypter.addIdentity(identity);
+  console.log(await decrypter.decrypt(new Uint8Array(await down.arrayBuffer()), "text"));
+
+  // Delete: free, with the token only the uploader has.
+  await fetch(`${service}/v1/drops/${drop.id}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${drop.deleteToken}` },
+  });
+} finally {
+  await close();
+}
+```
+
+```ts title="paid-fetch.ts"
+import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
+import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402/client";
+import { createLightwalletdClient } from "@z402/lightwalletd";
+import { NETWORK_REGTEST } from "@z402/protocol";
+
+// Zallet pays the deposit and lightwalletd (Zaino) reports its status.
+// These are the Z3 regtest defaults.
+const wallet = new ZalletRpcWallet({
+  url: "http://127.0.0.1:50232",
+  user: "zebra",
+  password: process.env.ZALLET_PASSWORD ?? "zebra",
+});
+const lwd = createLightwalletdClient({ url: "http://127.0.0.1:28137" });
+const scheme = new PrepaidVoucherScheme({ wallet, chain: new LightwalletdTxStatus(lwd) });
+
+// The one line that adds Zcash to the stock x402 client
+export const paidFetch = wrapFetchWithPayment(fetch, new x402Client().register(NETWORK_REGTEST, scheme));
+
+/** Lets a deposit in flight finish, then closes the wallet and the chain client. */
+export async function close(): Promise<void> {
+  await scheme.close();
+  lwd.close();
+}
+```
+
+</CodeTabs>
+
+The free routes use the plain `fetch` on purpose. A free route that asked for payment would show up as a 402 instead of being paid. The script needs a funded wallet and a running service: [Make a paid call](/docs/services#make-a-paid-call) names the stack that `paid-fetch.ts` reaches, and [Pay from an agent](/docs/guides/pay-from-an-agent) explains the setup.
+
+## Limits and refusals
+
+Everything that can be refused is refused on the unpaid first attempt, before a <Term tip="A message the agent signs for each call. It states the agent's running total, so the facilitator can check it against the deposit.">voucher</Term> exists, so a refused call costs nothing.
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 400 | `empty_body` | The upload has no body. |
+| 400 | `bad_request` | The path is not valid percent-encoding. |
+| 400 | `bad_body` | The body could not be read. |
+| 404 | `unknown_drop` | A hold, download or delete for a drop that is unknown or expired. |
+| 405 | `method_not_allowed` | A method the route does not take. |
+| 409 | `hold_cap_reached` | A hold would take the drop past `DROPBOX_MAX_HOLD_BLOCKS` beyond the tip. `maxHoldBlocks` says how many. |
+| 409 | `payment_in_flight` | The same voucher is already paying for a call. |
+| 413 | `too_large` | The body is over `DROPBOX_MAX_BYTES` (1 MiB). |
+| 415 | `not_encrypted` | The body does not look like an age file. `reason` says why. |
+| 415 | `unsupported_encoding` | The body has a `Content-Encoding`, which ciphertext never needs. |
+| 429 | `rate_limited` | More than `DROPBOX_RATE_PER_MIN` (30) upload attempts from one client in a minute. `Retry-After` says when to try again. |
+| 503 | `not_ready` | The chain tip is not known. |
+| 507 | `storage_full` | The drops on disk would pass `DROPBOX_MAX_TOTAL_BYTES` (256 MiB). |
+
+The rate counts attempts, not uploads. The paid retry of an attempt that passed its checks is not counted, so a client within its rate is never refused once it has paid. A paid attempt that no checked attempt came before counts like any other. An IPv6 client counts per /64.
+
+### When a paid call does not deliver
+
+A drop is stored when the paid call reaches the handler, and it is removed again if the call then fails to deliver, for example when the facilitator refuses to settle. A hold is applied only once its call was delivered, and a drop whose last block lands while one of its holds settles is kept for it.
+
+Two uploads that pass their checks at the same moment may not both fit. The one that does not is refused `507` after its voucher is verified, and it is not settled. The stock client counts such a call, and its next voucher pays for it.
+
+## The age check
+
+An upload must start with the age v1 header (`age-encryption.org/v1`, one or more recipient stanzas, a header MAC line) or be the ASCII armor of one. Its payload must be at least 32 bytes and look like ciphertext: an entropy of at least 7 bits per byte from 512 bytes up, and enough distinct byte values below that.
+
+This is a plausibility check and not proof. The header MAC cannot be checked without the file key, and nothing can tell ciphertext from random bytes, so someone can wrap garbage or plaintext in that shape and get it stored. What the check catches is the honest mistake of uploading plaintext, JSON or a key file.
+
+## Privacy
+
+- **The operator cannot read a file.** It stores the bytes you send and has no key. It can see the file's size, when it arrived, the drop id and the IP address of the uploader and of every downloader.
+- **Anyone with the id can download the ciphertext.** The download is free and has no login. The id is 128 random bits, so it cannot be guessed, but anyone you give it to can fetch the bytes. Only the age key decides who can read them.
+- **The delete token is the uploader's alone.** Only the upload's answer carries it, and the server keeps a hash.
+- **The facilitator sees the payment, not the file.** The voucher, the price and the route's public URL.
+- **Size is not hidden.** The ciphertext is a little larger than the plaintext.
+
+See [Privacy model](/docs/concepts/privacy) for what the payment itself reveals.
+
+## Run it yourself
+
+The service needs the facilitator (`Z402_FACILITATOR_URL`) and a lightwalletd endpoint (Zaino, `DROPBOX_LWD_URL`) for the chain tip. Run one process per `DROPBOX_DIR`.
+
+```bash
+cp services/dropbox/.env.example services/dropbox/.env   # set the facilitator URL and key, and Z402_PAY_TO
+pnpm --filter @z402/service-dropbox start
+```
+
+The ready line goes to stdout. Logs go to stderr.
+
+```text
+dropbox listening on http://127.0.0.1:4034 network=zcash:regtest dir=/.../.data/dropbox
+```
+
+Every problem exits 1 with a `dropbox: ...` line that names the variable at fault. Under Docker, compose reads `docker/env/dropbox.env` first, then `services/dropbox/.env`, which wins. Compose puts `DROPBOX_DIR` on the `dropbox-data` volume and `DROPBOX_LWD_URL` at Zaino, so leave those two out of `.env` there. See [Deploy with Docker](/docs/guides/deploy-with-docker).
+
+### Settings
+
+The variables every service shares (`Z402_NETWORK`, `Z402_FACILITATOR_URL`, `Z402_FACILITATOR_TOKEN`, `Z402_PAY_TO`, `Z402_PRICE_ZAT`, `PUBLIC_URL`, `HOST`, `PORT`) are listed under [LLM inference](/docs/services/llm#settings). Here `Z402_PRICE_ZAT` defaults to 500, for an upload and a hold alike, and `PORT` to 4034. Its own:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DROPBOX_DIR` | `.data/dropbox` | Where the drops live, as `<id>.age` and `<id>.json`. A relative path is relative to the working directory. |
+| `DROPBOX_MAX_BYTES` | `1048576` | Largest upload. |
+| `DROPBOX_MAX_TOTAL_BYTES` | `268435456` | Largest total of all stored uploads. |
+| `DROPBOX_BLOCKS_PER_CALL` | `10` | Blocks one paid call buys. |
+| `DROPBOX_MAX_HOLD_BLOCKS` | `1000` | A drop is never held more than this many blocks past the tip. |
+| `DROPBOX_LWD_URL` | `http://127.0.0.1:28137` | The lightwalletd gRPC endpoint. `http://` means plaintext. |
+| `DROPBOX_TIP_POLL_MS` | `10000` | How often the tip is read, 100 to 30,000. |
+| `DROPBOX_RATE_PER_MIN` | `30` | Upload attempts per minute per client, refused before the body is read. |
+
+## Next steps
+
+<Cards>
+<Card title="Pay from an agent" href="/docs/guides/pay-from-an-agent">Set up the wallet and the client for your own agent.</Card>
+<Card title="Privacy model" href="/docs/concepts/privacy">What each party sees of a paid call.</Card>
+<Card title="Deploy with Docker" href="/docs/guides/deploy-with-docker">Run the drop box with the rest of the stack.</Card>
+</Cards>
+
+## References
+
+- <Source path="services/dropbox/src/service.ts" />: the routes, the checks before payment and delivery handling
+- <Source path="services/dropbox/src/age.ts" />: the age plausibility check
+- <Source path="services/dropbox/src/store.ts" />: the drops on disk, expiry and the delete token
+- <Source path="services/dropbox/src/tip.ts" />: the chain tip as the drop box's clock
+- <Source path="services/dropbox/src/limits.ts" />: the upload attempt rate limit
+- <Source path="services/dropbox/src/config.ts" />: the settings and their limits
+- <Source path="services/dropbox/README.md" />: routes, refusals and settings
+- <Source path="services/dropbox/.env.example" />: every variable with its default
+- <Source path="packages/service-kit/src/service.ts" />: the kit that adds the 402, `/health` and the Bazaar declarations
+- <Source path="docs/superpowers/specs/2026-10-27-z402-services-design.md" />: section 4.4, the service's contract
+- <Source path="docker/env/dropbox.env" />: the Docker defaults
+- [age](https://age-encryption.org) and the [age v1 format](https://age-encryption.org/v1)
+- [age-encryption (typage)](https://github.com/FiloSottile/typage)
