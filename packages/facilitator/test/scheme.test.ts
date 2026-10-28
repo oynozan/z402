@@ -753,7 +753,7 @@ describe("stale lookup results", () => {
     return d2;
   }
 
-  test("a cached deposit that died since is dead at settle and at verify, and never credited", async () => {
+  test("a cached deposit that died since is never credited, and verify reads it once to call it dead", async () => {
     const r = rig();
     const d2 = await needingD2(r);
     r.chain.hold(d2);
@@ -762,13 +762,14 @@ describe("stale lookup results", () => {
     const inspect = vi.spyOn(r.view, "inspect");
 
     const settled = await r.s.settle(pay(125500n, { txid: d2 }), req());
-    expect(settled).toMatchObject({ success: false, errorReason: REASON.depositDead, transaction: "" });
+    expect(settled).toMatchObject({ success: false, errorReason: REASON.chainUnavailable, transaction: "" });
     expect(sessionOf(settled).limitZat).toBe("125000");
+    expect(inspect).not.toHaveBeenCalled();
     const verdict = await r.s.verify(pay(125500n, { txid: d2 }), req());
     expect(verdict).toMatchObject({ isValid: false, invalidReason: REASON.depositDead });
+    expect(inspect).toHaveBeenCalledTimes(1);
 
     expect(creditedTxids(r.ledger)).not.toContain(d2);
-    expect(inspect).not.toHaveBeenCalled();
   });
 
   test("a found result older than 30 s is not evidence, so settle answers chain_unavailable", async () => {
@@ -787,6 +788,91 @@ describe("stale lookup results", () => {
     const inspect = vi.spyOn(r.view, "inspect");
     expect((await r.s.verify(pay(500n, { txid: d1 }), req())).isValid).toBe(true);
     expect(inspect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a cached unmined deposit once the tip reaches its expiry", () => {
+  /** K's over-limit call at tip 1039 caches d pending and not zero-conf, with expiry 1041 */
+  async function cachedNearExpiry(r: Rig): Promise<string> {
+    const d = send(r.chain);
+    r.chain.hold(d);
+    r.chain.mine(39);
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({
+      invalidReason: REASON.awaitingConfirmation,
+    });
+    expect(r.resolver.peek(d)).toMatchObject({
+      kind: "found",
+      tip: 1039,
+      inspection: { location: "mempool", expiryHeight: 1041 },
+    });
+    return d;
+  }
+
+  test.each([
+    ["one block before its expiry", 0],
+    ["in its expiry block", 1],
+  ])("is read again before any answer, so a deposit mined %s counts", async (_, heldBlocks) => {
+    const r = rig();
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(heldBlocks);
+    r.chain.unhold(d);
+    r.chain.mine(1);
+    r.chain.mine(1 - heldBlocks);
+    await r.watcher.pollNow();
+    expect(r.watcher.lastTip()).toBe(1041);
+    const inspect = vi.spyOn(r.view, "inspect");
+
+    expect((await r.s.verify(pay(500n, { txid: d }), req())).isValid).toBe(true);
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(await r.s.settle(pay(500n, { txid: d }), req())).toMatchObject({ success: true, transaction: d });
+  });
+
+  test("settle never calls it dead from the cache alone, it answers chain_unavailable", async () => {
+    const r = rig();
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+
+    expect(await r.s.settle(pay(500n, { txid: d }), req())).toMatchObject({
+      success: false,
+      errorReason: REASON.chainUnavailable,
+    });
+    expect(r.ledger.replay()).toEqual([]);
+  });
+
+  test("a fresh read that finds it gone past its expiry calls it dead", async () => {
+    const r = rig();
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({ invalidReason: REASON.depositDead });
+  });
+
+  test("a fresh read that sees it unmined at a tip past its expiry calls it dead", async () => {
+    let d = "";
+    const r = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => (txid === d && r.chain.height >= 1041 ? mempoolDeposit(txid, 1041) : view.inspect(txid)),
+    }));
+    d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({ invalidReason: REASON.depositDead });
+  });
+
+  test("a fresh read that fails answers chain_unavailable, never dead", async () => {
+    const r = rig();
+    const d = await cachedNearExpiry(r);
+    r.chain.mine(2);
+    await r.watcher.pollNow();
+    r.chain.setUnavailable(true);
+
+    expect(await r.s.verify(pay(500n, { txid: d }), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.chainUnavailable,
+    });
   });
 });
 
