@@ -105,6 +105,12 @@ services:
       - -c
       - |
         set -eu
+        # Compose refuses an empty registration token below, and this refuses a short one before the wait for
+        # lightwalletd, which can last ten minutes. The facilitator refuses one under 32 characters as well
+        if [ "$${#Z402_REGISTRATION_TOKEN}" -lt 32 ]; then
+          echo "facilitator: Z402_REGISTRATION_TOKEN has fewer than 32 characters, so POST /providers would be open to guesses (scripts/vps.sh init makes a good one)" >&2
+          exit 1
+        fi
         node --import tsx docker/wait-lightwalletd.mjs
         exec node --import tsx packages/facilitator/src/main.ts
     environment:
@@ -118,8 +124,11 @@ services:
       Z402_UIVK: ${Z402_UIVK:-}
       # The operator's API key, which the demo API and the starter services present
       Z402_FACILITATOR_TOKEN: ${Z402_FACILITATOR_TOKEN:-}
-      # POST /providers needs it. At least 32 characters, else the facilitator refuses to start
-      Z402_REGISTRATION_TOKEN: ${Z402_REGISTRATION_TOKEN:-}
+      # POST /providers needs it, and without one the facilitator lets anyone register. So this fails closed under plain
+      # docker compose too, not only under scripts/vps.sh: an empty or unset value stops every compose command with the
+      # message below, a value under 32 characters stops the container (the command above), and the facilitator
+      # refuses one that is short as well. The message has no colon followed by a space, which would end the YAML scalar
+      Z402_REGISTRATION_TOKEN: "${Z402_REGISTRATION_TOKEN:?Z402_REGISTRATION_TOKEN is empty or not set, and POST /providers would be open to anyone. Run scripts/vps.sh init, or put 32 or more random characters in .env.vps}"
       Z402_MAX_PROVIDERS: ${Z402_MAX_PROVIDERS:-32}
       # The operator's ledger, and the registered providers with their ledgers and the service catalog, on one volume
       # (the image's /data is the mount point that belongs to the node user): they are backed up and restored together

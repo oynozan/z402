@@ -12,8 +12,21 @@
 	# Caddy's admin API stays on localhost inside the container, and only the healthcheck asks it, every 15 s, which
 	# the log has no use for
 	admin localhost:2019
+	# No site has an access log, so this one log holds Caddy's errors. A request that fails while a service restarts or is
+	# killed (a 502) is logged whole, with every header and the URI, and Caddy hides only Cookie and Authorization by
+	# itself. A voucher travels in PAYMENT-SIGNATURE (or X-PAYMENT) and a drop's id in the path, and the Docker log is what
+	# `scripts/vps.sh logs` prints, so these are cut from every entry before it is written
 	log {
 		exclude admin.api
+		format filter {
+			wrap json
+			fields {
+				request>headers>Payment-Signature delete
+				request>headers>X-Payment delete
+				request>headers>Authorization delete
+				request>uri delete
+			}
+		}
 	}
 }
 
@@ -26,7 +39,7 @@
 
 # Every site. The cap on a request body is above the largest upload the services take (DROPBOX_MAX_BYTES, 1 MiB), so
 # raise it together with that setting. There is no access log on purpose: a voucher travels in a request header, and a
-# drop's id in the path is all it takes to fetch the drop.
+# drop's id in the path is all it takes to fetch the drop. The error log of the global block above leaves out the same.
 (site) {
 	import tls_{$Z402_TLS:acme}
 	request_body {
@@ -51,7 +64,8 @@ www.{$Z402_DOMAIN:z402.net} {
 }
 
 # The facilitator is public on purpose: providers register here and call /verify and /settle with their API keys, and
-# the catalog is public. POST /providers needs Z402_REGISTRATION_TOKEN, which scripts/vps.sh up will not start without.
+# the catalog is public. POST /providers needs Z402_REGISTRATION_TOKEN, without which compose.vps.yaml will not start
+# (docker compose itself refuses, and scripts/vps.sh up says why before it asks).
 facilitator.{$Z402_DOMAIN:z402.net} {
 	import site
 	reverse_proxy facilitator:4022

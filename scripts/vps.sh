@@ -42,7 +42,7 @@ usage: scripts/vps.sh <command>
   down                   remove the containers and keep every volume
   update                 git pull --ff-only, then up
   backup                 a tar.gz of the ledger and the registered providers, in .data/backups/
-  restore <file>         empty the facilitator's data volume and put a backup in it
+  restore <file>         replace the facilitator's data volume with a backup (the volume is saved first)
 
 The runbook is docs/deploy-vps.md, and every setting is in .env.vps.example.
 EOF
@@ -64,10 +64,11 @@ env_get() {
   printf '%s' "$value"
 }
 
-# NAME as docker compose reads it: the environment first, then .env.vps
+# NAME as docker compose reads it: the environment first, then .env.vps. A variable that is exported and empty wins too,
+# which is how an empty export can hide a good value in the file
 setting() {
   local name=$1
-  printf '%s' "${!name:-$(env_get "$name")}"
+  if [ -n "${!name+set}" ]; then printf '%s' "${!name}"; else env_get "$name"; fi
 }
 
 # Replaces the NAME= lines of .env.vps, or adds them: set_env NAME VALUE [NAME VALUE]... A value never reaches a command
@@ -113,11 +114,18 @@ need_docker() {
     die "cannot reach the Docker daemon: is it running, and does this user belong to the docker group (or use sudo)?"
 }
 
-# docker compose with the settings of this deployment. A trial on one machine (Z402_TLS=internal) adds its override
+# Sets the array compose_cmd, the docker compose command line with the settings of this deployment. A trial on one machine
+# (Z402_TLS=internal) adds its override
+compose_base() {
+  compose_cmd=(docker compose -f compose.vps.yaml)
+  if [ "$(setting Z402_TLS)" = internal ]; then compose_cmd+=(-f compose.vps.local.yaml); fi
+  compose_cmd+=(--env-file "$env_file")
+}
+
 compose() {
-  local files=(-f compose.vps.yaml)
-  if [ "$(setting Z402_TLS)" = internal ]; then files+=(-f compose.vps.local.yaml); fi
-  docker compose "${files[@]}" --env-file "$env_file" "$@"
+  local compose_cmd
+  compose_base
+  "${compose_cmd[@]}" "$@"
 }
 
 services_on() {
@@ -265,16 +273,28 @@ cmd_keys() {
 
 # up, status ----------------------------------------------------------------------------------------------------------
 
+# Z402_REGISTRATION_TOKEN must have 32 characters or more wherever docker compose can read it from: .env.vps, and the
+# environment, which compose prefers to the file even when the variable is empty. Without a token POST /providers is open
+# to anyone. Compose refuses an empty one and the facilitator a short one as well, so this only says why before anything
+# is built. It tells the length and never the value
+check_registration_token() {
+  local from_file
+  from_file=$(env_get Z402_REGISTRATION_TOKEN)
+  [ ${#from_file} -ge 32 ] ||
+    die "Z402_REGISTRATION_TOKEN in $env_file is empty or has fewer than 32 characters, and registration would be open to anyone (scripts/vps.sh init fills it)"
+  if [ -n "${Z402_REGISTRATION_TOKEN+set}" ] && [ ${#Z402_REGISTRATION_TOKEN} -lt 32 ]; then
+    die "Z402_REGISTRATION_TOKEN is exported in this shell and is empty or has fewer than 32 characters, and docker compose prefers it to $env_file: unset it (unset Z402_REGISTRATION_TOKEN)"
+  fi
+}
+
 # Refuses to start on a setting that would only fail later
 preflight() {
-  local name registration kind
+  local name kind
   need_env
-  for name in Z402_DOMAIN Z402_FACILITATOR_TOKEN Z402_REGISTRATION_TOKEN; do
+  for name in Z402_DOMAIN Z402_FACILITATOR_TOKEN; do
     [ -n "$(env_get "$name")" ] || die "$name is empty in $env_file (scripts/vps.sh init fills the tokens)"
   done
-  registration=$(env_get Z402_REGISTRATION_TOKEN)
-  [ ${#registration} -ge 32 ] ||
-    die "Z402_REGISTRATION_TOKEN has fewer than 32 characters, and the facilitator refuses to start with it"
+  check_registration_token
   if [ -z "$(env_get Z402_PAY_TO)" ] || [ -z "$(env_get Z402_UIVK)" ]; then
     die "the operator's keys are not imported: run scripts/vps.sh keys, which explains how to make them without putting the seed on this server"
   fi
@@ -349,8 +369,9 @@ diagnose() {
   if [ -n "$unstarted" ]; then printf '\nNot started yet:%s\n' "$unstarted" >&2; fi
 }
 
+# Waits until every service is healthy, or until $SECONDS reaches the deadline in $1
 wait_healthy() {
-  local deadline=$((SECONDS + wait_seconds)) last="" ok_count pending_count bad_count terminal_count summary
+  local deadline=$1 last="" ok_count pending_count bad_count terminal_count summary
   printf 'Waiting up to %s s for every service to be healthy...\n' "$wait_seconds"
   while :; do
     check_services
@@ -374,6 +395,32 @@ wait_healthy() {
   done
 }
 
+# docker compose up, stopped when $SECONDS reaches the deadline in $1: it returns 124 then, and compose's own status
+# otherwise. Compose waits without end for a service that others depend on and that is still starting (the facilitator
+# may wait ten minutes for lightwalletd), so a plain up can outlast Z402_WAIT_SECONDS and never get to diagnose
+compose_up() {
+  local deadline=$1 pid status=0 compose_cmd i
+  compose_base
+  "${compose_cmd[@]}" up -d --build --remove-orphans &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      # The docker CLI passes the signal on to the compose plugin
+      kill "$pid" 2>/dev/null || true
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+      done
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+  done
+  wait "$pid" || status=$?
+  return "$status"
+}
+
 # The origin of a site as agents see it: https://<prefix><domain>, with the HTTPS port when a trial publishes another one
 site_url() {
   local port
@@ -382,7 +429,7 @@ site_url() {
 }
 
 cmd_up() {
-  local service
+  local service deadline up_status=0
   preflight
   need_docker
   # A starter service that an earlier run started stays up when the profile is turned off, since compose leaves the
@@ -398,11 +445,21 @@ cmd_up() {
   for service in facilitator web caddy; do
     compose build "$service" || die "the build of $service failed (a network error is retried by running scripts/vps.sh up again; the steps that finished are kept)"
   done
-  if ! compose up -d --build --remove-orphans; then
-    diagnose
-    die "docker compose up failed: the state and logs above say which service and why"
-  fi
-  wait_healthy
+  # One deadline for compose up and for the wait after it, which start once the images are built
+  deadline=$((SECONDS + wait_seconds))
+  compose_up "$deadline" || up_status=$?
+  case $up_status in
+    0) ;;
+    124)
+      diagnose
+      die "docker compose up did not finish within $wait_seconds s (Z402_WAIT_SECONDS): a service it waits for was still not healthy. The state and logs above say which and why"
+      ;;
+    *)
+      diagnose
+      die "docker compose up failed: the state and logs above say which service and why"
+      ;;
+  esac
+  wait_healthy "$deadline"
 
   printf '\nz402 is up on testnet:\n'
   printf '  site         %s\n' "$(site_url "")"
@@ -463,6 +520,29 @@ cmd_update() {
 
 # backup, restore -----------------------------------------------------------------------------------------------------
 
+# Where the facilitator keeps its state in its data volume (Z402_LEDGER and Z402_PROVIDERS_DIR of compose.vps.yaml): the
+# operator's ledger, written at the first start, and the providers directory, whose registry.json exists from the first
+# registration on
+ledger_name='facilitator-ledger.testnet.jsonl'
+providers_name='providers.testnet'
+
+# Writes a tar.gz of the facilitator's data volume to $1 and returns 0, or removes it and returns 1. The facilitator's
+# data volume holds the operator's ledger and the providers directory (the registry with every provider's viewing key,
+# their ledgers and the catalog). The archive goes through stdout, so that no host directory is mounted and the file
+# belongs to whoever runs this. A lock file is left out, since it belongs to a process
+archive_volume() {
+  local out=$1
+  if ! (umask 077 && compose run --rm -T --no-deps --entrypoint tar facilitator \
+    -czf - --exclude='*.lock' --exclude='*.lock.takeover' -C /data . >"$out"); then
+    rm -f "$out"
+    return 1
+  fi
+  if ! tar -tzf "$out" >/dev/null 2>&1; then
+    rm -f "$out"
+    return 1
+  fi
+}
+
 cmd_backup() {
   local out entries
   need_docker
@@ -470,40 +550,67 @@ cmd_backup() {
   mkdir -p "$backup_dir"
   chmod 700 "$backup_dir"
   out="$backup_dir/z402-vps-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
-  # The facilitator's data volume holds the operator's ledger and the providers directory (the registry with every
-  # provider's viewing key, their ledgers and the catalog). The archive goes through stdout, so that no host directory
-  # is mounted and the file belongs to whoever runs this. A lock file is left out, since it belongs to a process
-  if ! (umask 077 && compose run --rm -T --no-deps --entrypoint tar facilitator \
-    -czf - --exclude='*.lock' --exclude='*.lock.takeover' -C /data . >"$out"); then
-    rm -f "$out"
-    die "the backup failed"
-  fi
-  tar -tzf "$out" >/dev/null 2>&1 || {
-    rm -f "$out"
-    die "the backup is not a readable archive"
-  }
+  archive_volume "$out" || die "the backup failed or is not a readable archive (the output above says why)"
   entries=$(tar -tzf "$out" | grep -c -v '/$' || true)
   [ "$entries" -gt 0 ] || warn "the archive holds no file yet: the facilitator has not written its ledger"
   printf 'Backup: %s (%s bytes, %s files)\n' "$out" "$(wc -c <"$out" | tr -d ' ')" "$entries"
   printf 'It holds every provider'"'"'s viewing key: keep it private, and copy it off this server.\n'
 }
 
+# Dies unless $1 is a backup of the facilitator's data volume, before anything is touched: a readable tar.gz of plain
+# files and directories under one root, with no absolute path and no .., that holds the operator's ledger and the
+# providers directory. Nothing of it is extracted
+check_archive() {
+  local file=$1 names kinds
+  names=$(tar -tzf "$file" 2>/dev/null) || die "$file is not a readable tar.gz"
+  kinds=$(tar -tvzf "$file" 2>/dev/null | cut -c1) || die "$file is not a readable tar.gz"
+  if printf '%s\n' "$names" | grep -Eq '^/|(^|/)\.\.(/|$)'; then
+    die "$file has a path outside the volume (absolute, or with ..): it is not a backup made by scripts/vps.sh backup"
+  fi
+  if printf '%s\n' "$kinds" | grep -q '[^-d]'; then
+    die "$file holds a link or a device file: it is not a backup made by scripts/vps.sh backup"
+  fi
+  printf '%s\n' "$names" | grep -Eqx "(\\./)?$ledger_name" ||
+    die "$file has no $ledger_name, the operator's ledger: it is not a backup of the facilitator's data, and nothing was changed"
+  printf '%s\n' "$names" | grep -Eq "^(\\./)?$providers_name(/|\$)" ||
+    die "$file has no $providers_name directory, the providers registry: it is not a backup of the facilitator's data, and nothing was changed"
+}
+
+# Run in the facilitator's image with the archive on its standard input. The archive is unpacked beside the live data
+# first, so that one that cannot be unpacked (a full disk) changes nothing, and only then replaces it
+IFS= read -r -d '' restore_script <<'EOF' || true
+set -eu
+stage=/data/.z402-restore
+trap 'rm -rf "$stage"' EXIT
+rm -rf "$stage"
+mkdir "$stage"
+tar -xzf - -C "$stage"
+find /data -mindepth 1 -maxdepth 1 ! -name .z402-restore -exec rm -rf {} +
+find "$stage" -mindepth 1 -maxdepth 1 -exec mv {} /data/ \;
+EOF
+
 cmd_restore() {
-  local file=${1:-} answer
+  local file=${1:-} answer safety
   [ $# -eq 1 ] || die "usage: scripts/vps.sh restore <backup file>"
   [ -f "$file" ] || die "no such file: $file"
-  tar -tzf "$file" >/dev/null 2>&1 || die "$file is not a readable tar.gz"
+  check_archive "$file"
   need_docker
   need_env
-  printf 'This empties the facilitator'"'"'s data volume (the operator'"'"'s ledger and the registered providers) and puts\n'
-  printf '%s in it. Deposits and sessions since that backup are forgotten. Type yes to go on: ' "$file"
+  safety="$backup_dir/z402-vps-before-restore-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+  printf 'This replaces the facilitator'"'"'s data volume (the operator'"'"'s ledger and the registered providers) with\n'
+  printf '%s. Deposits and sessions since that backup are forgotten. The volume as it is now is saved first, in\n' "$file"
+  printf '%s. Type yes to go on: ' "$safety"
   read -r answer
   [ "$answer" = yes ] || die "not restored"
-  # Every container off, so that nothing holds the ledger lock
+  mkdir -p "$backup_dir"
+  chmod 700 "$backup_dir"
+  # Every container off, so that nothing holds the ledger lock and nothing writes while the copy is taken
   compose --profile '*' down --remove-orphans
-  compose run --rm -T --no-deps --entrypoint sh facilitator -c \
-    'find /data -mindepth 1 -delete && tar -xzf - -C /data' <"$file"
-  echo "Restored. Start everything again with scripts/vps.sh up."
+  archive_volume "$safety" ||
+    die "the copy of the current data failed (the output above says why), so nothing was restored"
+  compose run --rm -T --no-deps --entrypoint sh facilitator -c "$restore_script" <"$file" ||
+    die "the restore failed. The data from before it is in $safety: restore that file the same way"
+  printf 'Restored. The data from before is kept in %s. Start everything again with scripts/vps.sh up.\n' "$safety"
 }
 
 # main ----------------------------------------------------------------------------------------------------------------

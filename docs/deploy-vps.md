@@ -49,7 +49,9 @@ a certificate for each name as soon as it starts, and the demo API cannot start 
 | A | `api` | the demo API |
 | A | `llm`, `markdown`, `embeddings`, `dropbox` | only with the starter services on. One wildcard `*` record does for all four |
 
-Add AAAA records only if the server has working IPv6: a broken AAAA record makes Let's Encrypt's check fail or slow.
+**Add no AAAA records.** Caddy's ports are published on IPv4 only (`Z402_PUBLISH_HOST` defaults to `0.0.0.0`), so an
+address in a AAAA record points at nothing: clients that prefer IPv6 time out or fall back late, and Let's Encrypt's
+check can fail or be slow. If your DNS provider adds AAAA records by itself (a wildcard, or a default), remove them.
 
 ## 2. The server
 
@@ -201,9 +203,12 @@ resource server presents it as `Z402_FACILITATOR_TOKEN` with `Z402_FACILITATOR_U
 Registering the same address again issues a new key and ends the old one. The refusals are `401` (no registration
 token, or the wrong one), `403 not_owner` (the viewing key does not own the address), `403 provider_limit` and
 `409 operator` (the address is the operator's). A provider can also run `node scripts/register-provider.mjs --keys
-provider.view.json --facilitator https://facilitator.z402.net --registration-token-file token.txt --out provider.apikey`
-from a checkout, which keeps its key and the viewing key out of the shell history. Give the registration token only to
-people you want to take provider slots, and over a private channel.
+provider.view.json --facilitator https://facilitator.z402.net --registration-token-file .secrets/registration-token --out
+.secrets/provider.apikey` from its own checkout, which keeps its key and the viewing key out of the shell history.
+`--out` must be outside the checkout or under its `.secrets/` (the script refuses any other path inside the checkout, a
+bare `provider.apikey` included, so that a key is not committed by accident), and `.secrets/` must exist already:
+`merchant-keygen` makes it. Give the registration token only to people you want to take provider slots, and over a
+private channel.
 
 To remove a provider, stop the stack, take its entry out of the registry, and start it again. Keep its ledger
 (`ledgers/<providerId>.jsonl`), so that the deposits it consumed stay consumed. In this deployment the registry is
@@ -240,7 +245,10 @@ anything at that moment, and the API and the services wait for the facilitator t
 
 **Logs.** Each container keeps three files of 10 MB in Docker's json-file log, so logs cannot fill the disk. Caddy keeps
 no access log on purpose: a voucher travels in a request header, and the id of a drop in its path is all it takes to
-fetch the drop.
+fetch the drop. Its error log (a 502 while a service restarts, say) cannot be left out, and Caddy hides only `Cookie` and
+`Authorization` in it by itself, so the global log block of `docker/caddy/Caddyfile` deletes the `PAYMENT-SIGNATURE`,
+`X-PAYMENT` and `Authorization` headers and the request URI from every entry. An error entry still names the host, the
+method, the client address and the error, and that is what `scripts/vps.sh logs` and its failure report print.
 
 **Backups.** The facilitator's volume (`facilitator-data`) holds the operator's ledger, which records the deposits it has
 credited, and the registered providers: the registry with every provider's viewing key, their ledgers and the service
@@ -272,8 +280,12 @@ settings recreates only the services it touches. A new `.env.vps` value takes ef
   `ufw`, so a port that is published is open whatever `ufw status` says.
 - **Registration is closed without the token.** `POST /providers` is open to anyone who can reach the facilitator unless
   `Z402_REGISTRATION_TOKEN` is set, and anyone could then take its provider slots and list resources on the website.
-  `init` sets a 64-character token, `up` refuses an empty or short one before it starts anything, and the facilitator
-  itself refuses to start with one under 32 characters. Without the variable registration is open, and every start warns.
+  `init` sets a 64-character token. The compose file will not be used without one: every `docker compose` command on it
+  stops with `required variable Z402_REGISTRATION_TOKEN is missing a value` when the token is empty or missing, so
+  plain `docker compose up` is as closed as `scripts/vps.sh up`; the facilitator's container refuses to start with one
+  under 32 characters, and so does the facilitator itself. `up` checks the file and the environment first and says why.
+  An exported `Z402_REGISTRATION_TOKEN` wins over `.env.vps`, empty or not, so an empty one in your shell stops the stack
+  as well. Without a token registration would be open.
 - **The facilitator is public on purpose.** Providers call `/verify`, `/settle` and `/discovery/resources` there with
   their API keys, and `/supported` and the catalog are public. Every route that matters needs a key, and Caddy caps a
   request body at 2 MiB (the facilitator's own cap is 64 KB). Caddy has no rate limit; if you expect abuse, put a CDN or
@@ -324,5 +336,17 @@ removes everything it made.
 | Caddy logs `rateLimited` | Let's Encrypt allows only a few certificates for the same names each week. Wait, and keep the `caddy-data` volume |
 | `facilitator` exits at once | `scripts/vps.sh logs --no-follow facilitator` names the variable. Typical: `Z402_REGISTRATION_TOKEN` under 32 characters, or `Z402_PAY_TO` and `Z402_UIVK` that do not match each other |
 | `facilitator` waits for `testnet.zec.rocks` | It is a shared public server and may be down. The facilitator waits up to 10 minutes and tries again on its own |
-| `... is the ledger of ... not of this facilitator` | `.env.vps` holds another account than the ledger was made for. Restore the keys, or start a ledger of your own by deleting the `facilitator-data` volume (it forgets the credited deposits) |
+| `... is the ledger of ... not of this facilitator` | `.env.vps` holds another account than the ledger was made for. Restore the keys, or start a new operator ledger as below. **Do not delete the `facilitator-data` volume to do it**: the volume holds the provider registry too (every registered provider with its viewing key, its ledger and the catalog), so every provider would have to register again and would get a new API key |
 | a build is "Killed" | Out of memory: add the swap file of the first section and run `up` again |
+
+**A new operator ledger, with the providers kept.** The operator's ledger is the one file `facilitator-ledger.testnet.jsonl`
+on the volume (with its lock files). Deleting it makes the facilitator forget which deposits to the operator's address it
+credited, and leaves `providers.testnet/` alone, so no provider has to register again:
+
+```bash
+scripts/vps.sh backup
+scripts/vps.sh down
+docker compose -f compose.vps.yaml --env-file .env.vps run --rm -T --no-deps --entrypoint sh facilitator \
+  -c 'rm -f /data/facilitator-ledger.testnet.jsonl*'
+scripts/vps.sh up
+```
