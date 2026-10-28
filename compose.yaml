@@ -280,6 +280,8 @@ services:
       Z402_FACILITATOR_PORT: "4022"
       Z402_MERCHANT_KEYS_FILE: /keys/merchant-regtest.json
       Z402_LEDGER: /data/facilitator-ledger.regtest.jsonl
+      # The registry and every registered provider's ledger, on the state volume next to the operator's ledger
+      Z402_PROVIDERS_DIR: /data/providers.regtest
     volumes:
       - keys:/keys:ro
       - runtime:/run/z402:ro
