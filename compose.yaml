@@ -1,0 +1,517 @@
+# z402 in one command: docker compose up -d
+#
+# A private Zcash regtest chain (Zebra, Zallet holding the funded agent wallet, Zaino, a block clock), the merchant
+# keys, the facilitator, the paid API, the four starter services with a local llama.cpp model runtime, discovery and
+# the website. Runbook and ports: docs/deploy.md. Compose settings: .env.example. Each service's own settings and
+# API keys: services/<name>/.env.
+
+name: z402
+
+x-hardened: &hardened
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
+# Every Node process runs the one image that chain-init builds
+x-node: &node
+  <<: *hardened
+  image: z402-node:local
+  pull_policy: never
+  init: true
+  restart: unless-stopped
+  mem_limit: 256m
+
+x-job: &job
+  <<: *node
+  restart: "no"
+
+# What a service's own .env files must not change inside Docker
+x-service-env: &service-env
+  HOST: 0.0.0.0
+  Z402_NETWORK: regtest
+  Z402_PRICE_ZAT: ${Z402_PRICE_ZAT:-500}
+  Z402_FACILITATOR_URL: http://facilitator:4022
+  Z402_FACILITATOR_TOKEN_FILE: /run/z402/facilitator-token
+  Z402_PAY_TO_FILE: /run/z402/pay-to
+  # Empty counts as unset, so a token or payTo left in services/<name>/.env cannot shadow the two files
+  Z402_FACILITATOR_TOKEN: ""
+  Z402_PAY_TO: ""
+
+x-service-health: &service-health
+  test: ["CMD-SHELL", "node docker/healthcheck.mjs http://127.0.0.1:$${PORT}/health"]
+  interval: 15s
+  timeout: 5s
+  retries: 3
+  start_period: 2m
+  start_interval: 3s
+
+x-model: &model
+  <<: *hardened
+  image: ghcr.io/ggml-org/llama.cpp:server-b11552
+  restart: unless-stopped
+  environment:
+    LLAMA_CACHE: /models
+  volumes:
+    - models:/models
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/health"]
+    interval: 15s
+    timeout: 5s
+    retries: 3
+    # The first start downloads the model into the models volume
+    start_period: 30m
+    start_interval: 5s
+
+services:
+  zebra:
+    <<: *hardened
+    build:
+      context: docker
+      dockerfile: zebra.Dockerfile
+    image: z402-zebra:local
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # The entrypoint chowns the state directory, then drops to uid 10001
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    environment:
+      RUST_LOG: info
+      ZEBRA_NETWORK__NETWORK: Regtest
+      ZEBRA_RPC__LISTEN_ADDR: 0.0.0.0:18232
+      ZEBRA_RPC__ENABLE_COOKIE_AUTH: "false"
+      ZEBRA_STATE__CACHE_DIR: /home/zebra/.cache/zebra
+      ZEBRA_TRACING__FILTER: info
+      ZEBRA_HEALTH__LISTEN_ADDR: 0.0.0.0:8080
+      ZEBRA_HEALTH__MIN_CONNECTED_PEERS: "0"
+      ZEBRA_HEALTH__READY_MAX_BLOCKS_BEHIND: "2"
+      ZEBRA_HEALTH__ENFORCE_ON_TEST_NETWORKS: "false"
+      # Z3's regtest miner, paid by `generate` (the block clock); not a wallet address
+      ZEBRA_MINING__MINER_ADDRESS: tmSRd1r8gs77Ja67Fw1JcdoXytxsyrLTPJm
+    volumes:
+      - chain:/home/zebra/.cache/zebra
+    mem_limit: 1g
+    healthcheck:
+      # Regtest has no peers, so the RPC answers instead of /ready
+      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"getblockchaininfo\",\"params\":[],\"id\":1}' http://127.0.0.1:18232 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 1m
+      start_interval: 2s
+
+  chain-init:
+    <<: *job
+    build:
+      context: .
+      dockerfile: docker/node.Dockerfile
+    command: ["node", "docker/z3/chain-init.mjs"]
+    environment:
+      Z3_ZEBRA_RPC: http://zebra:18232
+    depends_on:
+      zebra:
+        condition: service_healthy
+
+  zallet-init:
+    <<: *hardened
+    build:
+      context: docker
+      dockerfile: zallet.Dockerfile
+    image: z402-zallet:local
+    pull_policy: never
+    restart: "no"
+    entrypoint: ["/usr/local/bin/z402-zallet-init"]
+    environment:
+      RUST_LOG: info,hyper_util=warn,reqwest=warn
+    volumes:
+      - zallet:/var/lib/zallet
+      - chain-info:/chain-info
+    mem_limit: 512m
+    depends_on:
+      chain-init:
+        condition: service_completed_successfully
+
+  zallet:
+    <<: *hardened
+    image: z402-zallet:local
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      RUST_LOG: info,hyper_util=warn,reqwest=warn
+    volumes:
+      - zallet:/var/lib/zallet
+    mem_limit: 1g
+    depends_on:
+      zallet-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # z_listaccounts rather than getwalletinfo, which logs a warning on every call in Zallet beta.1
+      test:
+        - CMD
+        - /bin/busybox
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - -T
+        - "5"
+        - --header
+        - "Authorization: Basic emVicmE6emVicmE="
+        - --header
+        - "Content-Type: application/json"
+        - --post-data
+        - '{"jsonrpc":"2.0","id":1,"method":"z_listaccounts","params":[]}'
+        - http://127.0.0.1:28232/
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 2m
+      start_interval: 2s
+
+  zaino:
+    <<: *hardened
+    build:
+      context: docker
+      dockerfile: zaino.Dockerfile
+    image: z402-zaino:local
+    pull_policy: never
+    platform: linux/amd64
+    restart: unless-stopped
+    stop_grace_period: 15s
+    # Zaino refuses to bind its plaintext JSON-RPC server to a public address, so it gets the container's own
+    # private address (Z3's entrypoint)
+    entrypoint:
+      - bash
+      - -c
+      - 'ip="$$(getent ahostsv4 "$$HOSTNAME")"; ip="$${ip%% *}"; export ZAINO_JSON_SERVER_SETTINGS__JSON_RPC_LISTEN_ADDRESS="$${ZAINO_JSON_SERVER_SETTINGS__JSON_RPC_LISTEN_ADDRESS:-$${ip}:8237}"; exec /entrypoint.sh "$$@"'
+      - --
+    command: ["start", "--config", "/etc/zindexer.toml"]
+    environment:
+      RUST_LOG: info
+      ZAINO_NETWORK: Regtest
+      ZAINO_VALIDATOR_SETTINGS__VALIDATOR_JSONRPC_LISTEN_ADDRESS: zebra:18232
+      ZAINO_GRPC_SETTINGS__LISTEN_ADDRESS: 0.0.0.0:8137
+    volumes:
+      - zaino:/app/data
+    mem_limit: 1g
+    depends_on:
+      chain-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/8137"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 5m
+      start_interval: 3s
+
+  wallet-fund:
+    <<: *job
+    command: ["node", "docker/z3/wallet-fund.mjs"]
+    environment:
+      Z3_ZEBRA_RPC: http://zebra:18232
+      Z3_ZALLET_RPC: http://zallet:28232
+    volumes:
+      - chain-info:/chain-info
+    depends_on:
+      zallet:
+        condition: service_healthy
+
+  clock:
+    <<: *node
+    command: ["node", "infra/z3/clock.mjs", "run", "--every", "${Z402_BLOCK_SECONDS:-25}"]
+    environment:
+      Z3_ZEBRA_RPC: http://zebra:18232
+    mem_limit: 128m
+    depends_on:
+      wallet-fund:
+        condition: service_completed_successfully
+
+  # Merchant keys --------------------------------------------------------------
+
+  keygen:
+    <<: *job
+    # The seed never reaches stdout or stderr, which docker logs keeps. keygen.mjs checks the file whatever zdecrypt
+    # did, and removes it when it holds no keys, so the next run generates them again.
+    command:
+      - sh
+      - -c
+      - |
+        umask 077; [ -e /keys/merchant-regtest.json ] || zdecrypt keygen --network regtest --pretty > /keys/merchant-regtest.json
+        exec node docker/keygen.mjs
+    volumes:
+      - keys:/keys
+      - runtime:/run/z402
+
+  facilitator:
+    <<: *node
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        node --import tsx docker/wait-lightwalletd.mjs
+        Z402_FACILITATOR_TOKEN="$$(cat /run/z402/facilitator-token)"
+        export Z402_FACILITATOR_TOKEN
+        exec node --import tsx packages/facilitator/src/main.ts
+    environment:
+      Z402_NETWORK: regtest
+      Z402_PRICE_ZAT: ${Z402_PRICE_ZAT:-500}
+      Z402_LWD_URL: http://zaino:8137
+      Z402_FACILITATOR_HOST: 0.0.0.0
+      Z402_FACILITATOR_PORT: "4022"
+      Z402_MERCHANT_KEYS_FILE: /keys/merchant-regtest.json
+      Z402_LEDGER: /data/facilitator-ledger.regtest.jsonl
+    volumes:
+      - keys:/keys:ro
+      - runtime:/run/z402:ro
+      - facilitator-data:/data
+    mem_limit: 512m
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      zaino:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "docker/healthcheck.mjs", "http://127.0.0.1:4022/supported", "200", "/run/z402/facilitator-token"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10m
+      start_interval: 3s
+
+  # Paid HTTP ------------------------------------------------------------------
+
+  api:
+    <<: *node
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        Z402_FACILITATOR_TOKEN="$$(cat /run/z402/facilitator-token)"
+        Z402_PAY_TO="$$(cat /run/z402/pay-to)"
+        export Z402_FACILITATOR_TOKEN Z402_PAY_TO
+        exec node --import tsx apps/api/src/main.ts
+    environment:
+      Z402_NETWORK: regtest
+      Z402_PRICE_ZAT: ${Z402_PRICE_ZAT:-500}
+      Z402_FACILITATOR_URL: http://facilitator:4022
+      Z402_API_HOST: 0.0.0.0
+      Z402_API_PORT: "4021"
+    volumes:
+      - runtime:/run/z402:ro
+    ports:
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_API_PORT:-4021}:4021"
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck:
+      # Unpaid, /chunk answers 402 without calling the facilitator
+      test: ["CMD", "node", "docker/healthcheck.mjs", "http://127.0.0.1:4021/chunk", "402"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+      start_interval: 3s
+
+  llm:
+    <<: *node
+    command: ["node", "--import", "tsx", "services/llm/src/main.ts"]
+    env_file:
+      - path: docker/env/llm.env
+      - path: services/llm/.env
+        required: false
+    environment:
+      <<: *service-env
+      PORT: "4031"
+    volumes:
+      - runtime:/run/z402:ro
+    ports:
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_LLM_PORT:-4031}:4031"
+    mem_limit: 384m
+    depends_on:
+      facilitator:
+        condition: service_healthy
+      llm-model:
+        condition: service_started
+    healthcheck:
+      <<: *service-health
+      # Ready once the model runtime lists the model, which its first start downloads
+      start_period: 30m
+
+  markdown:
+    <<: *node
+    command: ["node", "--import", "tsx", "services/markdown/src/main.ts"]
+    env_file:
+      - path: docker/env/markdown.env
+      - path: services/markdown/.env
+        required: false
+    environment:
+      <<: *service-env
+      PORT: "4032"
+    volumes:
+      - runtime:/run/z402:ro
+    ports:
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_MARKDOWN_PORT:-4032}:4032"
+    mem_limit: 768m
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck: *service-health
+
+  embeddings:
+    <<: *node
+    command: ["node", "--import", "tsx", "services/embeddings/src/main.ts"]
+    env_file:
+      - path: docker/env/embeddings.env
+      - path: services/embeddings/.env
+        required: false
+    environment:
+      <<: *service-env
+      PORT: "4033"
+    volumes:
+      - runtime:/run/z402:ro
+    ports:
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_EMBEDDINGS_PORT:-4033}:4033"
+    depends_on:
+      facilitator:
+        condition: service_healthy
+      embed-model:
+        condition: service_started
+    healthcheck:
+      <<: *service-health
+      start_period: 30m
+
+  dropbox:
+    <<: *node
+    command: ["node", "--import", "tsx", "services/dropbox/src/main.ts"]
+    env_file:
+      - path: docker/env/dropbox.env
+      - path: services/dropbox/.env
+        required: false
+    environment:
+      <<: *service-env
+      PORT: "4034"
+    volumes:
+      - runtime:/run/z402:ro
+      - dropbox-data:/data/dropbox
+    ports:
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_DROPBOX_PORT:-4034}:4034"
+    mem_limit: 384m
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck: *service-health
+
+  # Local model runtime for llm and embeddings ----------------------------------
+
+  # Two streams at a time, each with 10240 tokens of context: the llm service's longest prompt (LLM_MAX_PROMPT_CHARS,
+  # 8000) at up to one token per character, its longest answer (LLM_MAX_TOKENS, 1024) and the chat template
+  llm-model:
+    <<: *model
+    command:
+      - -hf
+      - "${Z402_LLM_HF_MODEL:-Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M}"
+      - --alias
+      - qwen2.5-0.5b-instruct
+      - --ctx-size
+      - "20480"
+      - --parallel
+      - "2"
+    # Measured at rest: 510 MiB anonymous (KV cache, compute buffers, repacked weights) and 360 MiB of mapped model
+    mem_limit: 1536m
+
+  # A whole input must fit in one micro-batch to be embedded. llama-server caps the context at the model's own 2048
+  # tokens, and attention over a longer input needs more memory than a small server has (4000 tokens took over
+  # 768 MiB), so docker/env/embeddings.env caps a call at 2000 characters: at most one token each, plus two.
+  embed-model:
+    <<: *model
+    command:
+      - -hf
+      - "${Z402_EMBED_HF_MODEL:-nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M}"
+      - --alias
+      - nomic-embed-text
+      - --embeddings
+      - --ctx-size
+      - "2048"
+      - --batch-size
+      - "2048"
+      - --ubatch-size
+      - "2048"
+      - --parallel
+      - "1"
+    mem_limit: 512m
+
+  # Discovery and the website ---------------------------------------------------
+
+  discovery:
+    <<: *node
+    command: ["node", "--import", "tsx", "apps/discovery/src/main.ts"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "4030"
+      DISCOVERY_SERVICES: http://llm:4031,http://markdown:4032,http://embeddings:4033,http://dropbox:4034
+    depends_on:
+      llm:
+        condition: service_started
+      markdown:
+        condition: service_started
+      embeddings:
+        condition: service_started
+      dropbox:
+        condition: service_started
+    healthcheck: *service-health
+
+  web:
+    <<: *hardened
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    image: z402-web:local
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    environment:
+      DISCOVERY_URL: http://discovery:4030
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    ports:
+      - "${Z402_PUBLISH_HOST:-0.0.0.0}:${Z402_WEB_PORT:-3000}:3000"
+    mem_limit: 512m
+    depends_on:
+      discovery:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "docker/healthcheck.mjs", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+      start_interval: 3s
+
+  # The demo agent, run on demand: docker compose run --rm agent --calls 20 --------
+
+  agent:
+    <<: *job
+    profiles: [agent]
+    entrypoint: ["sh", "docker/agent.sh"]
+    mem_limit: 512m
+    depends_on:
+      api:
+        condition: service_healthy
+      # Runs the funding check again, which tops the agent up when it holds less than 1 ZEC
+      wallet-fund:
+        condition: service_completed_successfully
+      zaino:
+        condition: service_healthy
+
+volumes:
+  chain:
+  zallet:
+  zaino:
+  chain-info:
+  keys:
+  runtime:
+  facilitator-data:
+  dropbox-data:
+  models:

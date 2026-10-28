@@ -1,0 +1,12 @@
+# Zaino regtest configuration, from ZcashFoundation/z3 e84ce9fd config/regtest/zaino.toml.example (MIT, see LICENSE).
+# The validator address, network and gRPC listen address come from ZAINO_* variables in compose.yaml.
+backend = "fetch"
+
+[validator_settings]
+validator_user = "zebra"
+validator_password = "zebra"
+
+# Zaino's default 384 GB LMDB map fails with "Cannot allocate memory" when the amd64 image runs emulated on arm64.
+# 1 GB is ample for regtest.
+[storage.database]
+size = 1

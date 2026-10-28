@@ -1,0 +1,30 @@
+# Build context of docker/node.Dockerfile and docker/web.Dockerfile: sources only, never secrets or local state
+.git
+**/node_modules
+**/.next
+**/target
+**/coverage
+**/*.log
+**/.DS_Store
+**/*.tsbuildinfo
+.data
+.secrets
+.tools
+.superpowers
+.vscode
+.idea
+wallets
+docs
+
+# Test leftovers
+**/drop-*
+**/ro-*
+
+# Settings and API keys stay on the host; compose reads them there
+.env
+**/.env
+**/.env.*
+!**/.env.example
+compose.yaml
+docker/env
+docker/test.env

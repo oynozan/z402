@@ -1,0 +1,21 @@
+# Zebra regtest configuration, from ZcashFoundation/z3 e84ce9fd config/regtest/zebra.toml.example (MIT, see LICENSE).
+#
+# Zebra's default regtest stops at Canopy. This schedule activates every supported upgrade through NU6.3 at
+# height 2, matching zallet.toml. Zaino discovers the schedule from Zebra at runtime. The rest of Zebra's
+# settings come from ZEBRA_* variables in compose.yaml.
+
+[network]
+network = "Regtest"
+
+[network.testnet_parameters.activation_heights]
+BeforeOverwinter = 1
+Overwinter = 1
+Sapling = 1
+Blossom = 1
+Heartwood = 1
+Canopy = 1
+NU5 = 2
+NU6 = 2
+"NU6.1" = 2
+"NU6.2" = 2
+"NU6.3" = 2
