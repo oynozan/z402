@@ -329,21 +329,24 @@ check_services() {
   summary=${line# }
 }
 
-# Why the services that are not healthy are not: their state and the end of their logs
+# Why the services that are not healthy are not: their state and the end of their logs. A service that was never
+# started because one it waits for failed has no log, and is only named
 diagnose() {
-  local svc state health
+  local svc state health unstarted=""
   compose ps --all >&2 || true
   while IFS= read -r svc; do
     [ -n "$svc" ] || continue
     read -r state health <<<"$(service_state "$svc")"
     case "$state/${health:-}" in
       running/healthy | running/) ;;
+      created/* | missing/*) unstarted="$unstarted $svc" ;;
       *)
         printf '\n--- %s (%s): the end of its log\n' "$svc" "${health:-$state}" >&2
         compose logs --no-color --tail=30 "$svc" >&2 || true
         ;;
     esac
   done < <(compose config --services | sort)
+  if [ -n "$unstarted" ]; then printf '\nNot started yet:%s\n' "$unstarted" >&2; fi
 }
 
 wait_healthy() {
