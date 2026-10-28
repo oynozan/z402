@@ -11,9 +11,12 @@ import type {
 } from "@x402/extensions/bazaar";
 import type { ProbeMethod, Target } from "./config.js";
 import {
+  checkResourcePath,
   describeError,
+  pathnameOf,
   probeHealth,
   probeRoute,
+  routePaths,
   routeUrl,
   type HealthRoute,
   type ProbeContext,
@@ -59,6 +62,8 @@ interface Slot {
   key: string;
   method: ProbeMethod;
   url: string;
+  /** What the path of the resource URL in its 402 has to end in, for the 402 to be about this route */
+  paths: readonly string[];
   item: DiscoveryResource | undefined;
   /** Why the last probe of this route failed */
   failure: string | undefined;
@@ -140,13 +145,11 @@ export class Catalog {
 
   constructor(o: CatalogOptions) {
     this.#services = o.services.map((base) => ({ base, slots: [], status: emptyStatus(), failure: undefined }));
-    this.#targets = (o.targets ?? []).map(({ method, url }) => ({
-      key: `${method} ${url}`,
-      method,
-      url,
-      item: undefined,
-      failure: undefined,
-    }));
+    this.#targets = (o.targets ?? []).map(({ method, url }) => {
+      const path = pathnameOf(url);
+      const paths = path === undefined ? [] : [path];
+      return { key: `${method} ${url}`, method, url, paths, item: undefined, failure: undefined };
+    });
     this.#timeoutMs = o.timeoutMs;
     this.#retryMs = o.retryMs ?? DEFAULT_RETRY_MS;
     const log = o.log;
@@ -295,7 +298,15 @@ export class Catalog {
       if (url === undefined) continue;
       const key = `${route.method} ${url}`;
       if (slots.has(key)) continue;
-      slots.set(key, { key, method: route.method, url, item: known.get(key)?.item, failure: known.get(key)?.failure });
+      const before = known.get(key);
+      slots.set(key, {
+        key,
+        method: route.method,
+        url,
+        paths: routePaths(route),
+        item: before?.item,
+        failure: before?.failure,
+      });
     }
     return [...slots.values()];
   }
@@ -308,16 +319,17 @@ export class Catalog {
     return ok;
   }
 
-  /** Keeps the item when the probe failed, so that only a probe that worked ever changes it */
+  /** Keeps the item when the probe failed or described another route, so that only a probe that worked ever changes it */
   #applyRoute(slot: Slot, result: RouteProbe, at: Date): boolean {
-    if (result.ok) {
+    const reason = result.ok ? checkResourcePath(result.route.url, slot.paths) : result.reason;
+    if (result.ok && reason === undefined) {
       if (slot.failure !== undefined) this.#log(`${slot.key} answers again`);
       slot.item = itemOf(result.route, at);
       slot.failure = undefined;
       return true;
     }
-    if (slot.failure !== result.reason) this.#log(`${slot.key} failed its probe (${result.reason})`);
-    slot.failure = result.reason;
+    if (slot.failure !== reason) this.#log(`${slot.key} failed its probe (${reason})`);
+    slot.failure = reason;
     return false;
   }
 

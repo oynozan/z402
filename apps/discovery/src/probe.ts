@@ -1,7 +1,8 @@
 /**
  * What discovery asks of a service. A probe answers with a result and never throws. It has its own deadline, which also
  * covers reading the body, and it reads at most 64 KiB, so a service that hangs, trickles or lies can only fail its own
- * probe. Redirects are not followed and a route is only ever probed on the service's own origin.
+ * probe. Redirects are not followed and a route is only ever probed on the service's own origin. What a 402 says is kept
+ * only when it is small, shallow and printable: the catalog serves it to every agent and every page that asks.
  */
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { PaymentRequirements, ResourceInfo } from "@x402/core/types";
@@ -25,12 +26,30 @@ const MAX_PATH_CHARS = 2048;
 const MAX_UNIT_CHARS = 64;
 const MAX_REASON_CHARS = 200;
 const MAX_CAUSES = 5;
+/** More than any starter service offers, and fewer than a header can hold */
+const MAX_ACCEPTS = 32;
+/** The payment requirements are level 1. A declaration needs a dozen, JSON.stringify with an indent fails at thousands */
+const MAX_DEPTH = 64;
+const MAX_URL_CHARS = 2048;
+const MAX_DESCRIPTION_CHARS = 500;
+const MAX_MIME_CHARS = 128;
 const REQUIREMENT_FIELDS = ["scheme", "network", "asset", "amount", "payTo"] as const;
 
 /** A slash, then visible ASCII except # and backslash */
 const PROBE_PATH_RE = /^\/[!"$-\[\]-~]*$/;
-const CONTROL_RE = /\p{Cc}/gu;
+/** Characters that end a line or act on a terminal, such as controls, bidi overrides and zero-width spaces, but not the joiners */
+const CONTROL_RE = /(?![\u200c\u200d])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+/** What no URL has: controls, format characters, lone surrogates and every kind of space */
+const UNSAFE_URL_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Z}]/u;
+/** An encoded dot, slash or backslash, which can turn into a path segment boundary after a check */
+const ENCODED_TRAVERSAL_RE = /%(?:2e|2f|5c)/i;
+/** Printable ASCII, with spaces only between visible characters */
+const MIME_RE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/;
 const PRICE_RE = /^[0-9]{1,30}$/;
+/** The error codes of Node's HTTP client that a service can cause, and what to tell the operator instead of the code */
+const ERROR_TEXT: ReadonlyMap<string, string> = new Map([
+  ["UND_ERR_HEADERS_OVERFLOW", "response headers are larger than Node accepts (16 KiB)"],
+]);
 
 export interface HealthRoute {
   method: ProbeMethod;
@@ -76,7 +95,10 @@ function isRecord(x: unknown): x is Record<string, unknown> {
 /** One line of printable text, so that nothing a service sends can forge a log line */
 function clean(value: string, max = MAX_REASON_CHARS): string {
   const flat = value.replace(CONTROL_RE, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max)}...` : flat;
+  if (flat.length <= max) return flat;
+  const head = flat.slice(0, max);
+  // A high surrogate at the cut has lost its pair
+  return `${/[\ud800-\udbff]$/.test(head) ? head.slice(0, -1) : head}...`;
 }
 
 function fail(reason: string): { ok: false; reason: string } {
@@ -88,10 +110,6 @@ function label(x: unknown, max: number): string | null {
   if (typeof x !== "string") return null;
   const value = clean(x, max);
   return value === "" ? null : value;
-}
-
-function nonEmpty(x: unknown): string | undefined {
-  return typeof x === "string" && x !== "" ? x : undefined;
 }
 
 function nameOf(e: unknown): string | undefined {
@@ -116,7 +134,8 @@ export function describeError(e: unknown): string {
   if (name === "TimeoutError") return "timed out";
   if (name === "AbortError") return "aborted";
   const { code, message } = rootOf(e);
-  return clean(code ?? (message === "" ? (name ?? "error") : message));
+  const text = code === undefined ? undefined : ERROR_TEXT.get(code);
+  return clean(text ?? code ?? (message === "" ? (name ?? "error") : message));
 }
 
 /** Runs `run` with a signal that aborts after the deadline or when the context's signal does, and clears both after */
@@ -228,14 +247,60 @@ export async function probeHealth(base: string, ctx: ProbeContext): Promise<Heal
   }
 }
 
-/** The URL a route is probed at, or undefined when it would leave the service's own origin */
+/**
+ * The URL a route is probed at, or undefined when it would leave the service's own origin or the path it is served
+ * under. Services can share an origin behind a gateway, and a service must not be able to make discovery send a request
+ * to its neighbour, whatever method and `..` it lists. An encoded slash or dot is refused too, since a gateway may decode
+ * it after the check.
+ */
 export function routeUrl(base: string, route: HealthRoute): string | undefined {
+  const path = route.probePath ?? route.path;
+  if (ENCODED_TRAVERSAL_RE.test(path)) return undefined;
   try {
-    const url = new URL(`${base}${route.probePath ?? route.path}`);
-    return url.origin === new URL(base).origin ? url.href : undefined;
+    const root = new URL(base);
+    const url = new URL(`${base}${path}`);
+    if (url.origin !== root.origin) return undefined;
+    const prefix = root.pathname.replace(/\/+$/, "");
+    return url.pathname === prefix || url.pathname.startsWith(`${prefix}/`) ? url.href : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The paths, as a URL writes them, that the resource URL of a route's 402 may end in: the route's own and its probe path */
+export function routePaths(route: HealthRoute): string[] {
+  const paths = [route.path, ...(route.probePath === undefined ? [] : [route.probePath])];
+  return paths.map((path) => pathnameOf(`http://z402.invalid${path}`) ?? path);
+}
+
+/** The path of a URL as the URL parser writes it, or undefined for text that is not a URL */
+export function pathnameOf(url: string): string | undefined {
+  return URL.canParse(url) ? new URL(url).pathname : undefined;
+}
+
+/**
+ * Why a 402 does not describe the route that was probed, or undefined when it does. A resource URL that ends in another
+ * path would list this route's terms under the URL of a different one, and push that one out of the catalog.
+ */
+export function checkResourcePath(resourceUrl: string, paths: readonly string[]): string | undefined {
+  const actual = pathnameOf(resourceUrl) ?? "";
+  if (paths.length === 0 || paths.some((path) => actual.endsWith(path))) return undefined;
+  return clean(`PAYMENT-REQUIRED resource.url does not end in the path that was probed, ${paths[0] ?? ""}`);
+}
+
+/** Whether `value` holds objects or arrays nested deeper than `max`, found level by level so that nothing recurses */
+function nestsDeeperThan(value: unknown, max: number): boolean {
+  let level: unknown[] = [value];
+  for (let depth = 1; level.length > 0; depth++) {
+    const next: unknown[] = [];
+    for (const node of level) {
+      if (typeof node !== "object" || node === null) continue;
+      if (depth > max) return true;
+      for (const child of Array.isArray(node) ? node : Object.values(node)) next.push(child);
+    }
+    level = next;
+  }
+  return false;
 }
 
 /** An entry a client can act on has these five strings, and the rest of it is passed through as received */
@@ -243,8 +308,13 @@ function isRequirement(x: unknown): x is PaymentRequirements {
   return isRecord(x) && REQUIREMENT_FIELDS.every((field) => typeof x[field] === "string" && x[field] !== "");
 }
 
+/** A media type such as application/json, or undefined for anything else, since it only describes the answer */
+function mediaType(x: unknown): string | undefined {
+  return typeof x === "string" && x.length <= MAX_MIME_CHARS && MIME_RE.test(x) ? x : undefined;
+}
+
 function isHttpUrl(x: unknown): x is string {
-  if (typeof x !== "string" || !URL.canParse(x)) return false;
+  if (typeof x !== "string" || x.length > MAX_URL_CHARS || UNSAFE_URL_RE.test(x) || !URL.canParse(x)) return false;
   const url = new URL(x);
   return (url.protocol === "http:" || url.protocol === "https:") && url.username === "" && url.password === "";
 }
@@ -259,7 +329,8 @@ function readPaymentRequired(header: string): ProbedRoute | string {
     return "PAYMENT-REQUIRED is not base64 JSON";
   }
   if (!isRecord(raw) || raw.x402Version !== X402_VERSION) return `PAYMENT-REQUIRED is not x402Version ${X402_VERSION}`;
-  const accepts = Array.isArray(raw.accepts) ? raw.accepts.filter(isRequirement) : [];
+  if (nestsDeeperThan(raw, MAX_DEPTH)) return `PAYMENT-REQUIRED is nested deeper than ${MAX_DEPTH} levels`;
+  const accepts = Array.isArray(raw.accepts) ? raw.accepts.filter(isRequirement).slice(0, MAX_ACCEPTS) : [];
   if (accepts.length === 0) return "PAYMENT-REQUIRED has no usable accepts entry";
   const resource = raw.resource;
   if (!isRecord(resource) || !isHttpUrl(resource.url)) return "PAYMENT-REQUIRED resource.url is not an http(s) URL";
@@ -280,8 +351,8 @@ function readPaymentRequired(header: string): ProbedRoute | string {
     tags: resource.tags,
     iconUrl: resource.iconUrl,
   } as ResourceInfo);
-  const description = nonEmpty(resource.description);
-  const mimeType = nonEmpty(resource.mimeType);
+  const description = label(resource.description, MAX_DESCRIPTION_CHARS) ?? undefined;
+  const mimeType = mediaType(resource.mimeType);
   return {
     url,
     accepts,

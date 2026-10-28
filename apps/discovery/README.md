@@ -58,9 +58,16 @@ A status entry is `{ serviceName, url, up, ready, latencyMs, checkedAt, callsTod
 
 For each service, all in parallel, `GET {service}/health` says which routes it has (`routes: [{ method, path, probePath?, unit }]`). Then each route gets an unpaid request with its method to `probePath ?? path`, with `Accept: application/json`, `X-Z402-Probe: 1` and no body. The probe header makes a kit service skip its own request checks and answer the 402. The answer has to be a 402 with a `PAYMENT-REQUIRED` header that decodes to x402 version 2 with an `accepts` entry and an http(s) `resource.url`, and its `bazaar` extension, if any, has to pass the Bazaar's spec check. The service name, tags and icon go through the Bazaar's own sanitizer.
 
+The 402 also has to be about the route that was probed, and small, shallow and printable, because the catalog serves it to every agent and page that asks:
+
+- The path of `resource.url` ends in the route's `path` or its `probePath` (for a target, in the path of its URL). A 402 that names another route would list its terms under that route's URL and push the real one out of the catalog.
+- `resource.url` is at most 2048 characters with no space, control or format character (a bidi override, a zero-width space).
+- The requirements nest at most 64 levels. At most 32 `accepts` entries are kept.
+- `description` becomes one line of at most 500 characters, and `mimeType` is kept only when it is printable ASCII of at most 128 characters.
+
 A route that fails any of that is skipped and its last good item, if there is one, stays. The same goes for a service that is down or not ready: its items stay with their old `lastUpdated`. A route that a service that is up stops listing is dropped.
 
-Limits: `/health` is read up to 64 KiB and 32 routes, redirects are not followed, a route is only ever probed on its own service's origin, and the `PAYMENT-REQUIRED` header has to fit the 16 KiB that Node's HTTP client accepts for a whole response header block (a route that goes over shows as `UND_ERR_HEADERS_OVERFLOW`). Node's fetch also refuses the ports on the WHATWG bad-port list, such as 6000, which show as `bad port`. The ports of the starter services (4021 to 4034) are fine.
+Limits: `/health` is read up to 64 KiB and 32 routes, redirects are not followed, a route is only ever probed on its own service's origin and below the path of its URL (services can share an origin behind a gateway, so a route with `..` or an encoded dot, slash or backslash is skipped), and the `PAYMENT-REQUIRED` header has to fit the 16 KiB that Node's HTTP client accepts for a whole response header block (a route that goes over is logged as `response headers are larger than Node accepts (16 KiB)`, and an agent that is a Node client could not read its 402 either). Node's fetch also refuses the ports on the WHATWG bad-port list, such as 6000, which show as `bad port`. The ports of the starter services (4021 to 4034) are fine.
 
 ## Tests
 

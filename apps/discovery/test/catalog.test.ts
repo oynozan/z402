@@ -311,6 +311,163 @@ describe("the catalog over time", () => {
   });
 });
 
+describe("a 402 that lies", () => {
+  /** A service whose route /a can be made to declare the URL of its route /b */
+  function liar() {
+    const state = { lie: false };
+    const handler: Handler = router({
+      "GET /health": (_req, res) => sendHealth(res, [{ method: "GET", path: "/a" }, { method: "GET", path: "/b" }]),
+      "GET /a": (_req, res) =>
+        state.lie
+          ? send402(res, paymentRequired("https://svc.example/b", { description: "lie" }))
+          : send402(res, paymentRequired("https://svc.example/a", { description: "honest a" })),
+      "GET /b": (_req, res) => send402(res, paymentRequired("https://svc.example/b", { description: "truth" })),
+    });
+    return { state, handler };
+  }
+
+  test("about the URL of another route does not push that route out of the catalog", async () => {
+    const svc = liar();
+    svc.state.lie = true;
+    const o = await origin(svc.handler);
+    const lines: string[] = [];
+    const catalog = catalogOf({ services: [o.url], log: (line) => lines.push(line) });
+    await catalog.refresh();
+
+    expect(catalog.list().items.map((i) => i.description)).toEqual(["truth"]);
+    expect(lines.filter((line) => line.includes("failed its probe"))).toEqual([
+      `GET ${o.url}/a failed its probe (PAYMENT-REQUIRED resource.url does not end in the path that was probed, /a)`,
+    ]);
+  });
+
+  test("keeps the last good item of the route that starts to lie, and says so once", async () => {
+    const svc = liar();
+    const o = await origin(svc.handler);
+    const lines: string[] = [];
+    const catalog = catalogOf({ services: [o.url], log: (line) => lines.push(line) });
+    await catalog.refresh();
+    const good = catalog.list().items;
+    expect(good.map((i) => i.description)).toEqual(["honest a", "truth"]);
+
+    svc.state.lie = true;
+    await catalog.refresh();
+    await catalog.refresh();
+    // Only the route that lied keeps what it had, the honest one is probed again and gets a new lastUpdated
+    expect(catalog.list().items[0]).toEqual(good[0]);
+    expect(catalog.list().items.map((i) => i.description)).toEqual(["honest a", "truth"]);
+    expect(lines.filter((line) => line.includes("failed its probe"))).toHaveLength(1);
+    expect(catalog.status()[0]).toMatchObject({ up: true, ready: true });
+  });
+
+  test("is judged by the path of the route and not by the public prefix, a template or a concrete example", async () => {
+    const o = await origin(
+      router({
+        "GET /health": (_req, res) =>
+          sendHealth(res, [
+            { method: "POST", path: "/v1/gen" },
+            { method: "GET", path: "/v1/items/:id", probePath: "/v1/items/x" },
+            { method: "GET", path: "/v1/drops/:id/hold", probePath: "/v1/drops/example/hold" },
+            { method: "GET", path: "/" },
+          ]),
+        "POST /v1/gen": (_req, res) => send402(res, paymentRequired("https://gw.example/llm/v1/gen")),
+        "GET /v1/items/x": (_req, res) => send402(res, paymentRequired("https://gw.example/llm/v1/items/:id")),
+        "GET /v1/drops/example/hold": (_req, res) => send402(res, paymentRequired("https://gw.example/llm/v1/drops/example/hold")),
+        "GET /": (_req, res) => send402(res, paymentRequired("https://gw.example/llm/")),
+      }),
+    );
+    const catalog = catalogOf({ services: [o.url] });
+    await catalog.refresh();
+    expect(catalog.list().items.map((i) => i.resource)).toEqual([
+      "https://gw.example/llm/v1/gen",
+      "https://gw.example/llm/v1/items/:id",
+      "https://gw.example/llm/v1/drops/example/hold",
+      "https://gw.example/llm/",
+    ]);
+  });
+
+  test("does not match on the tail of a longer segment", async () => {
+    const o = await origin(
+      router({
+        "GET /health": (_req, res) => sendHealth(res, [{ method: "GET", path: "/v1/a" }]),
+        "GET /v1/a": (_req, res) => send402(res, paymentRequired("https://svc.example/xv1/a")),
+      }),
+    );
+    const catalog = catalogOf({ services: [o.url] });
+    await catalog.refresh();
+    expect(catalog.list().items).toEqual([]);
+  });
+
+  test("applies to a target as well, which is judged by the path of its URL", async () => {
+    const api = await origin(
+      router({
+        "GET /chunk": (_req, res) => send402(res, paymentRequired("https://api.example/elsewhere")),
+        "POST /other": (_req, res) => send402(res, paymentRequired("https://api.example/other?x=1")),
+      }),
+    );
+    const catalog = catalogOf({
+      services: [],
+      targets: [
+        { method: "GET", url: `${api.url}/chunk` },
+        { method: "POST", url: `${api.url}/other?x=1` },
+      ],
+    });
+    await catalog.refresh();
+    expect(catalog.list().items.map((i) => i.resource)).toEqual(["https://api.example/other?x=1"]);
+  });
+
+  test("with an extension nested thousands of levels deep is not listed, and the other routes are", async () => {
+    const deep = JSON.parse(`${"[".repeat(3000)}${"]".repeat(3000)}`) as unknown;
+    const o = await origin(
+      router({
+        "GET /health": (_req, res) => sendHealth(res, [{ method: "GET", path: "/deep" }, { method: "GET", path: "/ok" }]),
+        "GET /deep": (_req, res) => send402(res, paymentRequired("https://svc.example/deep", { extensions: { z402: deep } })),
+        "GET /ok": (_req, res) => send402(res, paymentRequired("https://svc.example/ok")),
+      }),
+    );
+    const catalog = catalogOf({ services: [o.url] });
+    await catalog.refresh();
+    expect(catalog.list().items.map((i) => i.resource)).toEqual(["https://svc.example/ok"]);
+  });
+});
+
+describe("an origin that flaps", () => {
+  test("keeps one listing in one place through twelve rounds of down and up", async () => {
+    const lines: string[] = [];
+    const svc = mutable([{ method: "GET", path: "/a" }, { method: "GET", path: "/b" }]);
+    const o = await origin(svc.handler);
+    const catalog = catalogOf({ services: [o.url], log: (line) => lines.push(line) });
+    await catalog.refresh();
+    const first = catalog.list().items;
+    expect(first.map((i) => i.resource)).toEqual(["https://svc.example/a", "https://svc.example/b"]);
+
+    for (let round = 0; round < 12; round++) {
+      svc.state.down = round % 2 === 0;
+      await catalog.refresh();
+      const { items, pagination } = catalog.list();
+      expect(items.map((i) => i.resource), `round ${round}`).toEqual(["https://svc.example/a", "https://svc.example/b"]);
+      expect(pagination.total).toBe(2);
+      expect(catalog.status()[0]?.up, `round ${round}`).toBe(!svc.state.down);
+    }
+    // One line each time it went down and came back, and nothing else
+    expect(lines.filter((line) => line.includes("is down"))).toHaveLength(6);
+    expect(lines.filter((line) => line.includes("is up"))).toHaveLength(7);
+    expect(lines).toHaveLength(13);
+  });
+
+  test("keeps a route that goes in and out of its health in the order of the service", async () => {
+    const svc = mutable([{ method: "GET", path: "/a" }, { method: "GET", path: "/b" }, { method: "GET", path: "/c" }]);
+    const o = await origin(svc.handler);
+    const catalog = catalogOf({ services: [o.url] });
+    const seen: string[][] = [];
+    for (const routes of ["abc", "ac", "abc", "c", "cba", "abc"]) {
+      svc.state.routes = [...routes].map((p) => ({ method: "GET", path: `/${p}` }));
+      await catalog.refresh();
+      seen.push(catalog.list().items.map((i) => i.resource.slice(-1)));
+    }
+    expect(seen).toEqual([["a", "b", "c"], ["a", "c"], ["a", "b", "c"], ["c"], ["c", "b", "a"], ["a", "b", "c"]]);
+  });
+});
+
 describe("targets", () => {
   test("get only the route probe, and are listed after the services", async () => {
     const api = await origin(
@@ -354,6 +511,25 @@ describe("targets", () => {
     await catalog.refresh();
     expect(catalog.list().items).toEqual(good);
     expect(catalog.status()).toEqual([]);
+  });
+});
+
+describe("a target that is not a URL", () => {
+  test("is a probe that fails, and does not stop the catalog from being built or the others from being listed", async () => {
+    const api = await origin(router({ "GET /chunk": (_req, res) => send402(res, paymentRequired("https://api.example/chunk")) }));
+    const lines: string[] = [];
+    const catalog = catalogOf({
+      services: [],
+      targets: [
+        { method: "GET", url: "not a url" },
+        { method: "GET", url: `${api.url}/chunk` },
+      ],
+      log: (line) => lines.push(line),
+    });
+    await catalog.refresh();
+    expect(catalog.list().items.map((i) => i.resource)).toEqual(["https://api.example/chunk"]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^GET not a url failed its probe/);
   });
 });
 
@@ -424,6 +600,30 @@ describe("a service that misbehaves", () => {
     await catalog.refresh();
     expect(victim.requests).toEqual([]);
     expect(catalog.list().items.map((i) => i.resource)).toEqual(["https://svc.example/a"]);
+  });
+
+  test("a route list that climbs out of the path of a service on a shared origin is not followed", async () => {
+    const hits: string[] = [];
+    const gateway = await origin((req, res) => {
+      const path = pathOf(req);
+      if (path === "/llm/health") {
+        sendHealth(res, [
+          { method: "DELETE", path: "/../admin/wipe" },
+          { method: "POST", path: "/%2e%2e/admin/wipe" },
+          { method: "PUT", path: "/v1/a", probePath: "/..%2fadmin/wipe" },
+          { method: "GET", path: "/a" },
+        ]);
+      } else if (path === "/llm/a") {
+        send402(res, paymentRequired("https://pub.example/llm/a"));
+      } else {
+        hits.push(`${req.method} ${req.url}`);
+        sendJson(res, 200, { wiped: true });
+      }
+    });
+    const catalog = catalogOf({ services: [`${gateway.url}/llm`] });
+    await catalog.refresh();
+    expect(hits).toEqual([]);
+    expect(catalog.list().items.map((i) => i.resource)).toEqual(["https://pub.example/llm/a"]);
   });
 
   test("malformed 402 headers are skipped and the good ones listed", async () => {

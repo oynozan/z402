@@ -21,6 +21,16 @@ afterEach(closeAll);
 
 const ctx: ProbeContext = { timeoutMs: 2000 };
 const RESOURCE = "https://svc.example/v1/thing";
+/** Written as code points, so that no invisible character sits in this file */
+const bidi = String.fromCodePoint(0x202e);
+const zeroWidth = String.fromCodePoint(0x200b);
+
+/** `levels` arrays inside one another */
+function nested(levels: number): unknown {
+  let value: unknown = [];
+  for (let i = 1; i < levels; i++) value = [value];
+  return value;
+}
 
 describe("probeHealth", () => {
   test("200 and 503 both mean the service is up", async () => {
@@ -245,7 +255,20 @@ describe("probeRoute", () => {
       ["bazaar that is null", encode({ ...valid, extensions: { bazaar: null } }), /bazaar extension is invalid/],
       ["bazaar without info", encode({ ...valid, extensions: { bazaar: { schema: {} } } }), /bazaar extension is invalid/],
       ["bazaar with a bad method", encode({ ...valid, extensions: { bazaar: bazaar("FETCH") } }), /bazaar extension is invalid/],
-      ["a header over 64 KiB", "A".repeat(70_000), /./],
+      ["a header over the limit of Node's client", "A".repeat(70_000), /larger than Node accepts \(16 KiB\)/],
+      ["resource url with a newline", encode({ ...valid, resource: { url: "https://svc.example/a\nb" } }), /resource\.url/],
+      ["resource url with an escape character", encode({ ...valid, resource: { url: "https://svc.example/\u001b[2J" } }), /resource\.url/],
+      ["resource url with a space", encode({ ...valid, resource: { url: "https://svc.example/a b" } }), /resource\.url/],
+      ["resource url with a leading space", encode({ ...valid, resource: { url: " https://svc.example/x" } }), /resource\.url/],
+      ["resource url with a tab", encode({ ...valid, resource: { url: "https://svc.example/a\tb" } }), /resource\.url/],
+      ["resource url with DEL", encode({ ...valid, resource: { url: "https://svc.example/a\u007fb" } }), /resource\.url/],
+      ["resource url with a C1 control", encode({ ...valid, resource: { url: "https://svc.example/a\u009bb" } }), /resource\.url/],
+      ["resource url with a bidi override", encode({ ...valid, resource: { url: `https://svc.example/${bidi}x` } }), /resource\.url/],
+      ["resource url with a zero-width space", encode({ ...valid, resource: { url: `https://svc.example/a${zeroWidth}b` } }), /resource\.url/],
+      ["resource url over 2048 characters", encode({ ...valid, resource: { url: `https://svc.example/${"a".repeat(2030)}` } }), /resource\.url/],
+      ["nesting deeper than 64 levels", encode({ ...valid, extensions: { z402: nested(63) } }), /nested deeper than 64 levels/],
+      ["nesting of 5,000 levels", encode({ ...valid, extensions: { z402: nested(5000) } }), /nested deeper than 64 levels/],
+      ["nesting in an offer", encode({ ...valid, accepts: [{ ...goodOffer, extra: nested(70) }] }), /nested deeper than 64 levels/],
     ];
     for (const [name, header, reason] of variants) {
       const svc = await origin((_req, res) => send402Raw(res, header));
@@ -276,6 +299,81 @@ describe("probeRoute", () => {
     for (const dropped of ["serviceName", "iconUrl", "description", "mimeType", "extensions"]) {
       expect(result.route, dropped).not.toHaveProperty(dropped);
     }
+  });
+
+  test("takes nesting up to 64 levels, counting the payment requirements themselves", async () => {
+    // The requirements are level 1 and the extensions level 2, so 62 arrays fill the 64 levels that are allowed
+    const required = paymentRequired(RESOURCE, { extensions: { z402: nested(62) } });
+    const svc = await origin((_req, res) => send402(res, required));
+    expect((await probeRoute("GET", `${svc.url}/x`, ctx)).ok).toBe(true);
+  });
+
+  test("takes a resource url of 2048 characters and one with letters that are not ASCII", async () => {
+    const edge = `https://svc.example/${"a".repeat(2048 - "https://svc.example/".length)}`;
+    for (const url of [edge, "https://svc.example/caf\u00e9"]) {
+      const svc = await origin((_req, res) => send402(res, paymentRequired(url)));
+      expect(await probeRoute("GET", `${svc.url}/x`, ctx), url.slice(0, 40)).toMatchObject({ ok: true, route: { url } });
+    }
+  });
+
+  test("keeps the description and the media type to one clean line of sane size", async () => {
+    const dirty = `  Embeds \u001b[31mtext\u001b[0m${bidi}\nin\r\nlines${zeroWidth}  `;
+    interface Kept {
+      description?: string;
+      mimeType?: string;
+    }
+    const cases: Array<[string, unknown, unknown, Kept]> = [
+      [
+        "escapes, line breaks and format characters",
+        dirty,
+        "application/json",
+        { description: "Embeds  [31mtext [0m  in  lines", mimeType: "application/json" },
+      ],
+      ["a long description", "d".repeat(900), "text/html; charset=utf-8", { description: `${"d".repeat(500)}...`, mimeType: "text/html; charset=utf-8" }],
+      ["only control characters", "\u0007\u001b", "application/json", { mimeType: "application/json" }],
+      ["a media type with a line break", "ok", "text/plain\nx-injected: 1", { description: "ok" }],
+      ["a media type of 129 characters", "ok", `text/${"x".repeat(124)}`, { description: "ok" }],
+      ["a media type with a leading space", "ok", " text/plain", { description: "ok" }],
+    ];
+    for (const [name, description, mimeType, kept] of cases) {
+      const svc = await origin((_req, res) => send402(res, paymentRequired(RESOURCE, { resource: { description, mimeType } })));
+      const result = await probeRoute("GET", `${svc.url}/x`, ctx);
+      expect(result.ok, name).toBe(true);
+      if (!result.ok) continue;
+      const { description: d, mimeType: m } = result.route;
+      expect({ ...(d !== undefined && { description: d }), ...(m !== undefined && { mimeType: m }) }, name).toEqual(kept);
+    }
+  });
+
+  test("keeps the joiners that emoji and some scripts need in a description", async () => {
+    const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467);
+    const persian = String.fromCodePoint(0x645, 0x6cc, 0x200c, 0x62e, 0x648, 0x627, 0x647, 0x645);
+    const description = `family ${family} and ${persian}`;
+    const svc = await origin((_req, res) => send402(res, paymentRequired(RESOURCE, { resource: { description } })));
+    expect(await probeRoute("GET", `${svc.url}/x`, ctx)).toMatchObject({ ok: true, route: { description } });
+  });
+
+  test("keeps at most 32 offers, however many the 402 holds", async () => {
+    const required = paymentRequired(RESOURCE);
+    const offers = Array.from({ length: 60 }, (_, i) => ({ scheme: "s", network: "n:1", asset: "A", amount: "1", payTo: `p${i}` }));
+    required.accepts = offers;
+    const svc = await origin((_req, res) => send402(res, required));
+    const result = await probeRoute("GET", `${svc.url}/x`, ctx);
+    expect(result.ok && result.route.accepts.map((a) => a.payTo)).toEqual(offers.slice(0, 32).map((a) => a.payTo));
+  });
+
+  test("says what a response header block over Node's limit is", async () => {
+    // A 402 whose header alone is over the 16 KiB that Node accepts for all the headers of a response
+    const big = paymentRequired(RESOURCE, { extensions: { z402: { note: "n".repeat(20_000) } } });
+    const heavy = await origin((_req, res) => send402(res, big));
+    const reason = "response headers are larger than Node accepts (16 KiB)";
+    expect(await probeRoute("GET", `${heavy.url}/x`, ctx)).toEqual({ ok: false, reason });
+
+    const header = await origin((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", "x-padding": "p".repeat(20_000) });
+      res.end("{}");
+    });
+    expect(await probeHealth(header.url, ctx)).toEqual({ ok: false, reason });
   });
 
   test("keeps a public icon url and an extension that has no bazaar", async () => {
@@ -331,6 +429,30 @@ describe("routeUrl", () => {
       "http://llm:4031/v1/a/x?y=1",
     );
     expect(routeUrl("http://h/api", { method: "GET", path: "/v1/a", unit: null })).toBe("http://h/api/v1/a");
+  });
+
+  test("never leaves the path prefix of the service, where other services may share its origin", () => {
+    const prefixed = "http://gw:8080/llm";
+    const out = [
+      "/../admin/wipe",
+      "/a/../../admin",
+      "/./../x",
+      "/../llm2/x",
+      "/%2e%2e/admin",
+      "/.%2E/admin",
+      "/..%2fadmin",
+      "/a%2F..%2f..%2fadmin",
+      "/..%5cadmin",
+      "/a/%2e%2E/%2e%2e/admin",
+    ];
+    for (const path of out) {
+      expect(routeUrl(prefixed, { method: "DELETE", path, unit: null }), path).toBeUndefined();
+      expect(routeUrl(prefixed, { method: "GET", path: "/v1/a", probePath: path, unit: null }), `probe ${path}`).toBeUndefined();
+    }
+    expect(routeUrl(prefixed, { method: "GET", path: "/v1/a/../b", unit: null })).toBe("http://gw:8080/llm/v1/b");
+    expect(routeUrl(prefixed, { method: "GET", path: "/", unit: null })).toBe("http://gw:8080/llm/");
+    expect(routeUrl(prefixed, { method: "GET", path: "/v1/a%20b", unit: null })).toBe("http://gw:8080/llm/v1/a%20b");
+    expect(routeUrl("http://h", { method: "GET", path: "/a/../b", unit: null })).toBe("http://h/b");
   });
 
   test("never leaves the origin of the service", () => {

@@ -244,6 +244,84 @@ describe("GET /discovery/resources", () => {
   });
 });
 
+describe("paging and caching", () => {
+  /** `count` services of 32 routes each, which makes a list long enough to page through */
+  async function crowded(count: number): Promise<DiscoveryHandle> {
+    const services: string[] = [];
+    for (let n = 0; n < count; n++) {
+      const routes = Array.from({ length: 32 }, (_, i) => ({ method: "GET", path: `/r${i}` }));
+      const table: Record<string, (req: never, res: Parameters<Parameters<typeof origin>[0]>[1]) => void> = {
+        "GET /health": (_req, res) => sendHealth(res, routes),
+      };
+      for (const { path } of routes) table[`GET ${path}`] = (_req, res) => send402(res, paymentRequired(`https://s${n}.example${path}`));
+      services.push((await origin(router(table as never))).url);
+    }
+    return discovery(services);
+  }
+
+  test("walks a list of 160 entries exactly once, in the same order, whatever the size of the page", async () => {
+    const found = await crowded(5);
+    const client = withBazaar(new HTTPFacilitatorClient({ url: found.url })).extensions.bazaar;
+    const whole = await client.listResources({ type: "http", limit: 1000 });
+    expect(whole.items).toHaveLength(160);
+    expect(whole.pagination).toEqual({ limit: 1000, offset: 0, total: 160 });
+    const order = whole.items.map((i) => i.resource);
+    expect(new Set(order).size).toBe(160);
+
+    for (const limit of [1, 7, 32, 100, 159, 160, 161]) {
+      const seen: string[] = [];
+      for (let offset = 0; ; offset += limit) {
+        const page = await client.listResources({ type: "http", limit, offset });
+        expect(page.pagination).toEqual({ limit, offset, total: 160 });
+        expect(page.items.length).toBeLessThanOrEqual(limit);
+        seen.push(...page.items.map((i) => i.resource));
+        if (offset + limit >= page.pagination.total) break;
+      }
+      expect(seen, `limit ${limit}`).toEqual(order);
+    }
+  });
+
+  test("returns the same list in the same order every time it is asked, and after a refresh that changes nothing", async () => {
+    const found = await crowded(2);
+    const ask = async (): Promise<string[]> =>
+      ((await get(`${found.url}/discovery/resources?limit=1000`)).body as Listed).items.map((i) => i.resource);
+    const before = await ask();
+    expect(await ask()).toEqual(before);
+    await found.catalog.refresh();
+    expect(await ask()).toEqual(before);
+  });
+
+  test("tags the list so that a conditional request is answered 304 with the CORS header, until a refresh changes it", async () => {
+    const found = await mixed();
+    const first = await fetch(`${found.url}/discovery/resources`);
+    const etag = first.headers.get("etag");
+    expect(etag).toMatch(/^W\/"/);
+    await first.arrayBuffer();
+
+    // cache: "no-cache" keeps fetch from adding the Cache-Control: no-cache that it adds to a revalidation by default
+    const conditional = { headers: { "if-none-match": etag ?? "" }, cache: "no-cache" } as const;
+    const again = await fetch(`${found.url}/discovery/resources`, conditional);
+    expect(again.status).toBe(304);
+    expect(again.headers.get("access-control-allow-origin")).toBe("*");
+    expect(again.headers.get("cache-control")).toBe("max-age=5");
+    expect(await again.text()).toBe("");
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await found.catalog.refresh();
+    const changed = await fetch(`${found.url}/discovery/resources`, conditional);
+    expect(changed.status).toBe(200);
+    await changed.arrayBuffer();
+  });
+
+  test("answers a limit and an offset past the end with an empty page that still counts the matches", async () => {
+    const found = await mixed();
+    const page = async (query: string): Promise<Listed> => ((await get(`${found.url}/discovery/resources?${query}`)).body as Listed);
+    expect(await page(`payTo=${P2}&offset=2`)).toMatchObject({ items: [], pagination: { limit: 100, offset: 2, total: 2 } });
+    expect(await page("type=mcp&limit=1000&offset=999999999")).toMatchObject({ items: [], pagination: { limit: 1000, offset: 999999999, total: 0 } });
+    expect(await page("limit=1&offset=3")).toMatchObject({ pagination: { limit: 1, offset: 3, total: 4 } });
+  });
+});
+
 describe("the other endpoints", () => {
   test("GET /discovery/status lists each service", async () => {
     const found = await mixed();
