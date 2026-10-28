@@ -65,7 +65,8 @@ const USAGE = `usage: node scripts/merchant-keygen.mjs --network <regtest|testne
                only network, uivk and orchardOnlyAddress, to .secrets/merchant-<network>.view.json
   --from       the keys file to read for --view-only
   --force      replace an existing key file. The old one is kept as <file>.replaced-<UTC time> and set to
-               mode 0600, since key files must be 0600. A symbolic link is refused, replace it by hand
+               mode 0600, since key files must be 0600. A symbolic link is refused, replace it by hand.
+               Run one merchant-keygen at a time: two runs on the same key file can lose a key whose address was already printed.
   --out        write here instead of .secrets/merchant-<network>.json, an absolute path outside the
                repository or inside its .secrets/ directory
 
