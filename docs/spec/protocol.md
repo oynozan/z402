@@ -1,6 +1,11 @@
 # z402 wire contract
 
-**Version: v1.1** (2026-10-27; ACKed by both agents. v1.1 clarifies §7.3: only a successful settle acknowledges a deposit; refusal snapshots are projected and informational) · drafted by the client agent, reviewed by the facilitator agent. Code may rely on every value here; changes need a message, both ACKs, and a version bump.
+**Version: v1.2** (2026-10-28; ACKed by both agents). v1.1 clarified §7.3: only a successful settle acknowledges a deposit, and refusal snapshots are projected and informational. v1.2 does three things:
+- **One refusal code.** Every found but unusable txid answers `z402_deposit_memo_mismatch` (§5.2), so a refusal is no oracle on the merchant's viewing key.
+- **Corrections.** §2, §6, §8 and §10.
+- **New facilitator and API rules.** §15: the ledger lock, `onFatal`/`log`, `close()`, token and URL checks, and 405 on paid non-GET requests.
+
+Drafted by the client agent and reviewed by the facilitator agent. Code may rely on every value here; changes need a message, both ACKs, and a version bump.
 
 This is the one contract the client library (`@z402/client`) and the merchant side (`@z402/facilitator`, `@z402/server`, `apps/api`) both build against. It refines [mvp-build-doc.md](mvp-build-doc.md) with what research found; where they disagree, this file wins.
 
@@ -47,7 +52,7 @@ This is the one contract the client library (`@z402/client`) and the merchant si
 | `extra.creditRatioBps` | Integer basis points, 0–10000 (2500 = 25 %). Replaces the doc's float `creditRatio: 0.25`. |
 | `extra.creditCapZat` | Credit cap, zat, decimal string. |
 | `extra.zeroConfMinExpiryBlocks` | Integer. A pending deposit earns zero-conf credit only with at least this many blocks before expiry (§5.3). |
-| `extra.termsVersion` | Opaque 16-hex string owned by the facilitator. The server scheme copies it into requirements, and the startup check uses it to catch drift between the API's and the facilitator's terms. The client ignores it (`parseTerms` drops unknown keys) but echoes `extra` unchanged, as the stock client does. |
+| `extra.termsVersion` | Opaque 16-hex string owned by the facilitator. The server scheme copies it into requirements. The API reads its terms from the facilitator's `/supported`. Its startup check validates only the format of `termsVersion` and does not compare terms between the two sides. Open item: move `termsVersion()` into `@z402/protocol` so it can. The client ignores it (`parseTerms` drops unknown keys) but echoes `extra` unchanged, as the stock client does. |
 
 - `extra` is **static per route**. Per-session values must never appear in requirements: the server matches the client's echo of `extra`, so a changing value breaks matching.
 - The facilitator owns these terms. It advertises them through `getExtra()` → `/supported`, and the server scheme copies them in `enhancePaymentRequirements`.
@@ -105,12 +110,12 @@ sig     = Ed25519 (RFC 8032, pure) over message, 64 bytes, lowercase hex
   | Code | Condition |
   |---|---|
   | `z402_deposit_transparent` | Any transparent input or output. |
-  | `z402_deposit_memo_mismatch` | No output to `payTo` carries this session's memo. |
-  | `z402_deposit_not_to_merchant` | No output decrypts to `payTo` at all. |
-  | `z402_deposit_other_session` | The txid is already credited to another session. |
+  | `z402_deposit_memo_mismatch` | The transaction is found, but this session cannot use it. Any of three cases:<br>- no output decrypts to `payTo`;<br>- no output to `payTo` carries this session's memo;<br>- the txid is already credited to another session.<br>All three get one code and one message, "the deposit cannot be credited". The other-session case also performs one chain read, so neither the code nor the timing tells them apart (v1.2). |
+  | `z402_deposit_not_to_merchant`, `z402_deposit_other_session` | Kept in the closed list (§8). Not emitted from v1.2: those cases answer `z402_deposit_memo_mismatch`. |
   | `z402_deposit_dead` | The txid is already known dead, or the presented transaction is unmined and `tip ≥ expiryHeight`. |
 
 - Re-presenting a txid **already credited to the same session** is a no-op: no refetch, no second credit, no refusal.
+- Known limit, open for v1.3: when a voucher fits on existing credit, a presented txid that is not credited is ignored and the call is served, but a txid credited to another session is always refused. A session that has paid a real deposit can therefore still tell those two apart.
 - A sub-window deposit is credited at full value once mined, but earns no zero-conf credit.
 - The facilitator may credit lazily (it answers `/verify` before the lookup finishes when the voucher fits without the deposit). The client therefore resends `depositTxid` until it is acked (§7.3).
 
@@ -149,7 +154,7 @@ accept  ⇔ c_new − c_last ≥ amount  ∧  c_new ≤ limit           (c_last 
 - The increment rule is lenient (`≥`): a client that overshoots by one price is still accepted, which absorbs lost responses.
 - A new session has `c_last = 0` and limit 0, so its first voucher must carry a deposit.
 - One implementation, `computeLimit()` in `@z402/protocol`, is imported by both sides.
-- Worst-case merchant loss per session: `min(W, Σ live pending) + min(C_max, r·D_conf)`, assuming no reorg deeper than one block before finality.
+- Worst-case merchant loss per session is `min(W, Σ live pending) + min(C_max, r·D_conf)`, plus the value of any credited deposit that a reorg removes before it is final. The MVP accepts that reorg term; see facilitator design §4.2.
 
 Reference values (W = 100,000, 2500 bps, cap 200,000):
 
@@ -213,7 +218,7 @@ Only `invalidReason` (verify) or `errorReason` (settle) reaches the client, so *
 | `z402_deposit_required` | `c_new > limit`; nothing pending | Deposit (inline), then recover. On the final attempt, start a background deposit. In cheat mode (`maxDeposits` reached), return. |
 | `z402_cumulative_mismatch` | `c_new − c_last < amount` | Resync `c` from `session.cumulativeZat`, then recover. |
 | `z402_invalid_signature` | Signature fails | Fatal: report it. |
-| `z402_deposit_not_found` | Definitive not-found answers for 15 s | Keep the txid. Check own status: if seen, recover. If the wallet marked it failed, treat it as dead. Otherwise back off and recover. |
+| `z402_deposit_not_found` | Definitive not-found answers for `depositWaitMs` (30 s by default) | Keep the txid. Check own status: if seen, recover. If the wallet marked it failed, treat it as dead. Otherwise back off and recover. |
 | `z402_chain_unavailable` | lightwalletd errors, no definitive answer | Keep the txid, back off 5 s, recover. |
 | `z402_deposit_not_to_merchant`, `z402_deposit_memo_mismatch`, `z402_deposit_transparent`, `z402_deposit_other_session` | Deposit unusable | Drop the txid from the resend set. Fatal: report it (wrong `payTo` or a bug). |
 | `z402_deposit_dead` | Expired, dropped or orphaned | Drop the txid, make a new deposit (next index), recover. |
@@ -221,7 +226,7 @@ Only `invalidReason` (verify) or `errorReason` (settle) reaches the client, so *
 | `unexpected_verify_error`, `unexpected_settle_error` | Facilitator bug | Back off 1 s, recover once. |
 | anything else | Unknown | Fatal. |
 
-**The list is closed: 8 standard and 11 scheme codes.** The facilitator emits nothing else. The SDK and the API can still put their own strings in `PAYMENT-REQUIRED.error`. None of these are facilitator codes, and the client treats them as fatal:
+**The list is closed: 8 standard and 11 scheme codes.** The facilitator emits nothing else. From v1.2 it emits `z402_deposit_memo_mismatch` for every found but unusable txid (§5.2). `z402_deposit_not_to_merchant` and `z402_deposit_other_session` stay in the list, and the client handles them the same way. The SDK and the API can still put their own strings in `PAYMENT-REQUIRED.error`. None of these are facilitator codes, and the client treats them as fatal:
 - `"Payment required"`: the `PAYMENT-SIGNATURE` was undecodable or absent;
 - `"No matching payment requirements"`: `accepted` was altered;
 - `"Facilitator … failed (<status>)"`: only after a 401 from a misconfigured token.
@@ -250,7 +255,7 @@ A facilitator timeout reaches the client as HTTP 502 with **neither** header, wh
 - `/verify` is read-only; `/settle` re-checks and commits synchronously, with no `await` between check and write.
 - Tip-driven poller: `GetLatestBlock` every 5 s, re-checking deposits on each tip change.
 - Refresh-before-refuse: before refusing a session that has a pending deposit, re-query it. Bounded by one RPC deadline (5 s), at most once per 5 s per session.
-- 5 s deadline per RPC. Transport errors map to `z402_chain_unavailable`; only lightwalletd's `-5: Transaction not found in mempool or best chain` means not-found.
+- 5 s deadline per RPC. Transport errors map to `z402_chain_unavailable`. Only the three definitive not-found rows of the §15 `getTransaction` table (`isDefinitiveNotFound()`) mean not-found.
 - Check `payTo`, `amount` and the terms against its own config: `invalid_payment_requirements` on mismatch.
 
 ## 11. Chain access facts
@@ -422,6 +427,8 @@ interface FacilitatorOptions {
   network: ZcashNetwork; chain: ChainView; payTo: string; priceZat: bigint; terms: Terms;
   authToken?: string; ledgerPath?: string; host?: string /* 127.0.0.1 */; port?: number /* 0 */;
   pollIntervalMs?: number /* 5000 */; depositWaitMs?: number /* 30000: cross-backend first-sight skew reaches ~16 s */;
+  onFatal?: (err: unknown) => void /* once, on the first failed ledger write; the host should exit and restart to replay the file */;
+  log?: (msg: string, err?: unknown) => void /* one line per request plus diagnostics; diagnostics default to stderr */;
 }
 startFacilitator(o: FacilitatorOptions): Promise<{ url: string; pollNow(): Promise<void>; close(): Promise<void> }>
 
@@ -431,6 +438,13 @@ startApi(o: ApiOptions): Promise<{ url: string; close(): Promise<void> }>
 // both throw unless isValidPayTo(payTo, network); apps/e2e passes NETWORK_REGTEST
 ```
 
-- The paid route is `GET /chunk`. Its body is `{ chunk: number, cumulativeZat: string, data: string }` with `chunk = cumulativeZat / price`, so it never moves on refused or `HEAD` calls.
+- The paid route is `GET /chunk`. Its body is `{ chunk: number, cumulativeZat: string, data: string }` with `chunk = cumulativeZat / price`, so it never moves on refused calls.
+- Other methods:
+  - An unpaid request gets 402, whatever the method.
+  - A paid request with any method other than GET, `HEAD` and `OPTIONS` included, gets 405 with `Allow: GET` after verification. It is never settled, so the same voucher still buys a GET.
+- **The ledger lock.** `startFacilitator` takes `<ledger>.lock`. A second start on a ledger another live facilitator holds rejects with an error whose message starts with `ledgerPath:`. A lock whose pid is dead, or is pid 1, is taken over.
+- **`close()`** resolves once in-flight requests have finished. An idle keep-alive connection can hold it for about 3 to 5 s. After it resolves, nothing writes the ledger. A settle that is already being served while `close()` runs is still recorded.
+- **The token.** `authToken` must be one token of letters, digits and `-._~+/`; any other value makes startup refuse it.
+- **The facilitator URL.** `startApi` refuses a `facilitatorUrl` that carries credentials; pass `facilitatorToken` instead.
 - The API reads its terms from the facilitator's `/supported`.
 - Start order: `await startFacilitator(...)`, then `startApi(...)`.
