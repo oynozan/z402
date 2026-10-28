@@ -1,7 +1,18 @@
 import { validateDiscoveryExtension, type DiscoveryExtension } from "@x402/extensions/bazaar";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
 import { serve } from "@z402/service-kit";
-import { startTestStack, TEST_NETWORK, TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
+import {
+  declarationRefusal,
+  paymentRequiredOf,
+  railOf,
+  startTestStack,
+  TEST_NETWORK,
+  TEST_PAY_TO,
+  TEST_PUBLIC_URL,
+  TEST_TOKEN,
+  type TestStack,
+  type TestStackOptions,
+} from "@z402/service-kit/testing";
 import express from "express";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { LlmConfig } from "../src/config.js";
@@ -35,10 +46,11 @@ async function fake(o: Parameters<typeof fakeProvider>[0] = {}): Promise<FakePro
 /** The service in front of `provider`, with the facilitator and a paying client */
 async function llmStack(
   provider: FakeProvider,
-  o: { config?: Partial<LlmConfig>; log?: string[] } = {},
+  o: { config?: Partial<LlmConfig>; log?: string[]; stack?: Partial<TestStackOptions> } = {},
 ): Promise<TestStack & { service: LlmService }> {
   const built: { service?: LlmService } = {};
   const stack = await startTestStack({
+    ...o.stack,
     build: async (env) =>
       (built.service = await createLlmService({
         env,
@@ -526,5 +538,61 @@ describe("POST /v1/generate", () => {
     expect([res.status, await res.json()]).toEqual([503, { error: "too_many_streams" }]);
     expect(cumulative(stack)).toBe(500n);
     hold.open();
+  });
+});
+
+describe("the declaration to the facilitator's catalog", () => {
+  test("lists the route with the accepts and extensions of its 402, within every limit of the catalog", async () => {
+    const stack = await llmStack(await fake(), { stack: { catalog: true } });
+    const catalog = stack.catalog;
+    await vi.waitFor(() => expect(catalog?.declarations).toHaveLength(1));
+    const [declaration] = catalog?.declarations ?? [];
+    expect(declaration?.authorization).toBe(`Bearer ${TEST_TOKEN}`);
+    expect(declaration && declarationRefusal(declaration, await railOf(stack))).toBeUndefined();
+
+    const required = await paymentRequiredOf(`${stack.url}/v1/generate`, "POST");
+    expect(required.extensions?.["bazaar"]).toMatchObject({ info: { input: { method: "POST" } } });
+    expect(declaration?.body).toEqual({
+      items: [
+        {
+          resource: `${TEST_PUBLIC_URL}/v1/generate`,
+          type: "http",
+          x402Version: 2,
+          accepts: required.accepts,
+          description:
+            "Streams test-model output, one chunk of about 2 tokens per paid call: " +
+            "send {prompt} to start, then {stream} to continue.",
+          mimeType: "application/json",
+          serviceName: "LLM inference",
+          tags: ["llm", "inference", "text"],
+          extensions: required.extensions,
+        },
+      ],
+    });
+  });
+
+  test("declares nothing while the provider does not list the model", async () => {
+    const stack = await llmStack(await fake({ models: ["other:latest"] }), {
+      stack: { catalog: true, env: { declareIntervalMs: 100 } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(stack.catalog?.declarations).toEqual([]);
+  });
+
+  test("declares again each interval, and logs a catalog that answers 404 once, without the token", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const stack = await llmStack(await fake(), { stack: { catalog: true, env: { declareIntervalMs: 100 } } });
+      const catalog = stack.catalog;
+      catalog?.answer(404, { error: "not_found" });
+      await vi.waitFor(() => expect(catalog?.declarations.length).toBeGreaterThanOrEqual(4), { timeout: 5_000 });
+      const at = (catalog?.declarations ?? []).map((d) => d.at);
+      expect(Math.min(...at.slice(1).map((t, i) => t - (at[i] ?? 0)))).toBeGreaterThanOrEqual(95);
+      const lines = error.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("discovery: "));
+      expect(lines.filter((line) => line.includes("(404)"))).toHaveLength(1);
+      expect(error.mock.calls.flat().map(String).join("\n")).not.toContain(TEST_TOKEN);
+    } finally {
+      error.mockRestore();
+    }
   });
 });

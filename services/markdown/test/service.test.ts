@@ -1,11 +1,16 @@
 import type { LookupAddress } from "node:dns";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
 import {
+  declarationRefusal,
+  paymentRequiredOf,
+  railOf,
   startTestStack,
   TEST_NETWORK,
   TEST_PAY_TO,
   TEST_PUBLIC_URL,
+  TEST_TOKEN,
   type TestStack,
+  type TestStackOptions,
 } from "@z402/service-kit/testing";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadMarkdownConfig, type MarkdownConfig } from "../src/config.js";
@@ -39,7 +44,12 @@ interface Harness {
 }
 
 async function harness(
-  o: { config?: Partial<MarkdownConfig>; wrap?: (fetcher: Fetcher) => Fetcher; now?: () => number } = {},
+  o: {
+    config?: Partial<MarkdownConfig>;
+    wrap?: (fetcher: Fetcher) => Fetcher;
+    now?: () => number;
+    stack?: Partial<TestStackOptions>;
+  } = {},
 ): Promise<Harness> {
   const pages = await startPages({
     "/article": html(ARTICLE),
@@ -63,6 +73,7 @@ async function harness(
     return safeFetch(url, { ...config, policy: allowLoopback, resolver: fakeDns });
   };
   const stack = await startTestStack({
+    ...o.stack,
     build: async (env) => {
       const fetching = o.wrap?.(fetcher) ?? fetcher;
       const service = await createMarkdownService({ env, config, fetcher: fetching, ...(o.now && { now: o.now }) });
@@ -347,5 +358,53 @@ describe("GET /v1/markdown", { timeout: 30_000 }, () => {
     const post = await fetch(h.at("/article"), { method: "POST" });
     expect(post.status).toBe(405);
     expect(post.headers.get("allow")).toBe("GET, HEAD");
+  });
+});
+
+describe("the declaration to the facilitator's catalog", () => {
+  test("lists the route with the accepts and extensions of its 402, within every limit of the catalog", async () => {
+    const h = await harness({ stack: { catalog: true } });
+    const catalog = h.stack.catalog;
+    await vi.waitFor(() => expect(catalog?.declarations).toHaveLength(1));
+    const [declaration] = catalog?.declarations ?? [];
+    expect(declaration?.authorization).toBe(`Bearer ${TEST_TOKEN}`);
+    expect(declaration && declarationRefusal(declaration, await railOf(h.stack))).toBeUndefined();
+
+    const required = await paymentRequiredOf(`${h.stack.url}/v1/markdown`, "GET");
+    expect(required.extensions?.["bazaar"]).toMatchObject({ info: { input: { method: "GET" } } });
+    expect(declaration?.body).toEqual({
+      items: [
+        {
+          resource: `${TEST_PUBLIC_URL}/v1/markdown`,
+          type: "http",
+          x402Version: 2,
+          accepts: required.accepts,
+          description: "Fetches one public web page and returns its main content as clean markdown.",
+          mimeType: "application/json",
+          serviceName: "URL to markdown",
+          tags: ["web", "markdown", "scrape"],
+          extensions: required.extensions,
+        },
+      ],
+    });
+    // Declaring fetches no page
+    expect(h.fetches).toEqual([]);
+  });
+
+  test("declares again each interval, and logs a catalog that answers 404 once, without the token", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const h = await harness({ stack: { catalog: true, env: { declareIntervalMs: 100 } } });
+      const catalog = h.stack.catalog;
+      catalog?.answer(404, { error: "not_found" });
+      await vi.waitFor(() => expect(catalog?.declarations.length).toBeGreaterThanOrEqual(4), { timeout: 5_000 });
+      const at = (catalog?.declarations ?? []).map((d) => d.at);
+      expect(Math.min(...at.slice(1).map((t, i) => t - (at[i] ?? 0)))).toBeGreaterThanOrEqual(95);
+      const lines = error.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("discovery: "));
+      expect(lines.filter((line) => line.includes("(404)"))).toHaveLength(1);
+      expect(error.mock.calls.flat().map(String).join("\n")).not.toContain(TEST_TOKEN);
+    } finally {
+      error.mockRestore();
+    }
   });
 });

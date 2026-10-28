@@ -16,7 +16,18 @@ import {
   type TipSource,
 } from "../src/index.js";
 import { EXAMPLE_AGE_FILE } from "../src/example.js";
-import { startTestStack, TEST_NETWORK, TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
+import {
+  declarationRefusal,
+  paymentRequiredOf,
+  railOf,
+  startTestStack,
+  TEST_NETWORK,
+  TEST_PAY_TO,
+  TEST_PUBLIC_URL,
+  TEST_TOKEN,
+  type TestStack,
+  type TestStackOptions,
+} from "@z402/service-kit/testing";
 import { ageFile, armor } from "./support.js";
 
 class FakeTips implements TipSource {
@@ -79,6 +90,7 @@ interface HarnessOptions {
   onVerify?: () => void | Promise<void>;
   /** Clock of the rate limit */
   now?: () => number;
+  stack?: Partial<TestStackOptions>;
 }
 
 /** Forwards to the real facilitator, refusing or delaying /settle and holding /verify as the test asks */
@@ -163,6 +175,7 @@ async function dropbox(o: HarnessOptions = {}): Promise<Harness> {
     log: quiet,
   });
   const stack = await startTestStack({
+    ...o.stack,
     build: async (env) => {
       const faulty =
         o.refuseSettlement === true ||
@@ -943,6 +956,76 @@ describe("what the service declares", () => {
     expect(warn.mock.calls.filter((call) => String(call[0]).includes("bazaar"))).toEqual([]);
     // Without the probe header the same request is refused as an unknown drop, before payment
     expect((await fetch(`${drops(h)}/example/hold`, { method: "POST" })).status).toBe(404);
+  });
+});
+
+describe("the declaration to the facilitator's catalog", () => {
+  test("lists both paid routes with the accepts and extensions of their 402s, within the catalog limits", async () => {
+    const h = await dropbox({ stack: { catalog: true } });
+    const catalog = h.stack.catalog;
+    await vi.waitFor(() => expect(catalog?.declarations).toHaveLength(1));
+    const [declaration] = catalog?.declarations ?? [];
+    expect(declaration?.authorization).toBe(`Bearer ${TEST_TOKEN}`);
+    expect(declaration && declarationRefusal(declaration, await railOf(h.stack))).toBeUndefined();
+
+    const upload = await paymentRequiredOf(drops(h), "POST");
+    const hold = await paymentRequiredOf(`${drops(h)}/example/hold`, "POST");
+    const bazaar = hold.extensions?.["bazaar"] as { routeTemplate?: string; info: { input: Record<string, unknown> } };
+    expect(bazaar.routeTemplate).toBe("/v1/drops/:id/hold");
+    expect(bazaar.info.input).toMatchObject({ method: "POST", pathParams: { id: "example" } });
+    // The catalog shows the route's own example id, not the one this probe asked about
+    const input = { ...bazaar.info.input, pathParams: { id: "<drop id>" } };
+    const common = {
+      type: "http",
+      x402Version: 2,
+      mimeType: "application/json",
+      serviceName: "Encrypted drop box",
+      tags: ["storage", "handoff", "encrypted"],
+    };
+    expect(declaration?.body).toEqual({
+      items: [
+        {
+          ...common,
+          resource: `${TEST_PUBLIC_URL}/v1/drops`,
+          description: "Holds one age-encrypted blob for 10 blocks; pay again to hold it longer.",
+          accepts: upload.accepts,
+          extensions: upload.extensions,
+        },
+        {
+          ...common,
+          resource: `${TEST_PUBLIC_URL}/v1/drops/:id/hold`,
+          description: "Holds an existing drop for 10 more blocks.",
+          accepts: hold.accepts,
+          extensions: { ...hold.extensions, bazaar: { ...bazaar, info: { ...bazaar.info, input } } },
+        },
+      ],
+    });
+  });
+
+  test("declares again each interval, and logs a catalog that answers 404 once, without the token", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const h = await dropbox({ stack: { catalog: true, env: { declareIntervalMs: 100 } } });
+      const catalog = h.stack.catalog;
+      catalog?.answer(404, { error: "not_found" });
+      await vi.waitFor(() => expect(catalog?.declarations.length).toBeGreaterThanOrEqual(4), { timeout: 5_000 });
+      const at = (catalog?.declarations ?? []).map((d) => d.at);
+      expect(Math.min(...at.slice(1).map((t, i) => t - (at[i] ?? 0)))).toBeGreaterThanOrEqual(95);
+      const lines = error.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("discovery: "));
+      expect(lines.filter((line) => line.includes("(404)"))).toHaveLength(1);
+      expect(error.mock.calls.flat().map(String).join("\n")).not.toContain(TEST_TOKEN);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  test("declares nothing while the chain tip is unknown", async () => {
+    const h = await dropbox({
+      tips: new FakeTips(undefined),
+      stack: { catalog: true, env: { declareIntervalMs: 100 } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(h.stack.catalog?.declarations).toEqual([]);
   });
 });
 

@@ -1,6 +1,16 @@
 import { validateDiscoveryExtension, type DiscoveryExtension } from "@x402/extensions/bazaar";
 import { PROBE_HEADER } from "@z402/service-kit";
-import { startTestStack, TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
+import {
+  declarationRefusal,
+  paymentRequiredOf,
+  railOf,
+  startTestStack,
+  TEST_PAY_TO,
+  TEST_PUBLIC_URL,
+  TEST_TOKEN,
+  type TestStack,
+  type TestStackOptions,
+} from "@z402/service-kit/testing";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadEmbeddingsConfig, type EmbeddingsConfig } from "../src/index.js";
 import { createEmbeddingsService } from "../src/service.js";
@@ -30,7 +40,9 @@ interface Harness {
   url: string;
 }
 
-async function harness(o: { fake?: FakeProviderOptions; config?: Partial<EmbeddingsConfig> } = {}): Promise<Harness> {
+async function harness(
+  o: { fake?: FakeProviderOptions; config?: Partial<EmbeddingsConfig>; stack?: Partial<TestStackOptions> } = {},
+): Promise<Harness> {
   const fake = await startFakeProvider(o.fake);
   fakes.push(fake);
   const config = {
@@ -39,6 +51,7 @@ async function harness(o: { fake?: FakeProviderOptions; config?: Partial<Embeddi
   };
   const logs: string[] = [];
   const stack = await startTestStack({
+    ...o.stack,
     build: (env) => createEmbeddingsService({ env, config, log: (line) => logs.push(line) }),
   });
   stacks.push(stack);
@@ -556,5 +569,57 @@ describe("a provider that fails after payment", () => {
     const res = await h.stack.paidFetch(h.url, post({ input: "two" }));
     expect(res.status).toBe(200);
     expect(((await res.json()) as { data: { embedding: number[] }[] }).data[0]?.embedding).toEqual(vectorFor("two"));
+  });
+});
+
+describe("the declaration to the facilitator's catalog", () => {
+  test("lists the route with the accepts and extensions of its 402, within every limit of the catalog", async () => {
+    const h = await harness({ stack: { catalog: true } });
+    const catalog = h.stack.catalog;
+    await vi.waitFor(() => expect(catalog?.declarations).toHaveLength(1));
+    const [declaration] = catalog?.declarations ?? [];
+    expect(declaration?.authorization).toBe(`Bearer ${TEST_TOKEN}`);
+    expect(declaration && declarationRefusal(declaration, await railOf(h.stack))).toBeUndefined();
+
+    const required = await paymentRequiredOf(h.url, "POST");
+    expect(required.extensions?.["bazaar"]).toMatchObject({ info: { input: { method: "POST" } } });
+    expect(declaration?.body).toEqual({
+      items: [
+        {
+          resource: `${TEST_PUBLIC_URL}/v1/embeddings`,
+          type: "http",
+          x402Version: 2,
+          accepts: required.accepts,
+          description: "Embeds up to about 1,000 tokens of text per paid call (OpenAI-style request and answer).",
+          mimeType: "application/json",
+          serviceName: "Text embeddings",
+          tags: ["embeddings", "vectors", "rag"],
+          extensions: required.extensions,
+        },
+      ],
+    });
+  });
+
+  test("declares nothing while the provider does not list the model", async () => {
+    const h = await harness({ fake: { models: ["other"] }, stack: { catalog: true, env: { declareIntervalMs: 100 } } });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(h.stack.catalog?.declarations).toEqual([]);
+  });
+
+  test("declares again each interval, and logs a catalog that answers 404 once, without the token", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const h = await harness({ stack: { catalog: true, env: { declareIntervalMs: 100 } } });
+      const catalog = h.stack.catalog;
+      catalog?.answer(404, { error: "not_found" });
+      await vi.waitFor(() => expect(catalog?.declarations.length).toBeGreaterThanOrEqual(4), { timeout: 5_000 });
+      const at = (catalog?.declarations ?? []).map((d) => d.at);
+      expect(Math.min(...at.slice(1).map((t, i) => t - (at[i] ?? 0)))).toBeGreaterThanOrEqual(95);
+      const lines = error.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("discovery: "));
+      expect(lines.filter((line) => line.includes("(404)"))).toHaveLength(1);
+      expect(error.mock.calls.flat().map(String).join("\n")).not.toContain(TEST_TOKEN);
+    } finally {
+      error.mockRestore();
+    }
   });
 });
