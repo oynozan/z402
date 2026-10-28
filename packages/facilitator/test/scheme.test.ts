@@ -1,6 +1,7 @@
 import type { PaymentPayload, PaymentRequirements, SettleResponse, VerifyResponse } from "@x402/core/types";
 import {
   ASSET,
+  ChainUnavailableError,
   DEMO_TERMS,
   NETWORK_REGTEST,
   NETWORK_TESTNET,
@@ -753,6 +754,44 @@ describe("stale lookup results", () => {
     const inspect = vi.spyOn(r.view, "inspect");
     expect((await r.s.verify(pay(500n, { txid: d1 }), req())).isValid).toBe(true);
     expect(inspect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a credited pending deposit past its expiry while its lookups fail", () => {
+  test("stops counting at the current tip, writes nothing, and counts again once it reads mined", async () => {
+    let d1 = "";
+    let answer: "chain" | "outage" | { minedAt: number } = "chain";
+    const r = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => {
+        if (txid !== d1 || answer === "chain") return view.inspect(txid);
+        if (answer === "outage") throw new ChainUnavailableError("lightwalletd is unreachable");
+        return { ...mempoolDeposit(txid, 1041), location: "mined", minedHeight: answer.minedAt };
+      },
+    }));
+    d1 = await opened(r);
+    answer = "outage";
+    r.chain.hold(d1);
+    r.chain.mine(41);
+    await r.watcher.pollNow();
+    expect(r.state.deposit(d1)?.status).toBe("pending");
+
+    const over = await r.s.verify(pay(100500n), req());
+    expect(over).toMatchObject({ isValid: false, invalidReason: REASON.depositRequired });
+    expect(sessionOf(over)).toMatchObject({
+      limitZat: "0",
+      deposits: [expect.objectContaining({ txid: d1, status: "dead" })],
+    });
+    expect(await r.s.settle(pay(1000n), req())).toMatchObject({ success: false, errorReason: REASON.depositRequired });
+    expect(await r.s.verify(pay(1000n, { txid: d1 }), req())).toMatchObject({ invalidReason: REASON.depositDead });
+    expect(r.ledger.replay().map((e) => e.t)).toEqual(["deposit", "voucher"]);
+
+    answer = { minedAt: 1040 };
+    await r.watcher.pollNow();
+    expect(r.state.deposit(d1)).toMatchObject({ status: "confirmed", minedHeight: 1040, confirmations: 2 });
+    const counted = await r.s.verify(pay(1000n), req());
+    expect(counted.isValid).toBe(true);
+    expect(sessionOf(counted)).toMatchObject({ confirmedZat: "100000", limitZat: "125000" });
   });
 });
 

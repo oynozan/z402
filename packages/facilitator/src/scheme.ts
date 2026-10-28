@@ -39,6 +39,7 @@ import { LedgerRefusal, type LedgerEvent } from "./core/ledger.js";
 import type { DepositResolver, Lookup } from "./core/resolver.js";
 import { buildSnapshot } from "./core/snapshot.js";
 import type { FacilitatorState } from "./core/state.js";
+import { asOfTip } from "./core/transitions.js";
 import type { DepositRecord, Evaluation } from "./core/types.js";
 import type { ChainWatcher } from "./core/watcher.js";
 import { termsVersion } from "./termsVersion.js";
@@ -186,7 +187,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
         return this.#fatal(e, network);
       }
       if (verdict.credits && v.depositTxid !== undefined) this.#resolver.forget(v.depositTxid);
-      const deposits = this.#state.depositsOf(v.sessionKey);
+      const deposits = this.#state.depositsOf(v.sessionKey).map((d) => asOfTip(d, verdict.tip));
       return {
         success: true,
         transaction: verdict.acks ? (v.depositTxid ?? "") : "",
@@ -259,10 +260,11 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
   #decide(v: Voucher, fresh?: Lookup): Verdict {
     const { priceZat, terms } = this.#config;
     const cLast = this.#state.session(v.sessionKey)?.cLast ?? 0n;
-    const credited = this.#state.depositsOf(v.sessionKey);
     const known = v.depositTxid === undefined ? undefined : (fresh ?? this.#resolver.peek(v.depositTxid));
     // The newest tip any read has seen, so an older lookup cannot keep a deposit alive past its expiry
     const tip = Math.max(this.#watcher.lastTip() ?? 0, known?.kind === "found" ? known.tip : 0);
+    // A pending deposit whose lookups keep failing stops counting at its expiry, and only the watcher records it
+    const credited = this.#state.depositsOf(v.sessionKey).map((d) => asOfTip(d, tip));
     const presented = this.#presented(v, known, tip);
     const deposits = presented.kind === "usable" ? [...credited, presented.record] : credited;
     // Projected as if the presented deposit were credited, which the client never takes for an ack
@@ -307,12 +309,12 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
   #presented(v: Voucher, known: Lookup | undefined, tip: number): Presented {
     const txid = v.depositTxid;
     if (txid === undefined) return { kind: "none" };
-    const owner = this.#state.ownerOf(txid);
-    if (owner !== undefined && owner !== v.sessionKey) {
+    const record = this.#state.deposit(txid);
+    if (record !== undefined && record.sessionKey !== v.sessionKey) {
       return { kind: "refused", refusal: { code: REASON.depositOtherSession, message: "credited to another session" } };
     }
-    if (owner !== undefined) {
-      if (this.#state.deposit(txid)?.status !== "dead") return { kind: "credited" };
+    if (record !== undefined) {
+      if (asOfTip(record, tip).status !== "dead") return { kind: "credited" };
       return { kind: "refused", refusal: { code: REASON.depositDead, message: "the deposit is dead" } };
     }
 

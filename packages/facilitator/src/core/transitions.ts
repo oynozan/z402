@@ -15,6 +15,13 @@ export function observe(rec: DepositRecord, obs: TxInspection, tip: number, nowM
   return obs.found ? seen(rec, obs, tip) : missing(rec, tip, nowMs);
 }
 
+/** The record as the tip judges it without a chain answer, dead once unmined past its expiry, and nothing is written */
+export function asOfTip(rec: DepositRecord, tip: number): DepositRecord {
+  const expired = isDepositDead({ minedHeight: null, expiryHeight: rec.expiryHeight, tip });
+  if (rec.status !== "pending" || rec.minedHeight !== null || !expired) return rec;
+  return { ...rec, status: "dead", minedHeight: null, confirmations: 0, deadAtTip: tip };
+}
+
 function seen(rec: DepositRecord, obs: FoundInspection, tip: number): DepositRecord {
   const at = chainPosition(
     { location: obs.location, minedHeight: obs.minedHeight, expiryHeight: rec.expiryHeight },

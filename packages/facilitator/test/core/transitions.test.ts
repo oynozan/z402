@@ -1,6 +1,6 @@
 import type { FoundInspection, TxInspection } from "@z402/protocol";
 import { describe, expect, test } from "vitest";
-import { observe } from "../../src/core/transitions.js";
+import { asOfTip, observe } from "../../src/core/transitions.js";
 import type { DepositRecord } from "../../src/core/types.js";
 import { record, SESSION_KEY, TIP } from "./records.js";
 
@@ -325,5 +325,48 @@ describe("observe: final and purity", () => {
       expect(r).toMatchObject(facts);
     }
     expect(r.status).toBe("final");
+  });
+});
+
+describe("observe: the expiry shortcut on a confirmed record", () => {
+  test("a confirmed record that reads not-found once its tip reached the expiry is dead at once", () => {
+    const input = confirmed({ expiryHeight: 160 });
+    expect(observe(input, MISSING, 160, T0)).toMatchObject({
+      status: "dead",
+      minedHeight: null,
+      confirmations: 0,
+      deadAtTip: 160,
+    });
+  });
+});
+
+describe("asOfTip", () => {
+  test("a pending record with expiry 160 is unchanged at tip 159 and dead at tip 160", () => {
+    const input = rec({ expiryHeight: 160 });
+    expect(asOfTip(input, 159)).toBe(input);
+    expect(asOfTip(input, 160)).toEqual({
+      ...input,
+      status: "dead",
+      minedHeight: null,
+      confirmations: 0,
+      deadAtTip: 160,
+    });
+  });
+
+  test("a pending record with expiry 0 never expires", () => {
+    const input = rec({ expiryHeight: 0 });
+    expect(asOfTip(input, TIP + 5000)).toBe(input);
+  });
+
+  test("a confirmed record is unchanged past its expiry", () => {
+    const input = confirmed({ expiryHeight: 160 });
+    expect(asOfTip(input, 500)).toBe(input);
+  });
+
+  test("it never changes the record it is given", () => {
+    const input = Object.freeze(rec({ expiryHeight: 160 }));
+    const before = structuredClone(input);
+    asOfTip(input, 200);
+    expect(input).toEqual(before);
   });
 });
