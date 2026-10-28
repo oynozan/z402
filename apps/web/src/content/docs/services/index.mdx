@@ -219,7 +219,7 @@ export async function close(): Promise<void> {
 | `PrepaidVoucherScheme` | The client scheme: keeps the session, decides when to deposit and signs each voucher. |
 | `x402Client` and `wrapFetchWithPayment` | The stock x402 client and fetch wrapper. `register` is the only line that adds Zcash. |
 
-The first call to a provider makes a deposit, which can take tens of seconds. Later calls only sign a voucher. The wallet adapter today is Zallet over JSON-RPC, on a regtest or testnet stack. See [Pay from an agent](/docs/guides/pay-from-an-agent) and [`@z402/client`](/docs/reference/client).
+The first call to a provider makes a deposit, which can take tens of seconds. Later calls only sign a voucher. The wallet adapter today is Zallet over JSON-RPC, built and tested on the regtest stack. See [Pay from an agent](/docs/guides/pay-from-an-agent) and [`@z402/client`](/docs/reference/client).
 
 <Callout type="note" title="Which stack paid-fetch.ts reaches">
 

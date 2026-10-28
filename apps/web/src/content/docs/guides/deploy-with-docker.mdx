@@ -255,10 +255,10 @@ docker compose start markdown
 Three services run on demand, through Compose profiles. Flags that you give after the service name are added to the ones compose sets, and win over them.
 
 ```bash
-docker compose run --rm agent --calls 20            # honest agent, one paid call per second
-docker compose run --rm agent --calls 20 --cheat    # one deposit, then refused at its credit limit
-docker compose run --rm discover                    # the service catalog, as an agent sees it, no wallet
-docker compose run --rm smoke                       # one paid call on every starter service
+docker compose run --rm agent --calls 20                            # honest agent, one paid call per second
+docker compose run --rm agent --calls 300 --interval-ms 0 --cheat  # one deposit, then refused at its credit limit
+docker compose run --rm discover                                    # the service catalog, as an agent sees it, no wallet
+docker compose run --rm smoke                                       # one paid call on every starter service
 ```
 
 **The agent** pays from Zallet account 0. Each run first checks that the agent still holds 1 ZEC, and tops it up if not. It prints one line per paid call:

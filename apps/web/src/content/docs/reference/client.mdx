@@ -11,7 +11,7 @@ export const meta = {
 npm install --save-exact @z402/client @x402/fetch@2.28.0
 ```
 
-`@z402/client` is an ES module. It depends on `@x402/core` 2.28.0 and on `@z402/protocol`, and it has no dependency on `@x402/fetch`: install that yourself for `x402Client` and `wrapFetchWithPayment`. The package needs no gRPC or wallet library. It reaches the chain through an object you give it, and Zallet through `fetch`.
+`@z402/client` is an ES module. It depends on `@x402/core` 2.28.0 and on `@z402/protocol`, and it has no dependency on `@x402/fetch`: install that yourself for `x402Client` and `wrapFetchWithPayment`. The package needs no gRPC or wallet library. It reaches the chain through an object you give it, and Zallet through `fetch`. It also re-exports the seams that a wallet or a chain source of your own implements, so you need no `@z402/protocol` import for them.
 
 ```ts
 import {
@@ -19,6 +19,9 @@ import {
   PrepaidVoucherScheme,
   ZalletRpcWallet,
 } from "@z402/client";
+
+// For a wallet or a chain source of your own
+import { ChainUnavailableError, type TxStatus, type TxStatusSource, type ZcashWallet } from "@z402/client";
 ```
 
 ## At a glance
@@ -40,6 +43,9 @@ import {
 | [`DepositStatusUnknownError`](#errors) | class | A deposit may exist and cannot be found. |
 | [`DepositUncertainError`](#errors) | class | A deposit with a known txid may or may not have been broadcast. |
 | [`InsufficientFundsError`](#errors) | class | The wallet could not fund the deposit. |
+| [`ZcashWallet`](#zcashwallet-and-txstatussource), [`DepositRequest`](#zcashwallet-and-txstatussource) | interfaces | What a wallet of your own implements, and the request it receives. Re-exported from `@z402/protocol`. |
+| [`TxStatusSource`](#zcashwallet-and-txstatussource), [`TxStatus`](#zcashwallet-and-txstatussource) | interface, type | What a chain source of your own implements, and what its `status` answers. Re-exported from `@z402/protocol`. |
+| [`ChainUnavailableError`](#zcashwallet-and-txstatussource) | class | What a chain source throws for an answer that is not definitive. Re-exported from `@z402/protocol`. |
 | [`Session`](#lower-level-exports) | class | The state of one provider's session. |
 | [`LocalDeposit`](#deposit-states) | interface | One deposit as the session records it. |
 | [`waitForConfirmation`](#lower-level-exports) | function | Polls the chain until a transaction is mined, dead or timed out. |
@@ -115,7 +121,7 @@ It checks the offer before it takes any lock or calls the wallet, and every erro
 | `extra.windowZat` | At most `maxDepositZat`. | `windowZat: ... exceeds maxDepositZat` |
 | `context.maxAmountPerPayment` | When the stock client sets it, it must be an integer zat string, and the window must not exceed it. | `maxAmountPerPayment:` or `windowZat: ... exceeds maxAmountPerPayment` |
 
-After the checks, it throws `session halted by <code> on deposit <txid>` when the session was halted, before and after waiting for the lock. A session halts when the provider rejected a deposit, when the provider asked for another deposit while the one this call presented was pending or not listed, which the scheme treats as a fault on the provider's side, or when the wallet threw `DepositStatusUnknownError`. A halted session never deposits or signs again.
+After the checks, it throws `session halted by <code> on deposit <txid>` when the session was halted, before and after waiting for the lock. A session halts when the provider rejected a deposit, when the provider asked for another deposit while the one this call presented was pending or not listed, which the scheme treats as a fault on the provider's side, or when the wallet threw `DepositStatusUnknownError`. A halted session never deposits or signs again, and its [`halted`](#sessionview) field says why.
 
 ### When the scheme deposits
 
@@ -160,6 +166,7 @@ interface SessionView {
   readonly deposits: readonly Readonly<LocalDeposit>[];
   readonly nextIndex: number;
   readonly depositsMade: number;
+  readonly halted: { readonly code: string; readonly txid: string | undefined } | undefined;
 }
 ```
 
@@ -172,13 +179,15 @@ interface SessionView {
 | `deposits` | Every deposit this session tried, oldest first. |
 | `nextIndex` | The index of the next deposit's memo. It starts at 1 and moves for every attempt, failed ones included. |
 | `depositsMade` | Deposits that count against `maxDeposits`. |
+| `halted` | Why the session refuses every payment from now on, and `undefined` while it can still pay. Once it is set it holds the `code` that stopped the session and the `txid` of the deposit it concerns. The code is the provider's rejection of a deposit (for example `z402_deposit_memo_mismatch`), `z402_deposit_required_while_presented`, or `deposit_status_unknown` after the wallet throws `DepositStatusUnknownError`. The `txid` is the one the deposit was presented under, `undefined` when the refusal named none, and `"(unknown)"` for `deposit_status_unknown`. It is the same pair as in the `session halted by <code> on deposit <txid>` error that every later payment to this provider throws, where an `undefined` txid reads `(none presented)`. Other providers' sessions are unaffected. |
 
 ```ts
 const view = scheme.session("uregtest1...", "zcash:regtest");
 console.log(view?.cumulativeZat, view?.snapshot?.limitZat, view?.deposits.map((d) => d.state));
+if (view?.halted !== undefined) console.warn(`halted by ${view.halted.code} on ${view.halted.txid ?? "no txid"}`);
 ```
 
-A view does not say whether the session is halted. Watch for the `fatal` event, or for the `session halted by` error from `paidFetch`.
+`halted` says whether a session is halted, and why. The `fatal` event and the `session halted by` error from `paidFetch` report it too.
 
 ### Deposit states
 
@@ -243,7 +252,7 @@ type ClientEvent =
 | `session` | The first offer from a network and `payTo` pair arrives, and the session is created. `sessionKey` is its public key. |
 | `deposit_started` | Before the wallet is asked to send. `index` is the memo index. `inline` is true when a call is waiting for this deposit. |
 | `deposit_broadcast` | The wallet returned the txid. `ms` is how long `sendDeposit` took. With Zallet that is nearly all proving time. |
-| `deposit_failed` | The wallet threw. `error` is the original error object, which the stock wrapper does not pass on. |
+| `deposit_failed` | The wallet threw. `error` is the original error object, before the stock wrapper wraps it. |
 | `deposit_acked` | A successful settle acknowledged the deposit. |
 | `deposit_confirmed` | Once for each deposit. Either a snapshot first listed it as `confirmed` or `final` (`index` and `snapshot` are set, and `height` is not), or the scheme's own wait saw it mined (`index` and `height` are set). |
 | `deposit_dead` | A deposit became dead. |
@@ -399,7 +408,7 @@ It adapts a lightwalletd client, for example the one from `createLightwalletdCli
 | `tip()` | The chain height, from `getTip()`. |
 | `status(txid)` | `{ found: false }` when the node has no such transaction. Otherwise `{ found: true, location, minedHeight, expiryHeight }`, where `minedHeight` is set only when the location is `mined`, and `expiryHeight` is read from the raw transaction. |
 
-Every failure becomes a `ChainUnavailableError` from `@z402/protocol`, an outage as opposed to a definitive answer. That includes a raw transaction it cannot read. The scheme treats such an error as no answer: it neither counts nor resets a not-found streak.
+Every failure becomes a `ChainUnavailableError`, an outage as opposed to a definitive answer. That includes a raw transaction it cannot read. The scheme treats such an error as no answer: it neither counts nor resets a not-found streak.
 
 ## Errors
 
@@ -410,11 +419,15 @@ Every failure becomes a `ChainUnavailableError` from `@z402/protocol`, an outage
 | `DepositUncertainError` | `Error` | `txid: string` | A send failed after the transaction was built, so it may still reach the chain. The scheme keeps checking the txid. `ZalletRpcWallet` never throws it, and it is for your own wallet. |
 | `InsufficientFundsError` | `Error` | `cause` | `ZalletRpcWallet` could not fund the deposit after its retries. |
 
-The constructors are `new DepositUncertainError(txid, { message?, cause? })`, `new ZalletRpcError(message, { code?, cause? })`, `new DepositStatusUnknownError(memo, { cause? })` and `new InsufficientFundsError(message, { cause? })`. Each sets `name` to its class name. The stock wrapper wraps any error from `createPaymentPayload` in a plain `Error` whose message starts `Failed to create payment payload:`, and it does not keep the original. Read the original from the `deposit_failed` event.
+The constructors are `new DepositUncertainError(txid, { message?, cause? })`, `new ZalletRpcError(message, { code?, cause? })`, `new DepositStatusUnknownError(memo, { cause? })` and `new InsufficientFundsError(message, { cause? })`. Each sets `name` to its class name. When a payment cannot be built, the stock wrapper throws a plain `Error` whose message starts `Failed to create payment payload:`, with no `cause`. On its one recovery retry the wrapper does not wrap, so the original error (an `InsufficientFundsError`, or `session halted by ...`) is thrown as it is. Check the prefix and `instanceof` both. The `deposit_failed` event always carries the original error.
 
 ## ZcashWallet and TxStatusSource
 
-These are the two seams the scheme needs. They live in `@z402/protocol`, and the client does not re-export them.
+These are the two seams the scheme needs. They are defined in `@z402/protocol`, and `@z402/client` re-exports them, with `DepositRequest`, `TxStatus` and `ChainUnavailableError`: the very same objects, not copies. A wallet or a chain source of your own needs no other import:
+
+```ts
+import { ChainUnavailableError, type DepositRequest, type TxStatus, type TxStatusSource, type ZcashWallet } from "@z402/client";
+```
 
 ```ts
 interface DepositRequest {
@@ -438,7 +451,7 @@ interface TxStatusSource {
 }
 ```
 
-A wallet must send exactly `amountZat` to `to`, shielded, with the memo as a text memo, and resolve with the txid in display order. It must not send twice for one memo. A chain source must throw `ChainUnavailableError` for any answer that is not definitive, and `{ found: false }` only for a definitive not-found.
+A wallet must send exactly `amountZat` to `to`, shielded, with the memo as a text memo, and resolve with the txid in display order. It must not send twice for one memo. A chain source must throw `ChainUnavailableError` for any answer that is not definitive, and `{ found: false }` only for a definitive not-found. The scheme treats a `ChainUnavailableError` as no answer: it neither counts nor resets a not-found streak.
 
 ## Lower-level exports
 

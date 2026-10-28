@@ -66,7 +66,7 @@ The scheme keeps one session for each provider address, in memory only: a fresh 
 | A provider to pay | Something to call | The demo API at `http://127.0.0.1:4021/chunk` |
 | The catalog of services | Finding providers, if you do not know their URLs | The website at `http://localhost:3000`, which serves the facilitator's catalog |
 
-The addresses above are those of the local Z3 regtest stack in `infra/z3`, which `scripts/demo.sh up` starts. The [Quickstart](/docs/quickstart) runs the providers and the catalog. Zallet's login is the public regtest default. On a real network, read the password from the environment and never commit it.
+The addresses above are those of the local Z3 regtest stack in `infra/z3`, which `scripts/demo.sh up` starts. The [Quickstart](/docs/quickstart) runs the providers and the catalog in Docker, on a chain of its own, which a wallet on the Z3 stack cannot pay. Zallet's login is the public regtest default. On a real network, read the password from the environment and never commit it.
 
 <Callout type="note" title="Docker Compose keeps these two ports private">
 
@@ -129,7 +129,7 @@ What the wallet does for each deposit:
 
 ### Bring your own wallet
 
-`ZalletRpcWallet` is the only wallet in the package, and it is built and tested against Zallet on the regtest stack. The demo agent's `--wallet zingo` option is a placeholder for a mainnet wallet that does not exist yet. For anything else, write an object that fits this interface from `@z402/protocol`:
+`ZalletRpcWallet` is the only wallet in the package, and it is built and tested against Zallet on the regtest stack. The demo agent's `--wallet zingo` option is a placeholder for a mainnet wallet that does not exist yet. For anything else, write an object that fits this interface. `@z402/client` exports both types:
 
 ```ts
 interface DepositRequest {
@@ -320,11 +320,10 @@ client.setSpendControls({
 
 To accept a window above 1,000,000 zat, raise `maxDepositZat` as well, because both limits apply.
 
-To bound the money across all providers, count in the wallet, which sees every deposit. This wrapper refuses a deposit that would take the total past a budget. The scheme records the refusal as a failed deposit. A deposit that a call waits for makes that call throw. A background deposit does not happen, and the provider's refusal at the limit comes back later as a 402.
+To bound the money across all providers, count in the wallet, which sees every deposit. This wrapper refuses a deposit that would take the total past a budget. The scheme records the refusal as a failed deposit (`deposit_failed`). A background deposit then does not happen, and the scheme tries again at the next trigger. Once the headroom no longer covers a call, the deposit is made inline, and that call throws `Failed to create payment payload: ...` before any voucher is sent.
 
 ```ts
-import { DepositStatusUnknownError, DepositUncertainError } from "@z402/client";
-import type { ZcashWallet } from "@z402/protocol";
+import { DepositStatusUnknownError, DepositUncertainError, type ZcashWallet } from "@z402/client";
 
 function withBudget(wallet: ZcashWallet, budgetZat: bigint): ZcashWallet {
   let committed = 0n;
@@ -386,11 +385,11 @@ for (const s of scheme.sessions()) {
 
 ## Errors
 
-A call can go wrong in three ways. Your code sees each differently.
+A call can go wrong in three ways. Your code sees each differently. A refusal that the client cannot recover from is returned, as the provider's 402. A payment that cannot be built is thrown, and so is a failure of `fetch` itself. Code that pays therefore checks `res.status` and catches too.
 
 ### Errors that `paidFetch` throws
 
-The stock wrapper reports a failure to build a payment as a plain `Error` with no `cause`, so you cannot test it with `instanceof`. Match on the start of the message instead. To get the original error, such as an `InsufficientFundsError`, read it from the `deposit_failed` event.
+When a payment cannot be built, the stock wrapper throws a plain `Error` whose message starts `Failed to create payment payload:`, with no `cause`. On its one recovery retry the wrapper does not wrap, so the original error, such as an `InsufficientFundsError` or `session halted by ...`, is thrown as it is. Check the prefix and `instanceof` both. To get the original wallet error in either case, read it from the `deposit_failed` event.
 
 | The error | What happened | What to do |
 |---|---|---|
@@ -399,9 +398,9 @@ The stock wrapper reports a failure to build a payment as a plain `Error` with n
 | `Failed to create payment payload: windowZat:` | The provider's window is larger than `maxDepositZat` or the stock cap. | Raise the limit if you accept that deposit, or skip the provider. |
 | `Failed to create payment payload: All payment requirements were rejected by spendControls` | The stock client dropped every offer: the asset is not ZEC, or the price is above its cap. | Raise the cap with `setSpendControls`, or choose another route. |
 | `Failed to create payment payload:` with `scheme:`, `network:`, `asset:`, `payTo:`, `amount:` or `extra:` | The offer is invalid. The message names the field. | The provider is misconfigured. Do not retry. |
-| `Failed to create payment payload: session halted by` | The session stopped for good: the provider rejected a deposit, asked for another while one was unaccounted for, or the wallet lost track of one. | Stop paying this provider. A restart starts a new session. |
-| `Failed to create payment payload:` and a wallet message | The deposit failed, for example no funds or a budget spent. | Read `deposit_failed`. Fund the wallet and call again. |
-| `AbortError`, or `TypeError: fetch failed` | The request was aborted or the network failed. | See [Cancel a call](#cancel-a-call). |
+| `Failed to create payment payload: session halted by`, or `session halted by` alone | The session stopped for good: the provider rejected a deposit, asked for another while one was unaccounted for, or the wallet lost track of one. | Stop paying this provider. `scheme.session(payTo)?.halted` says why. A restart starts a new session. |
+| `Failed to create payment payload:` and a wallet message, or the bare wallet error, such as an `InsufficientFundsError` | The deposit failed, for example no funds or a budget spent. | Read `deposit_failed`. Fund the wallet and call again. |
+| `AbortError` (a manual abort), `TimeoutError` (from `AbortSignal.timeout`), or `TypeError: fetch failed` | The request was aborted, its deadline passed, or the network failed. | See [Cancel a call](#cancel-a-call). |
 
 The events carry the details. This handler logs the three that matter most:
 
@@ -427,7 +426,7 @@ When the provider refuses a voucher, the scheme acts on the code first. It waits
 
 | Code | You see it when | What to do |
 |---|---|---|
-| `z402_deposit_required` | The limit is reached and the scheme may not deposit: `maxDeposits` is reached, a budget refused the deposit, or the retry was refused too. | Raise your limits or stop. |
+| `z402_deposit_required` | The limit is reached and the scheme may not deposit: `maxDeposits` is reached, or the retry was refused too. | Raise your limits or stop. |
 | `z402_awaiting_confirmation` | A deposit stayed unconfirmed for `confirmationWaitMs`, 10 minutes by default, or the retry was refused again. | Call again after the next block. |
 | `z402_cumulative_mismatch` | Your running total and the provider's disagreed, and after the scheme resynced, the retry was refused again, or the refusal carried no snapshot. | Call again. |
 | `z402_chain_unavailable`, `unexpected_verify_error`, `unexpected_settle_error` | The provider's facilitator or node failed twice in a row. | Call again later. |
@@ -536,13 +535,13 @@ Pick on your own side. List the whole catalog, filter it, and rank what is left 
 
 <Callout type="warning" title="Treat the catalog as untrusted">
 
-Every field is text that a provider wrote. The 402 that a route returns stays authoritative: pay what it says, never what the catalog says. Set a ceiling on the price you will pay, as `MAX_PRICE_ZAT` does below. Read a bounded amount, with a limit on entries and a deadline: `listResources` sets no deadline of its own. Do not print catalog text to a terminal unfiltered. And pass `redirect: "manual"` on paid calls to a URL you got from a catalog, because a paid request carries a voucher, which must not go anywhere but the URL you meant. The demo agent's `discover` command bounds and cleans what it reads, and the smoke test never follows a redirect.
+Every field is text that a provider wrote. The 402 that a route returns stays authoritative: pay what it says, never what the catalog says. Set a ceiling on the price you will pay, and enforce it on the 402 with a policy on the client, as `MAX_PRICE_ZAT` does below, because the catalog's price does not bind the route. Read a bounded amount, with a limit on entries and a deadline: `listResources` sets no deadline of its own. Do not print catalog text to a terminal unfiltered. And pass `redirect: "manual"` on paid calls to a URL you got from a catalog, because a paid request carries a voucher, which must not go anywhere but the URL you meant. The demo agent's `discover` command bounds and cleans what it reads, and the smoke test never follows a redirect.
 
 </Callout>
 
 ## A complete agent
 
-This agent finds a route for two tasks in the catalog, pays both, and prints what each call cost. The routes belong to two providers, so it makes two deposits. A wallet budget bounds its deposits, `Ctrl-C` ends it cleanly, and a few lines print the events that matter. It is about 150 lines and needs nothing beyond the packages installed above.
+This agent finds a route for two tasks in the catalog, pays both, and prints what each call cost. The routes belong to two providers, so it makes two deposits. A wallet budget bounds its deposits, a policy on the client caps the price of a call, `Ctrl-C` ends it cleanly, and a few lines print the events that matter. It is about 150 lines and needs nothing beyond the packages installed above.
 
 ```ts title="agent.ts"
 import { decodePaymentRequiredHeader } from "@x402/core/http";
@@ -556,14 +555,14 @@ import {
   PrepaidVoucherScheme,
   ZalletRpcWallet,
   snapshotFromExtra,
+  type ZcashWallet,
 } from "@z402/client";
 import { createLightwalletdClient } from "@z402/lightwalletd";
-import type { ZcashWallet } from "@z402/protocol";
 
 const NETWORK = "zcash:regtest";
 const BAZAAR_URL = "http://localhost:3000"; // the website, which serves the facilitator's catalog
 const BUDGET_ZAT = 250_000n; // the most this agent ever deposits, over every provider
-const MAX_PRICE_ZAT = 2_000n; // never pay a route that asks more per call
+const MAX_PRICE_ZAT = 2_000n; // never pay a route whose 402 asks more per call
 const PAGE = "https://example.com";
 
 /** A wallet that refuses to send more than a fixed total, whichever provider asks */
@@ -604,13 +603,15 @@ const scheme = new PrepaidVoucherScheme({
   },
 });
 
+// The route's own 402 sets what a call costs, and the catalog's price does not bind it, so the cap is enforced here
+const client = new x402Client()
+  .register(NETWORK, scheme)
+  .registerPolicy((_version, requirements) => requirements.filter((r) => BigInt(r.amount) <= MAX_PRICE_ZAT));
+
 // Ctrl-C ends the call in flight. The signal is bound in the base fetch, because the wrapper sends clones of the request.
 const stop = new AbortController();
 process.once("SIGINT", () => stop.abort());
-const paidFetch = wrapFetchWithPayment(
-  (input, init) => fetch(new Request(input, init), { signal: stop.signal }),
-  new x402Client().register(NETWORK, scheme),
-);
+const paidFetch = wrapFetchWithPayment((input, init) => fetch(new Request(input, init), { signal: stop.signal }), client);
 
 type Route = DiscoveryResource & { lastSeen?: string; paidCallsToday?: number };
 
@@ -639,7 +640,7 @@ const isDown = (route: Route): boolean =>
 
 const words = (text: string): Set<string> => new Set(text.toLowerCase().match(/\p{L}{3,}/gu) ?? []);
 
-/** The best route for a task, chosen here: one we can pay, cheap enough, not down, and the most words in common */
+/** The best route for a task, chosen here: one we can pay, listed cheap enough, not down, and the most words in common */
 function pick(routes: Route[], task: string): Route | undefined {
   const wanted = words(task);
   let best: { route: Route; score: number } | undefined;
@@ -701,7 +702,7 @@ main()
   .finally(() => scheme.close().finally(() => lightwalletd.close()));
 ```
 
-With the local stack running, start it with `npx tsx agent.ts`. Your amounts and addresses will differ.
+It needs Zallet, Zaino, the website and both services reachable from your machine, on one chain. The Docker stack publishes the website and the services and keeps Zallet and Zaino private, and the Z3 stack publishes Zallet and Zaino but runs neither the website nor the services, so neither starts all of them for you. With everything reachable, start the agent with `npx tsx agent.ts`. Your amounts and addresses will differ.
 
 ```text
 wallet: 6249460000 zat spendable
@@ -717,8 +718,8 @@ Each `deposit 1` is the first deposit to a different provider, and each one make
 
 What the example does, step by step:
 
-1. It builds the wallet, the chain reader and the scheme. The wallet is wrapped so that its deposits cannot pass 250,000 zat.
-2. It reads the catalog, 100 items at a time, and chooses the best route for each task. It skips offers it cannot pay, routes that cost more than `MAX_PRICE_ZAT`, and routes whose service is down.
+1. It builds the wallet, the chain reader and the scheme. The wallet is wrapped so that its deposits cannot pass 250,000 zat, and the client gets a policy that drops any offer above `MAX_PRICE_ZAT`, whatever the catalog said.
+2. It reads the catalog, 100 items at a time, and chooses the best route for each task. It skips offers it cannot pay, routes that the catalog lists above `MAX_PRICE_ZAT`, and routes whose service is down.
 3. It pays the first route, with the page in the query string, and reads the answer.
 4. It pays the second route, with a body, and prints the receipt.
 5. It prints each session. `scheme.close()` runs last, so a deposit in flight finishes before the process ends.
@@ -726,7 +727,7 @@ What the example does, step by step:
 ## Before you go live
 
 - [ ] Put a budget on the wallet, as `withBudget` does, so the total of all deposits has a ceiling.
-- [ ] Set `maxDepositZat` to the largest window you accept, and a ceiling on the price per call when you pick a route.
+- [ ] Set `maxDepositZat` to the largest window you accept, and enforce a ceiling on the price per call with `registerPolicy`, since the route's own 402 decides what a call costs.
 - [ ] Log the `deposit_failed`, `ambiguous` and `fatal` events somewhere you will see them.
 - [ ] Bind the abort signal in the base fetch for every call that has a deadline, and decide what `safetyReleaseMs` should be.
 - [ ] Call `scheme.close()` before the process exits.
@@ -739,7 +740,7 @@ What the example does, step by step:
 - Sessions live in memory. A restart starts new sessions, with new deposits and no credit.
 - `ZalletRpcWallet` is the only wallet in the package, and it is built for the regtest stack.
 - There are no refunds. A deposit is paid to the provider, and what is left of it stays there.
-- A halted session stays halted until the process restarts.
+- A halted session stays halted until the process restarts. `scheme.session(payTo)?.halted` names the code and the txid that stopped it.
 - Calls to one provider run one at a time.
 
 ## Next steps
