@@ -48,6 +48,27 @@ export type ZdecryptAt = { tip: number } | { height: number };
 const DEFAULT_TIMEOUT_MS = 10_000;
 // zdecrypt exits with 2 and an error object on stdout when it refuses its input
 const EXIT_ERROR = 2;
+/** The most zdecrypt children alive at once in this process, whichever provider's chain view asks */
+const MAX_CONCURRENT = 8;
+
+let running = 0;
+const waiting: Array<() => void> = [];
+
+/** Takes one of the slots, waiting in line for it when all are taken */
+function acquire(): Promise<void> {
+  if (running < MAX_CONCURRENT) {
+    running++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => waiting.push(resolve));
+}
+
+function release(): void {
+  const next = waiting.shift();
+  // The slot passes straight to the next in line, so the count stays put
+  if (next === undefined) running--;
+  else next();
+}
 
 const POOLS = ["sapling", "orchard", "ironwood"] as const;
 const SCOPES = ["external", "internal"] as const;
@@ -87,7 +108,17 @@ function start(bin: string, args: string[], key: string) {
   return spawn(bin, args, { env, stdio: ["pipe", "pipe", "ignore"] });
 }
 
-function spawnZdecrypt({ bin, args, key, stdin, timeoutMs }: Invocation): Promise<Exited> {
+async function spawnZdecrypt(invocation: Invocation): Promise<Exited> {
+  await acquire();
+  try {
+    return await run(invocation);
+  } finally {
+    release();
+  }
+}
+
+// The timeout starts here, once the child is spawned, so time spent waiting for a slot never counts against it
+function run({ bin, args, key, stdin, timeoutMs }: Invocation): Promise<Exited> {
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof start>;
     try {
