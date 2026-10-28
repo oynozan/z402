@@ -240,7 +240,7 @@ Every item below was found and confirmed by the final review or its fix-wave re-
   - `--view-only --force` over a seed-bearing file moves the seed without the backup reminder.
   - Two concurrent `--force` runs on an existing file can lose a key whose address was already printed. Only a warning covers this.
   - A new key file cannot be created on FAT or exFAT.
-- **`scripts/show-deposit.sh` has never been run through shellcheck,** which was not installable here. `bash -n` and the behaviour suites stand in for it.
+- **`scripts/show-deposit.sh` passes shellcheck 0.11.0 with the default checks.** One SC2016 is disabled on purpose, where the perl program is single-quoted. Only the opt-in `-o all` brace-style notes (SC2250) remain.
 
 ## 8. Credits
 
