@@ -6,16 +6,21 @@
  *
  * The file holds the seed, which is the only backup of the account. It is created with mode 0600 in a 0700
  * directory. An existing file is replaced only with --force, and the old file is then kept as
- * <file>.replaced-<UTC time> with mode 0600, so no seed is ever destroyed. --out takes an absolute path outside
- * the repository or inside .secrets/, since a key file anywhere else in the work tree can be committed by accident.
+ * <file>.replaced-<UTC time> with mode 0600, so no seed is ever destroyed. The keys path is never absent: the new
+ * file replaces the old one by an atomic rename, after the old one got a second name or, where the filesystem has
+ * no hard links, a copy. A symbolic link is never replaced. --out takes an absolute path outside the repository or
+ * inside .secrets/, since a key file anywhere else in the work tree can be committed by accident.
  * The only output is the shielded-only address on stdout, plus a backup reminder on stderr. The seed, the UFVK and
  * the UIVK are never printed, and the seed never reaches argv, because zdecrypt draws it from the OS itself.
+ * The directory entries are fsynced before the run ends, and a failure there still prints the address, with a warning.
  * The binary and the default output are found from this file's location, never from the working directory.
  */
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
+  constants,
+  copyFileSync,
   fchmodSync,
   fsyncSync,
   linkSync,
@@ -40,7 +45,8 @@ const SEED_RE = /^[0-9a-f]{64}$/;
 const USAGE = `usage: node scripts/merchant-keygen.mjs --network <regtest|testnet|mainnet> [--force] [--out <absolute path>]
 
   --network   network of the merchant account (required)
-  --force     replace an existing key file, which is kept as <file>.replaced-<UTC time>
+  --force     replace an existing key file. The old one is kept as <file>.replaced-<UTC time> and set to
+              mode 0600, since key files must be 0600. A symbolic link is refused, replace it by hand
   --out       write here instead of .secrets/merchant-<network>.json, an absolute path outside the
               repository or inside its .secrets/ directory
 
@@ -185,24 +191,45 @@ function generate(network) {
 
 /* Storage */
 
+// Link failures that mean this filesystem has no hard links, as FAT and exFAT have none
+const NO_HARD_LINKS = new Set(["ENOTSUP", "EPERM", "EXDEV", "EMLINK"]);
+
 function stamp() {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 }
 
-// A second name for the old file, so that replacing the first one cannot lose it
+function syncFile(path) {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// A second name for the old file, or a copy where there are no second names, so that replacing it cannot lose it
 function keepOld(target) {
   const base = `${target}.replaced-${stamp()}`;
   for (let n = 1; ; n += 1) {
     const name = n === 1 ? base : `${base}-${n}`;
+    let copied = false;
     try {
       linkSync(target, name);
     } catch (e) {
       if (e.code === "EEXIST") continue;
       if (e.code === "ENOENT") return undefined;
-      throw e;
+      try {
+        copyFileSync(target, name, constants.COPYFILE_EXCL);
+        copied = true;
+      } catch (c) {
+        if (c.code === "EEXIST") continue;
+        if (c.code === "ENOENT") return undefined;
+        throw c;
+      }
     }
     try {
       chmodSync(name, 0o600);
+      if (copied) syncFile(name);
     } catch (e) {
       rmSync(name, { force: true });
       if (e.code === "ENOENT") return undefined;
@@ -212,7 +239,26 @@ function keepOld(target) {
   }
 }
 
-// The new directory entry must be durable before the address is shown
+// An exclusive create needs link, which fails with an error of its own where hard links do not exist
+function publish(tmp, target) {
+  try {
+    linkSync(tmp, target);
+  } catch (e) {
+    if (!NO_HARD_LINKS.has(e.code)) throw e;
+    throw new Fail(
+      `cannot create ${shown(target)} here, the filesystem has no hard links for the exclusive create ` +
+        "(--force creates it with a rename, and keeps any file that is already there)",
+    );
+  }
+}
+
+// The directories that mkdir -p is about to create, deepest first
+function missingDirs(dir) {
+  const made = [];
+  for (let d = dir; lstatOrNothing(d) === undefined; d = dirname(d)) made.push(d);
+  return made;
+}
+
 function syncDir(dir) {
   const fd = openSync(dir, "r");
   try {
@@ -224,9 +270,23 @@ function syncDir(dir) {
   }
 }
 
+// A directory that cannot be synced is reported by the caller after the address, since the new key is in place by then
+function syncDirs(dirs) {
+  let ok = true;
+  for (const dir of new Set(dirs)) {
+    try {
+      syncDir(dir);
+    } catch {
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 // Written to a private temp file first, so a crash never leaves half a seed at the target
-function store(target, text, replace) {
+function store(target, text, force) {
   const dir = dirname(target);
+  const made = missingDirs(dir);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (dir === SECRETS_DIR) chmodSync(dir, 0o700);
 
@@ -241,11 +301,11 @@ function store(target, text, replace) {
     } finally {
       closeSync(fd);
     }
-    if (replace) kept = keepOld(target);
+    if (force) kept = keepOld(target);
     try {
-      // link fails if the target exists, rename replaces it, and neither follows a symlink at the target
-      if (replace) renameSync(tmp, target);
-      else linkSync(tmp, target);
+      // rename replaces the target in one step and link refuses if it exists, and neither follows a symlink
+      if (force) renameSync(tmp, target);
+      else publish(tmp, target);
     } catch (e) {
       if (kept) rmSync(kept, { force: true });
       throw e;
@@ -253,13 +313,7 @@ function store(target, text, replace) {
   } finally {
     rmSync(tmp, { force: true });
   }
-  try {
-    syncDir(dir);
-  } catch (e) {
-    const why = `${e.code ?? "error"}`;
-    throw new Fail(`cannot sync the directory of ${shown(target)} (${why}), so the new file may not survive a crash`);
-  }
-  return kept;
+  return { kept, durable: syncDirs([dir, ...made.map((d) => dirname(d))]) };
 }
 
 function main(argv) {
@@ -277,15 +331,17 @@ function main(argv) {
   );
   const old = lstatOrNothing(target);
   if (old?.isDirectory()) throw new Fail(`${shown(target)} is a directory`);
+  if (old?.isSymbolicLink() && force) throw new Fail("the key file is a symbolic link; replace it by hand", 2);
   if (old && !force) throw refusal;
 
   const { address, text } = generate(network);
-  let kept;
+  let stored;
   try {
-    kept = store(target, text, old !== undefined);
+    stored = store(target, text, force);
   } catch (e) {
     throw e.code === "EEXIST" ? refusal : e;
   }
+  const { kept, durable } = stored;
 
   const modeOf = (path) => (statSync(path).mode & 0o777).toString(8);
   const where = `${shown(target)} (mode ${modeOf(target)})`;
@@ -299,6 +355,10 @@ function main(argv) {
   if (kept) {
     console.error(`The file it replaced was kept as ${shown(kept)} (mode ${modeOf(kept)}).`);
     if (network === "mainnet") console.error("Its seed may still control funds, so back it up too.");
+  }
+  if (!durable) {
+    console.error("warning: the new key is in place but its directory entry may not survive a power loss; run sync");
+    process.exitCode = 1;
   }
 }
 

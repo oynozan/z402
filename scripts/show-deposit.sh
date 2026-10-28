@@ -7,8 +7,8 @@
 # Z3_RPC_USER and Z3_RPC_PASSWORD (the defaults are the Z3 regtest ones, see usage). zdecrypt decrypts it at its
 # mined height, or at the chain tip plus one while it is in the mempool. The keys file supplies the viewing key and the
 # payTo address. The key reaches zdecrypt through ZDECRYPT_KEY only, so it is never an argument and never printed.
-# The JSON report goes to stdout and all commentary to stderr, so the report can be piped. scripts/demo.sh show runs
-# this script with just the txid.
+# The JSON report goes to stdout, pretty-printed by jq with every non-ASCII and control character escaped, and all
+# commentary to stderr, so the report can be piped. scripts/demo.sh show runs this script with just the txid.
 
 # An inherited xtrace (bash -x or SHELLOPTS) would print the viewing key and the RPC password
 set +x
@@ -66,8 +66,11 @@ need() {
   done
 }
 
-# Printable ASCII only, so nothing that Zebra sends can carry terminal escape sequences
-plain() { tr -cd ' -~' | cut -c1-200; }
+# Text safe to print, with tab, CR and LF as spaces, no other controls, no invalid UTF-8 and at most 200 characters
+plain() {
+  perl -e 'use Encode qw(decode encode); local $/; my $s = decode("UTF-8", scalar(<STDIN>) // "", sub { "" });
+    $s =~ tr/\t\r\n/ /; $s =~ s/[\x00-\x1f\x7f-\x9f]//g; print encode("UTF-8", substr($s, 0, 200))'
+}
 
 # Calls Zebra and prints the result as JSON, or dies with the reason
 rpc() {
@@ -76,10 +79,10 @@ rpc() {
     --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" "$RPC_URL" \
     <<<"header = \"Authorization: Basic $AUTH\"")" ||
     die "cannot reach Zebra at $RPC_URL (is the Z3 stack up? bash infra/z3/up.sh)"
-  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$reply" ||
+  jq -s -e 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1 <<<"$reply" ||
     die "Zebra at $RPC_URL did not answer $method with JSON-RPC (wrong Z3_ZEBRA_RPC, Z3_RPC_USER or Z3_RPC_PASSWORD?)"
   if jq -e '.error != null' >/dev/null <<<"$reply"; then
-    reason="$(jq -r '.error | if type == "object" then .message // "unknown error" else . end | tostring' \
+    reason="$(jq -j '.error | if type == "object" then .message // "unknown error" else . end | tostring' \
       <<<"$reply" | plain)"
     die "Zebra $method failed: ${reason:-unknown error}"
   fi
@@ -142,7 +145,7 @@ case "$KEYS" in
   *) KEYS="$ROOT/$KEYS" ;;
 esac
 
-need curl jq base64
+need curl jq base64 perl
 [ -x "$ZDECRYPT" ] || die "$(shown "$ZDECRYPT") is not built (pnpm --filter @z402/facilitator build:native)"
 if [ ! -f "$KEYS" ]; then
   die "$(shown "$KEYS") not found (create it with: node scripts/merchant-keygen.mjs --network $NETWORK, or pass --keys)"
@@ -163,7 +166,8 @@ AUTH="$(printf '%s' "$RPC_USER:$RPC_PASSWORD" | base64 | tr -d '\n')"
 
 step "Deposit $TXID"
 tx="$(rpc getrawtransaction "[\"$TXID\",1]")" || exit 1
-jq -e 'type == "object"' >/dev/null 2>&1 <<<"$tx" || die "Zebra returned an unexpected getrawtransaction result"
+jq -s -e 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1 <<<"$tx" ||
+  die "Zebra returned an unexpected getrawtransaction result"
 hex="$(jq -r '.hex // empty' <<<"$tx")"
 height="$(jq -r '.height // empty' <<<"$tx")"
 confirmations="$(jq -r '.confirmations // empty' <<<"$tx")"
@@ -194,12 +198,17 @@ else
 fi
 info "raw transaction: $((${#hex} / 2)) bytes (${#hex} hex characters)"
 info "starts with:     ${hex:0:96}..."
-info "That hex is all a block explorer has: no plaintext output amount and no recipient address, only ciphertext."
-info "Only the net value balance (here the fee) is public."
+info "That hex is all a block explorer has. Its shielded outputs hold no plaintext amount or address, only ciphertext."
 
 step "Decrypted with the merchant's viewing key (UIVK, not printed)"
 report="$(ZDECRYPT_KEY="$uivk" "$ZDECRYPT" decrypt --network "$NETWORK" "$at_flag" "$at_value" \
-  --pay-to "$pay_to" --pretty <<<"$hex")" || die "zdecrypt could not decrypt the transaction"
-reported="$(jq -r '.txid // empty' <<<"$report")"
+  --pay-to "$pay_to" <<<"$hex")" || die "zdecrypt could not decrypt the transaction"
+reported="$(jq -r '.txid // empty' 2>/dev/null <<<"$report")"
 [ "$reported" = "$TXID" ] || die "Zebra returned a transaction that is not $TXID"
-printf '%s\n' "$report"
+# The memo is chosen by the sender, so ASCII only keeps its control and bidirectional characters off the terminal
+jq -a . <<<"$report"
+if jq -e '.transparentIn == 0 and .transparentOut == 0' >/dev/null 2>&1 <<<"$report"; then
+  info "Only the net value balance (here the fee) is public."
+else
+  info "This transaction also has a transparent part, which is public."
+fi
