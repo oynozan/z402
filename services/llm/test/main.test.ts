@@ -3,8 +3,8 @@ import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { startTestStack, TEST_PAY_TO, TEST_TOKEN, type TestStack } from "@z402/service-kit/testing";
 import express from "express";
-import { afterEach, expect, test } from "vitest";
-import { fakeProvider, type FakeProvider } from "./fake-provider.js";
+import { afterEach, expect, test, vi } from "vitest";
+import { fakeProvider, gate, type FakeProvider } from "./fake-provider.js";
 
 const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const READY_RE = /^llm listening on (http:\/\/127\.0\.0\.1:\d+) model=test-model network=zcash:regtest$/m;
@@ -39,13 +39,8 @@ function readyUrl(child: ChildProcess, timeoutMs: number): Promise<string> {
   });
 }
 
-test("main prints its ready line, serves the 402 and exits 0 on SIGTERM", { timeout: 30_000 }, async () => {
-  // Only the facilitator of this stack is used
-  const stack: TestStack = await startTestStack({ build: async () => express() });
-  cleanup.push(() => stack.close());
-  const provider: FakeProvider = await fakeProvider();
-  cleanup.push(() => provider.close());
-
+/** The service as its own process, in front of `provider` and the facilitator of `stack` */
+function startMain(stack: TestStack, provider: FakeProvider): ChildProcess {
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([k]) => !OWN_VARIABLE_RE.test(k)));
   const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
     cwd: PACKAGE_DIR,
@@ -64,6 +59,25 @@ test("main prints its ready line, serves the 402 and exits 0 on SIGTERM", { time
   cleanup.push(async () => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   });
+  return child;
+}
+
+async function facilitatorOnly(): Promise<TestStack> {
+  // Only the facilitator and the paying client of this stack are used
+  const stack = await startTestStack({ build: async () => express() });
+  cleanup.push(() => stack.close());
+  return stack;
+}
+
+async function fake(o: Parameters<typeof fakeProvider>[0] = {}): Promise<FakeProvider> {
+  const provider = await fakeProvider(o);
+  cleanup.push(() => provider.close());
+  return provider;
+}
+
+test("main prints its ready line, serves the 402 and exits 0 on SIGTERM", { timeout: 30_000 }, async () => {
+  const stack = await facilitatorOnly();
+  const child = startMain(stack, await fake());
 
   const url = await readyUrl(child, 20_000);
   const unpaid = await fetch(`${url}/v1/generate`, {
@@ -78,4 +92,30 @@ test("main prints its ready line, serves the 402 and exits 0 on SIGTERM", { time
   const exited = once(child, "exit");
   child.kill("SIGTERM");
   expect(await exited).toEqual([0, null]);
+});
+
+test("SIGTERM with a paid call in flight answers it unsettled and exits 0 at once", { timeout: 30_000 }, async () => {
+  const stack = await facilitatorOnly();
+  const hold = gate();
+  const provider = await fake({ reply: () => ({ steps: [hold, "a", "b", "c"] }) });
+  const child = startMain(stack, provider);
+  const url = await readyUrl(child, 20_000);
+
+  const call = stack.paidFetch(`${url}/v1/generate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "hi" }),
+  });
+  await vi.waitFor(() => expect(provider.chats).toHaveLength(1), { timeout: 10_000 });
+
+  const exited = once(child, "exit");
+  const stopping = Date.now();
+  child.kill("SIGTERM");
+  const res = await call;
+  expect([res.status, await res.json()]).toEqual([503, { error: "stream_closed" }]);
+  expect(res.headers.get("payment-response")).toBeNull();
+  expect(await exited).toEqual([0, null]);
+  expect(Date.now() - stopping).toBeLessThan(2_000);
+  await vi.waitFor(() => expect(provider.aborted).toBe(1));
+  hold.open();
 });

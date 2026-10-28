@@ -13,7 +13,7 @@ The operator sees the prompts and the output.
 | Start | `{"prompt": "...", "system": "...", "maxTokens": 256}` (`system` and `maxTokens` optional) |
 | Continue | `{"stream": "<id from the last answer>"}` |
 
-Answer: `{"stream": "<id>", "index": 0, "text": "...", "done": false}`. The last chunk has `"done": true` and the provider's `finishReason`, such as `"stop"` or `"length"`.
+Answer: `{"stream": "<id>", "index": 0, "text": "...", "done": false}`. The last chunk has `"done": true` and the provider's `finishReason`, such as `"stop"` or `"length"`. A provider that sends more than `maxTokens` deltas, or more than 256 characters a token, is cut off there with `"length"`.
 
 An unpaid call gets the 402, whose offer is base64 JSON in the `PAYMENT-REQUIRED` header:
 
@@ -26,15 +26,15 @@ Refused before payment, so never charged:
 
 | Status | `error` |
 | --- | --- |
-| 400 | `invalid_request` (with a `message`) |
+| 400 | `invalid_request` (with a `message`), also for text with a lone surrogate, which providers refuse |
 | 404 | `unknown_stream` |
-| 409 | `stream_busy`: another call on this stream is in flight |
+| 409 | `stream_busy`: another call on this stream is in flight; `payment_in_flight`: the same voucher is already paying for a call |
 | 410 | `stream_finished`: every chunk was delivered |
 | 413 | `body_too_large` |
 | 502 | `provider_failed`: the stream's generation failed |
 | 503 | `too_many_streams`, or `not_ready` while the provider does not list `LLM_MODEL` |
 
-After payment, rare, and counted by the client: 502 `provider_failed` and 504 `chunk_timeout`.
+After payment, rare, never settled but counted by the client: 502 `provider_failed`, 504 `chunk_timeout`, 503 `too_many_streams` when paid starts that all found room arrive together at the limit, and 503 `stream_closed` while the service shuts down.
 
 `GET /health` answers 200 once the provider lists `LLM_MODEL` as loaded, 503 otherwise.
 

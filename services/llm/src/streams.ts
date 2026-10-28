@@ -13,6 +13,9 @@
 import { randomBytes } from "node:crypto";
 import type { ChatMessage, ChatEnd, LlmProvider } from "./provider.js";
 
+/** Far above the longest token of any tokenizer, as an average over a whole generation */
+const MAX_CHARS_PER_TOKEN = 256;
+
 export interface Chunk {
   readonly text: string;
   /** The provider's stream ended with this chunk */
@@ -26,7 +29,7 @@ export interface Generation {
   maxTokens: number;
 }
 
-export type StreamErrorKind = "failed" | "timeout" | "closed" | "finished";
+export type StreamErrorKind = "failed" | "timeout" | "closed" | "finished" | "full";
 
 /** Why a wait for a chunk ended without one */
 export class StreamError extends Error {
@@ -217,6 +220,9 @@ export class LlmStream {
     let ended = false;
     let text = "";
     let tokens = 0;
+    let total = 0;
+    let chars = 0;
+    const maxChars = o.generation.maxTokens * MAX_CHARS_PER_TOKEN;
     try {
       deltas = o.provider.streamChat({ ...o.generation, signal });
       for (;;) {
@@ -229,6 +235,11 @@ export class LlmStream {
         }
         if (step.value === "") continue;
         this.#lastOutput = this.#now();
+        // Each delta holds at least one token, so output past either cap means the provider ignored max_tokens
+        if (total >= o.generation.maxTokens || chars + step.value.length > maxChars) {
+          this.#finishReason = "length";
+          break;
+        }
         if (tokens >= o.chunkTokens) {
           this.#publish({ text, final: false });
           text = "";
@@ -236,6 +247,8 @@ export class LlmStream {
         }
         text += step.value;
         tokens += 1;
+        total += 1;
+        chars += step.value.length;
       }
       this.#state = "done";
       this.#publish({ text, final: true });
@@ -301,6 +314,8 @@ export class StreamRegistry {
   /** Starts a generation. The new stream is claimed for chunk 0 by the call that started it. */
   create(generation: Generation): LlmStream {
     if (this.#closed) throw new StreamError("closed", "the service is shutting down");
+    // Paid starts that all found room before payment can arrive here together
+    if (!this.hasRoom()) throw new StreamError("full", `${this.#o.capacity} streams are live`);
     const stream = LlmStream.start({
       id: randomBytes(ID_BYTES).toString("base64url"),
       now: this.#now,

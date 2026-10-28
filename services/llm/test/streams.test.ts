@@ -8,6 +8,8 @@ type Item = string | { end: string | undefined } | { fail: Error };
 class Feed implements LlmProvider {
   readonly requests: ChatRequest[] = [];
   aborted = false;
+  /** The generator ran to its end, was returned or threw, so a real provider's connection would be closed */
+  finished = false;
   #queue: Item[] = [];
   #wake: (() => void) | undefined;
 
@@ -32,18 +34,22 @@ class Feed implements LlmProvider {
       this.aborted = true;
       this.#wake?.();
     });
-    for (;;) {
-      r.signal?.throwIfAborted();
-      const item = this.#queue.shift();
-      if (item === undefined) {
-        await new Promise<void>((resolve) => {
-          this.#wake = resolve;
-        });
-        continue;
+    try {
+      for (;;) {
+        r.signal?.throwIfAborted();
+        const item = this.#queue.shift();
+        if (item === undefined) {
+          await new Promise<void>((resolve) => {
+            this.#wake = resolve;
+          });
+          continue;
+        }
+        if (typeof item === "string") yield item;
+        else if ("fail" in item) throw item.fail;
+        else return { finishReason: item.end };
       }
-      if (typeof item === "string") yield item;
-      else if ("fail" in item) throw item.fail;
-      else return { finishReason: item.end };
+    } finally {
+      this.finished = true;
     }
   }
 
@@ -108,6 +114,51 @@ describe("publishing", () => {
     expect(stream.published).toBe(0);
     feed.push("c");
     await vi.waitFor(() => expect(stream.chunk(0)).toEqual({ text: "ab", final: false }));
+  });
+
+  test("a provider sending more than maxTokens deltas is cut there, so a stream's output stays bounded", async () => {
+    const feed = new Feed();
+    const stream = registryFor(feed).create({ ...GENERATION, maxTokens: 5 });
+    // Every delta holds at least one token, so the sixth is past what max_tokens allows
+    feed.push("a", "b", "c", "d", "e", "f", "g", "h", "i", "j");
+    await vi.waitFor(() => expect(stream.state).toBe("done"));
+    expect([stream.chunk(0), stream.chunk(1), stream.chunk(2), stream.published]).toEqual([
+      { text: "ab", final: false },
+      { text: "cd", final: false },
+      { text: "e", final: true },
+      3,
+    ]);
+    expect(stream.finishReason).toBe("length");
+    await vi.waitFor(() => expect(feed.finished).toBe(true));
+  });
+
+  test("deltas far longer than any token are cut too, so a stream holds at most 256 characters per token", async () => {
+    const feed = new Feed();
+    const stream = registryFor(feed).create({ ...GENERATION, maxTokens: 4 });
+    const big = "x".repeat(300);
+    feed.push(big, big, big, big);
+    await vi.waitFor(() => expect(stream.state).toBe("done"));
+    // 1,024 characters for 4 tokens, which the fourth delta would go past
+    expect([stream.chunk(0), stream.chunk(1), stream.published, stream.finishReason]).toEqual([
+      { text: big + big, final: false },
+      { text: big, final: true },
+      2,
+      "length",
+    ]);
+    await vi.waitFor(() => expect(feed.finished).toBe(true));
+  });
+
+  test("a provider that ends right at maxTokens keeps its own finish reason", async () => {
+    const feed = new Feed();
+    const stream = registryFor(feed).create({ ...GENERATION, maxTokens: 4 });
+    feed.push("a", "b", "c", "d");
+    feed.end("stop");
+    await vi.waitFor(() => expect(stream.state).toBe("done"));
+    expect([stream.chunk(0), stream.chunk(1), stream.finishReason]).toEqual([
+      { text: "ab", final: false },
+      { text: "cd", final: true },
+      "stop",
+    ]);
   });
 
   test("a generation with no output publishes one empty final chunk", async () => {

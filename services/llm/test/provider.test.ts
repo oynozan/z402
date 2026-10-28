@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { listsModel, OpenAiProvider, ProviderError, readLines, type ChatEnd } from "../src/provider.js";
+import { listsModel, OpenAiProvider, ProviderError, readEvents, readLines, type ChatEnd } from "../src/provider.js";
 import { fakeProvider, gate, type FakeProvider, type Reply } from "./fake-provider.js";
 
 const fakes: FakeProvider[] = [];
@@ -61,6 +61,37 @@ describe("streamChat", () => {
     expect(await drain(provider.streamChat({ messages: MESSAGES, maxTokens: 5 }))).toEqual({
       deltas: ["a"],
       end: { finishReason: "stop" },
+    });
+  });
+
+  test("joins the data lines of one event, as server-sent events do", async () => {
+    const split = 'data: {"choices":[{"delta":\ndata:{"content":"hi"},\ndata:  "finish_reason": null}]}\n\n';
+    const f = await fake({ reply: () => ({ steps: [{ raw: split }, "a"] }) });
+    const provider = new OpenAiProvider({ baseUrl: f.baseUrl, apiKey: undefined, model: "m" });
+    expect(await drain(provider.streamChat({ messages: MESSAGES, maxTokens: 5 }))).toEqual({
+      deltas: ["hi", "a"],
+      end: { finishReason: "stop" },
+    });
+  });
+
+  test("reads events whose lines end in a lone CR", async () => {
+    const event = (content: string): string => `data: {"choices":[{"delta":{"content":"${content}"}}]}\r\r`;
+    const f = await fake({ reply: () => ({ steps: [{ raw: event("a") + event("b") }] }) });
+    const provider = new OpenAiProvider({ baseUrl: f.baseUrl, apiKey: undefined, model: "m" });
+    expect(await drain(provider.streamChat({ messages: MESSAGES, maxTokens: 5 }))).toEqual({
+      deltas: ["a", "b"],
+      end: { finishReason: "stop" },
+    });
+  });
+
+  test("ends cleanly on [DONE] without a finish reason, and on a last event without its blank line", async () => {
+    const f = await fake({
+      reply: () => ({ steps: ["a", { raw: "data: [DONE]" }], finish: null, done: false }),
+    });
+    const provider = new OpenAiProvider({ baseUrl: f.baseUrl, apiKey: undefined, model: "m" });
+    expect(await drain(provider.streamChat({ messages: MESSAGES, maxTokens: 5 }))).toEqual({
+      deltas: ["a"],
+      end: { finishReason: undefined },
     });
   });
 
@@ -180,5 +211,34 @@ describe("readLines", () => {
 
   test("refuses a line over 1 MiB", async () => {
     await expect(lines(bodyOf("x".repeat((1 << 20) + 1)))).rejects.toThrow(/over 1 MiB/);
+  });
+
+  test("ends a line at CR, LF or CRLF, a CRLF split across reads included", async () => {
+    expect(await lines(bodyOf("a\rb\r", "\nc\r\rd\n\re\r"))).toEqual(["a", "b", "c", "", "d", "", "e"]);
+  });
+});
+
+describe("readEvents", () => {
+  async function events(...parts: string[]): Promise<string[]> {
+    const out: string[] = [];
+    for await (const data of readEvents(bodyOf(...parts))) out.push(data);
+    return out;
+  }
+
+  test("yields each event's data, its lines joined by newlines, at the blank line that ends it", async () => {
+    expect(
+      await events(
+        ": a comment\n",
+        "event: message\nid: 7\nretry: 10\ndata: one\n\n",
+        "data:two\ndata:  three\ndata\n\n",
+        "\n\nevent: ping\n\n",
+        "data: last",
+      ),
+    ).toEqual(["one", "two\n three\n", "last"]);
+  });
+
+  test("refuses an event over 1 MiB, however its data is split into lines", async () => {
+    const line = `data: ${"x".repeat(1 << 16)}\n`;
+    await expect(events(line.repeat(17), "\n")).rejects.toThrow(/over 1 MiB/);
   });
 });

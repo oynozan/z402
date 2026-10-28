@@ -1,5 +1,8 @@
 import { validateDiscoveryExtension, type DiscoveryExtension } from "@x402/extensions/bazaar";
-import { startTestStack, TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
+import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
+import { serve } from "@z402/service-kit";
+import { startTestStack, TEST_NETWORK, TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
+import express from "express";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { LlmConfig } from "../src/config.js";
 import { createLlmService, type LlmService } from "../src/service.js";
@@ -211,6 +214,144 @@ describe("POST /v1/generate", () => {
     expect(provider.chats).toHaveLength(0);
   });
 
+  test("a prompt that is not well-formed text is refused before payment, not by the provider after it", async () => {
+    // llama.cpp and vLLM refuse a lone surrogate, which JSON can carry as an escape
+    const loneSurrogate = /\\ud[89a-f][0-9a-f]{2}/i;
+    const provider = await fake({
+      reply: (body) =>
+        loneSurrogate.test(JSON.stringify(body.messages))
+          ? { status: 400, body: { error: { message: "invalid string: surrogate U+D800..U+DBFF" } } }
+          : { steps: ["a"] },
+    });
+    const stack = await llmStack(provider);
+    const url = `${stack.url}/v1/generate`;
+    const bodies = [
+      '{"prompt":"hi \\ud83d"}',
+      '{"prompt":"\\ude00 hi"}',
+      '{"prompt":"hi","system":"\\udbff"}',
+      '{"prompt":"\\ude00\\ud83d"}',
+    ];
+    for (const body of bodies) {
+      const res = await stack.paidFetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+      expect([body, res.status, await res.json()]).toEqual([
+        body,
+        400,
+        { error: "invalid_request", message: expect.stringMatching(/^(prompt|system) /) },
+      ]);
+    }
+    expect(stack.scheme.session(TEST_PAY_TO)).toBeUndefined();
+    expect(provider.chats).toHaveLength(0);
+    // A pair written as escapes is one character, and fine
+    const paired = await stack.paidFetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"prompt":"hi \\ud83d\\ude00"}',
+    });
+    expect([paired.status, provider.chats[0]?.messages]).toEqual([200, [{ role: "user", content: "hi \u{1F600}" }]]);
+  });
+
+  test("a prompt and a system prompt of the largest size fit the body, every character escaped", async () => {
+    const provider = await fake();
+    const stack = await llmStack(provider, { config: { maxPromptChars: 20_000 } });
+    // How Python's json.dumps writes text by default
+    const escaped = "\\u00e9".repeat(20_000);
+    const body = `{"prompt":"${escaped}","system":"${escaped}"}`;
+    const res = await fetch(`${stack.url}/v1/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(res.status).toBe(402);
+  });
+
+  test("a refused settle delivers nothing: a start drops its stream, a continue keeps its chunk", async () => {
+    const provider = await fake({ reply: () => ({ steps: ["a", "b", "c", "d", "e"] }) });
+    let refuseSettle = false;
+    let refused = 0;
+    const built: { service?: LlmService } = {};
+    const stack = await startTestStack({
+      build: async (env) => {
+        // Between the service and the facilitator, refusing the next settle when told to
+        const proxy = express();
+        proxy.use(express.text({ type: () => true }));
+        proxy.use(async (req, res) => {
+          if (req.path === "/settle" && refuseSettle) {
+            refuseSettle = false;
+            refused += 1;
+            res.json({ success: false, errorReason: "unexpected_settle_error", transaction: "", network: env.network });
+            return;
+          }
+          const answer = await fetch(`${env.facilitatorUrl}${req.url}`, {
+            method: req.method,
+            headers: { "content-type": "application/json", authorization: req.get("authorization") ?? "" },
+            body: req.method === "GET" ? undefined : (req.body as string),
+          });
+          res.status(answer.status).type("application/json").send(await answer.text());
+        });
+        const listening = await serve(proxy, { host: "127.0.0.1", port: 0 });
+        running.push({
+          close: async () => {
+            listening.server.closeAllConnections();
+            await listening.close();
+          },
+        });
+        built.service = await createLlmService({
+          env: { ...env, facilitatorUrl: listening.url },
+          config: { ...CONFIG, baseUrl: provider.baseUrl },
+          log: () => undefined,
+        });
+        return built.service;
+      },
+    });
+    running.unshift(stack);
+    const url = `${stack.url}/v1/generate`;
+
+    // The client backs off and pays again, and that start makes a stream of its own
+    refuseSettle = true;
+    const first = (await json(stack.paidFetch(url, post({ prompt: "hi" })))) as Answer;
+    expect([refused, provider.chats.length]).toEqual([1, 2]);
+    expect(first).toMatchObject({ index: 0, text: "ab", done: false });
+    // The refused start's stream is gone, so only the one its retry made is held
+    expect(built.service?.streams.size).toBe(1);
+    expect(built.service?.streams.get(first.stream)).toBeDefined();
+
+    // The refused continue did not move the cursor, so its retry gets the same chunk, and nothing is skipped
+    refuseSettle = true;
+    const retried = await json(stack.paidFetch(url, post({ stream: first.stream })));
+    expect(refused).toBe(2);
+    expect(retried).toEqual({ stream: first.stream, index: 1, text: "cd", done: false });
+    expect(await json(stack.paidFetch(url, post({ stream: first.stream })))).toMatchObject({ index: 2, text: "e" });
+    expect(await json(fetch(`${stack.url}/health`))).toMatchObject({ callsToday: 3 });
+  });
+
+  test("a voucher that already paid for a call is refused before the handler, on any call", async () => {
+    const provider = await fake({ reply: () => ({ steps: ["a", "b", "c", "d", "e"] }) });
+    const stack = await llmStack(provider);
+    const url = `${stack.url}/v1/generate`;
+    const vouchers: string[] = [];
+    const recording: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const voucher = request.headers.get("payment-signature");
+      if (voucher !== null) vouchers.push(voucher);
+      return fetch(request);
+    };
+    const paidFetch = wrapFetchWithPayment(recording, new x402Client().register(TEST_NETWORK, stack.scheme));
+    const { stream } = (await json(paidFetch(url, post({ prompt: "hi" })))) as Answer;
+    const [used] = vouchers;
+    if (used === undefined) throw new Error("no voucher was sent");
+
+    const replay = (body: unknown): Promise<Response> =>
+      fetch(url, { ...post(body), headers: { "content-type": "application/json", "payment-signature": used } });
+    for (const body of [{ prompt: "again" }, { stream }]) {
+      const res = await replay(body);
+      expect(res.status).toBe(402);
+      expect(await res.text()).not.toContain('"text"');
+    }
+    expect(provider.chats).toHaveLength(1);
+    const held = stack.service.streams.get(stream);
+    expect([held?.cursor, held?.inFlight]).toEqual([1, false]);
+  });
+
   test("a second call on a stream while one is in flight gets 409 before payment", async () => {
     const hold = gate();
     const provider = await fake({ reply: () => ({ steps: ["a", "b", "c", hold, "d", "e"] }) });
@@ -323,6 +464,50 @@ describe("POST /v1/generate", () => {
     expect(cumulative(stack)).toBe(charged);
     await vi.waitFor(() => expect(provider.aborted).toBe(1));
     expect(log).toContainEqual("generation failed: the provider sent nothing for 300 ms");
+    hold.open();
+  });
+
+  test("paid starts that arrive together never run more generations than LLM_MAX_STREAMS", async () => {
+    const hold = gate();
+    const provider = await fake({ reply: () => ({ steps: [hold, "a", "b", "c"] }) });
+    const stack = await llmStack(provider, { config: { maxStreams: 2 } });
+    const url = `${stack.url}/v1/generate`;
+    // Five sessions, so that the five paid retries reach the service together
+    const clients = [stack, ...Array.from({ length: 4 }, () => stack.client())];
+    const statuses: number[] = [];
+    const answers = clients.map(async (c) => {
+      const res = await c.paidFetch(url, post({ prompt: "hi" })).catch(() => undefined);
+      statuses.push(res?.status ?? 0);
+      return res?.status;
+    });
+    // All five paid retries are in once a generation started and every other one was answered
+    await vi.waitFor(() => expect(statuses.length + provider.chats.length).toBeGreaterThanOrEqual(5), {
+      timeout: 5_000,
+      interval: 20,
+    });
+    expect([provider.chats.length, stack.service.streams.live, statuses]).toEqual([2, 2, [503, 503, 503]]);
+    hold.open();
+    expect((await Promise.all(answers)).filter((s) => s === 200)).toHaveLength(2);
+    // The refused ones were never settled
+    expect(await json(fetch(`${stack.url}/health`))).toMatchObject({ callsToday: 2 });
+  }, 15_000);
+
+  test("a provider that ignores max_tokens is cut at maxTokens, and its request is closed", async () => {
+    const hold = gate();
+    const provider = await fake({ reply: () => ({ steps: ["a", "b", "c", "d", "e", "f", hold, "g"] }) });
+    const stack = await llmStack(provider);
+    const url = `${stack.url}/v1/generate`;
+    const first = (await json(stack.paidFetch(url, post({ prompt: "hi", maxTokens: 5 })))) as Answer;
+    expect(first).toMatchObject({ index: 0, text: "ab", done: false });
+    await vi.waitFor(() => expect(provider.aborted).toBe(1));
+    expect(await json(stack.paidFetch(url, post({ stream: first.stream })))).toMatchObject({ index: 1, text: "cd" });
+    expect(await json(stack.paidFetch(url, post({ stream: first.stream })))).toEqual({
+      stream: first.stream,
+      index: 2,
+      text: "e",
+      done: true,
+      finishReason: "length",
+    });
     hold.open();
   });
 

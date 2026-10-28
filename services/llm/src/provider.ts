@@ -69,23 +69,29 @@ function describe(e: unknown): string {
   return parts.length > 0 ? parts.join(": ") : String(e);
 }
 
-/** The lines of a text body without their line ending, including a last line that has none */
+/** The lines of a text body without their line ending (CRLF, LF or a lone CR), including a last line that has none */
 export async function* readLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string, void, void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  const lineEnd = /\r\n|\r|\n/g;
   let pending = "";
   try {
     for (;;) {
       const { done, value } = await reader.read();
       pending += done ? decoder.decode() : decoder.decode(value, { stream: true });
       let start = 0;
-      for (let end = pending.indexOf("\n"); end !== -1; end = pending.indexOf("\n", start)) {
-        yield pending.slice(start, end > start && pending[end - 1] === "\r" ? end - 1 : end);
-        start = end + 1;
+      for (;;) {
+        lineEnd.lastIndex = start;
+        const end = lineEnd.exec(pending);
+        if (end === null) break;
+        // A CR that ends what has arrived may be the first half of a CRLF
+        if (end[0] === "\r" && end.index + 1 === pending.length && !done) break;
+        yield pending.slice(start, end.index);
+        start = end.index + end[0].length;
       }
       pending = pending.slice(start);
       if (done) {
-        if (pending !== "") yield pending.endsWith("\r") ? pending.slice(0, -1) : pending;
+        if (pending !== "") yield pending;
         return;
       }
       if (pending.length > MAX_LINE_CHARS) throw new Error("a line is over 1 MiB");
@@ -95,9 +101,25 @@ export async function* readLines(body: ReadableStream<Uint8Array>): AsyncGenerat
   }
 }
 
-/** The payload of a server-sent-events data line; comments, event names, ids and blank lines have none */
-function dataOf(line: string): string | undefined {
-  return line.startsWith("data:") ? line.slice(5).trim() : undefined;
+/** The data of each server-sent event, its data lines joined by newlines, a last event without its blank line too */
+export async function* readEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<string, void, void> {
+  let data: string[] | undefined;
+  let size = 0;
+  for await (const line of readLines(body)) {
+    if (line === "") {
+      if (data !== undefined) yield data.join("\n");
+      data = undefined;
+      size = 0;
+      continue;
+    }
+    const colon = line.indexOf(":");
+    if ((colon === -1 ? line : line.slice(0, colon)) !== "data") continue;
+    const value = colon === -1 ? "" : line.slice(line[colon + 1] === " " ? colon + 2 : colon + 1);
+    size += value.length + 1;
+    if (size > MAX_LINE_CHARS) throw new Error("an event is over 1 MiB");
+    (data ??= []).push(value);
+  }
+  if (data !== undefined) yield data.join("\n");
 }
 
 export class OpenAiProvider implements LlmProvider {
@@ -128,9 +150,9 @@ export class OpenAiProvider implements LlmProvider {
       if (res.body === null) throw new ProviderError(`${this.#who} answered without a body`, status);
 
       let finishReason: string | undefined;
-      for await (const line of readLines(res.body)) {
-        const data = dataOf(line);
-        if (data === undefined || data === "") continue;
+      for await (const event of readEvents(res.body)) {
+        const data = event.trim();
+        if (data === "") continue;
         if (data === "[DONE]") return { finishReason };
         const choice = this.#choice(data, status);
         const content = prop(prop(choice, "delta"), "content");

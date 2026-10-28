@@ -38,12 +38,16 @@ export interface LlmService {
 }
 
 const MIN_BODY_BYTES = 64 * 1024;
+/** The longest JSON spelling of one UTF-16 code unit, a \uXXXX escape */
+const ESCAPED_BYTES_PER_CHAR = 6;
 const READY_CACHE_MS = 10_000;
 const READY_TIMEOUT_MS = 2_000;
 const MAX_LISTED = 5;
 const STREAM_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const USAGE = 'expected a JSON object: {"prompt": ...} to start a stream or {"stream": ...} to continue one';
 const START_FIELDS: ReadonlySet<string> = new Set(["prompt", "system", "maxTokens"]);
+/** A surrogate that is not half of a pair, which JSON can carry as an escape but UTF-8 cannot */
+const LONE_SURROGATE_RE = /\p{Cs}/u;
 const LOCALS_KEY = "llm";
 
 /** What a body asks for */
@@ -57,6 +61,7 @@ const FAILURES: Readonly<Record<StreamErrorKind, { status: number; error: string
   timeout: { status: 504, error: "chunk_timeout" },
   closed: { status: 503, error: "stream_closed" },
   finished: { status: 410, error: "stream_finished" },
+  full: { status: 503, error: "too_many_streams" },
 };
 
 function carriesPayment(req: Request): boolean {
@@ -81,9 +86,9 @@ function gone(res: Response): boolean {
   return true;
 }
 
-/** A JSON body parser whose refusals are JSON too; the limit fits a prompt and a system prompt of the largest size */
+/** A JSON body parser with JSON refusals, sized for both prompts at their largest with every character escaped */
 function jsonBody(config: LlmConfig): RequestHandler {
-  const limit = Math.max(MIN_BODY_BYTES, 6 * config.maxPromptChars + 4096);
+  const limit = Math.max(MIN_BODY_BYTES, 2 * ESCAPED_BYTES_PER_CHAR * config.maxPromptChars + 4096);
   // Not strict, so that a body like "hi" gets the usage message rather than a parse error
   const parse = express.json({ limit, strict: false });
   return (req, res, next) => {
@@ -123,9 +128,14 @@ function readBody(body: unknown, c: LlmConfig): Ask | string {
   const { prompt, system, maxTokens } = fields;
   if (typeof prompt !== "string" || prompt.trim() === "") return "prompt must be a non-empty string";
   if (prompt.length > c.maxPromptChars) return `prompt must be at most ${c.maxPromptChars} characters`;
+  // A provider refuses such text only once the call is paid
+  if (LONE_SURROGATE_RE.test(prompt)) return "prompt must be valid Unicode text, without a lone surrogate";
   if (system !== undefined && typeof system !== "string") return "system must be a string";
   if (typeof system === "string" && system.length > c.maxPromptChars) {
     return `system must be at most ${c.maxPromptChars} characters`;
+  }
+  if (typeof system === "string" && LONE_SURROGATE_RE.test(system)) {
+    return "system must be valid Unicode text, without a lone surrogate";
   }
   if (
     maxTokens !== undefined &&
