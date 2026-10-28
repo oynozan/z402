@@ -1,13 +1,47 @@
 {
   "name": "@z402/service-kit",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Build a paid HTTP service for z402: the x402 Express middleware wired to the prepaid-voucher scheme, with start-up checks and Bazaar listing",
+  "keywords": [
+    "x402",
+    "zcash",
+    "shielded",
+    "payments",
+    "agents"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oynozan/z402.git",
+    "directory": "packages/service-kit"
+  },
+  "homepage": "https://z402.net",
+  "bugs": "https://github.com/oynozan/z402/issues",
   "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "exports": {
     ".": "./src/index.ts",
     "./testing": "./src/testing.ts"
   },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
