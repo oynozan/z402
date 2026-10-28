@@ -35,6 +35,12 @@ Do all of this before you start recording.
    ```
 4. **The decryptor is built.** `ls -l crates/zdecrypt/target/release/zdecrypt`. If it is missing, run `pnpm --filter @z402/facilitator build:native`.
 5. **Optional rehearsal of beat 7.** `scripts/demo.sh show` with no argument decrypts the newest deposit the agent wallet has sent, so after any earlier run you can check the decrypt before the take.
+6. **Optional: a second provider** (the two-provider video, [demo-video.md](demo-video.md)). Run `scripts/demo.sh partner` after `up`.
+   - **First time.** It makes the partner's keys in `.secrets/provider2-regtest.json` and its view-only file, and registers it with the facilitator. The API key goes to `.secrets/provider2-regtest.key` and is never printed.
+   - **Every time.** It starts a second API on 4023 at 800 zat, named "Partner API".
+   - **Key handling.** A saved key that the facilitator still knows is kept. A missing or stale one (after `down --wipe-ledger`) is registered again, which rotates it.
+   - **Effects.** While the partner runs, `honest` pays both providers in turn, `--calls` each, and `show` decrypts a deposit to the partner with the partner's view-only key. `down` stops the partner too. The cheat run stays on the Demo API.
+   - **Catalog.** `up` declares the Demo API to the facilitator's catalog (`Z402_API_PUBLIC_URL`), and `partner` declares the Partner API. The website lists both by name only when it reads the facilitator, i.e. when it is started without `DISCOVERY_URL`, or with `DISCOVERY_URL=http://127.0.0.1:4022`.
 
 Two terminals make the footage easier. Terminal 1 is the agent, with a large font. Terminal 2 runs `tail -F .data/demo/clock.log` so each new block is visible. Use a capital `-F`, because starting the clock moves the old log aside and `-f` would keep following the old file.
 

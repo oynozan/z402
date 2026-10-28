@@ -2,8 +2,9 @@
 # Orchestrates the z402 3-minute demo on the local Z3 regtest stack.
 #
 #   scripts/demo.sh up                    Z3 stack, then facilitator (4022), then API (4021)
+#   scripts/demo.sh partner               a second provider: its keys, its registration, its API (4023, 800 zat)
 #   scripts/demo.sh clock                 block clock, one block every 25 s
-#   scripts/demo.sh honest [--calls N]    honest agent in the foreground
+#   scripts/demo.sh honest [--calls N]    honest agent in the foreground, paying the partner too when it runs
 #   scripts/demo.sh cheat                 cheating agent in the foreground
 #   scripts/demo.sh show [txid]           raw deposit transaction, then decrypted with the viewing key
 #   scripts/demo.sh status                process liveness, Zebra height, agent wallet balance
@@ -35,6 +36,15 @@ FAC_URL="http://127.0.0.1:$FAC_PORT"
 API_URL="http://127.0.0.1:$API_PORT"
 FAC_READY="facilitator listening on $FAC_URL"
 API_READY="api listening on $API_URL"
+# Provider 2, registered with the facilitator like any outside provider, with view-only keys in .secrets/
+PARTNER_PORT=4023
+PARTNER_URL="http://127.0.0.1:$PARTNER_PORT"
+PARTNER_READY="api listening on $PARTNER_URL"
+PARTNER_PRICE=800
+PARTNER_NAME="Partner API"
+PARTNER_KEYS="$ROOT/.secrets/provider2-regtest.json"
+PARTNER_VIEW="$ROOT/.secrets/provider2-regtest.view.json"
+PARTNER_KEY="$ROOT/.secrets/provider2-regtest.key"
 CLOCK_READY="block clock:"
 AGENT_TSX="$ROOT/apps/agent/node_modules/.bin/tsx"
 READY_TIMEOUT=60
@@ -50,8 +60,11 @@ usage() {
 usage: scripts/demo.sh <command>
 
   up                    bring up the Z3 regtest stack, then start the facilitator and the API
+  partner               start a second provider on 4023 at 800 zat: makes its keys once, registers it
+                        with the facilitator, and starts its API (after up)
   clock                 start the block clock in the background (one block every 25 s)
-  honest [--calls N]    run the honest agent in the foreground (default 150 calls, one per second)
+  honest [--calls N]    run the honest agent in the foreground (default 150 calls, one per second),
+                        paying the partner too, N calls each, when it runs
   cheat                 run the cheating agent in the foreground (one deposit, then none)
   show [txid]           show a deposit's raw transaction, then decrypt it with the viewing key
                         (no txid means the newest deposit the agent wallet sent)
@@ -136,7 +149,7 @@ command_of() { ps -ww -o command= -p "$1" 2>/dev/null || true; }
 marker_of() {
   case "$1" in
     facilitator) printf '%s' "--filter @z402/facilitator start" ;;
-    api) printf '%s' "--filter @z402/api start" ;;
+    api | partner) printf '%s' "--filter @z402/api start" ;;
     clock) printf '%s' "infra/z3/clock.mjs run --every" ;;
   esac
 }
@@ -291,10 +304,69 @@ start_api() {
   info "starting pnpm --filter @z402/api start, log .data/demo/api.log"
   (
     clear_z402_env
-    # shellcheck disable=SC2031  # each child gets its own environment, set inside its own subshell
-    export Z402_NETWORK="$NETWORK" Z402_FACILITATOR_TOKEN="$token" Z402_FACILITATOR_URL="$FAC_URL" Z402_PAY_TO="$pay_to"
+    # Z402_API_PUBLIC_URL declares GET /chunk to the facilitator's catalog, so it is listed by name, not only from payments
+    # shellcheck disable=SC2030,SC2031  # each child gets its own environment, set inside its own subshell
+    export Z402_NETWORK="$NETWORK" Z402_FACILITATOR_TOKEN="$token" Z402_FACILITATOR_URL="$FAC_URL" Z402_PAY_TO="$pay_to" \
+      Z402_API_PUBLIC_URL="$API_URL"
     spawn api pnpm --filter @z402/api start
   )
+}
+
+# 0 when the partner's saved API key still names a provider at the facilitator, 1 when it must register (again)
+partner_key_valid() {
+  local code
+  [ -s "$PARTNER_KEY" ] || return 1
+  # The header goes in on stdin, so the key never reaches a command line
+  code="$(printf 'Authorization: Bearer %s\n' "$(cat "$PARTNER_KEY")" |
+    curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H @- "$FAC_URL/providers/me" || true)"
+  [ "$code" = "200" ]
+}
+
+cmd_partner() {
+  local token pay_to force=""
+  [ $# -eq 0 ] || die "partner takes no arguments"
+  need jq node pnpm perl curl
+  port_open "$FAC_PORT" || die "nothing listens on $FAC_URL, run scripts/demo.sh up"
+  if already_running partner; then return 0; fi
+
+  step "Partner keys (.secrets/provider2-regtest.*)"
+  if [ -f "$PARTNER_KEYS" ]; then
+    info "keys already made, kept"
+  else
+    [ -x "$ZDECRYPT" ] || die "crates/zdecrypt/target/release/zdecrypt is not built (pnpm --filter @z402/facilitator build:native)"
+    node "$ROOT/scripts/merchant-keygen.mjs" --network "$NETWORK" --out "$PARTNER_KEYS" | sed 's/^/    address /'
+  fi
+  if [ ! -f "$PARTNER_VIEW" ]; then
+    node "$ROOT/scripts/merchant-keygen.mjs" --view-only --from "$PARTNER_KEYS" --out "$PARTNER_VIEW" >/dev/null
+    info "view-only keys in .secrets/provider2-regtest.view.json"
+  fi
+  pay_to="$(jq -r '.orchardOnlyAddress // empty' "$PARTNER_VIEW")"
+  [ -n "$pay_to" ] || die ".orchardOnlyAddress is missing from .secrets/provider2-regtest.view.json"
+
+  step "Registration with the facilitator"
+  if partner_key_valid; then
+    info "its API key is still registered, kept"
+  else
+    # A key file the facilitator no longer knows (after down --wipe-ledger, or a rotation) is replaced
+    if [ -e "$PARTNER_KEY" ]; then force="--force"; fi
+    node "$ROOT/scripts/register-provider.mjs" --keys "$PARTNER_VIEW" --facilitator "$FAC_URL" --out "$PARTNER_KEY" ${force:+"$force"} |
+      sed 's/^/    /'
+  fi
+
+  step "Partner API on $PARTNER_URL, $PARTNER_PRICE zat per call"
+  guard_port "$PARTNER_PORT" "partner API"
+  token="$(cat "$PARTNER_KEY")"
+  info "starting pnpm --filter @z402/api start, log .data/demo/partner.log"
+  (
+    clear_z402_env
+    # shellcheck disable=SC2030,SC2031  # each child gets its own environment, set inside its own subshell
+    export Z402_NETWORK="$NETWORK" Z402_FACILITATOR_TOKEN="$token" Z402_FACILITATOR_URL="$FAC_URL" Z402_PAY_TO="$pay_to" \
+      Z402_PRICE_ZAT="$PARTNER_PRICE" Z402_API_PORT="$PARTNER_PORT" Z402_API_PUBLIC_URL="$PARTNER_URL" \
+      Z402_API_SERVICE_NAME="$PARTNER_NAME"
+    spawn partner pnpm --filter @z402/api start
+  )
+  wait_ready "partner api" partner "$PARTNER_READY" "$READY_TIMEOUT"
+  info "next         scripts/demo.sh honest pays both providers"
 }
 
 cmd_up() {
@@ -373,7 +445,11 @@ cmd_honest() {
   esac
   [ "${#calls}" -le 10 ] || die "--calls: $calls is too large"
   agent_preflight
-  run_agent --calls "$calls" --interval-ms 1000
+  if is_alive partner; then
+    run_agent --url "$API_URL/chunk" --url "$PARTNER_URL/chunk" --calls "$calls" --interval-ms 1000
+  else
+    run_agent --calls "$calls" --interval-ms 1000
+  fi
 }
 
 cmd_cheat() {
@@ -387,6 +463,24 @@ DEPOSIT_TXIDS='[.[] | select(.expired_unmined != true) | select(any(.outputs[]?;
 
 # Prints the newest deposit txid that Zebra knows, so an unbroadcast one cannot shadow a mined one
 # Returns 1 when the wallet has no deposit, 2 with the number tried when Zebra knows none, 3 when Zallet cannot be read
+# The keys file of the provider a deposit went to: the partner's when the agent wallet sent it there, else the operator's
+deposit_keys() {
+  local account to partner_pay_to
+  if [ -f "$PARTNER_VIEW" ]; then
+    partner_pay_to="$(jq -r '.orchardOnlyAddress // empty' "$PARTNER_VIEW" 2>/dev/null || true)"
+    account="$(zrpc zallet z_listaccounts 2>/dev/null | jq -r '.[0].account_uuid // empty' || true)"
+    if [ -n "$partner_pay_to" ] && [ -n "$account" ]; then
+      to="$(zrpc zallet z_listtransactions "\"$account\"" 2>/dev/null |
+        jq -r --arg t "$1" '[.[] | select(.txid == $t) | .outputs[]? | select((.memo // "") | test(":[0-9]+$")) | .to_address][0] // empty' || true)"
+      if [ "$to" = "$partner_pay_to" ]; then
+        printf '%s' "$PARTNER_VIEW"
+        return
+      fi
+    fi
+  fi
+  printf '%s' "$KEYS"
+}
+
 newest_deposit_txid() {
   local account rows txid tried=0
   account="$(zrpc zallet z_listaccounts | jq -r '.[0].account_uuid // empty')" || return 3
@@ -427,7 +521,7 @@ cmd_show() {
   [ "${#txid}" -eq 64 ] || die "the txid must be 64 lowercase hex characters"
 
   if [ -f "$HERE/show-deposit.sh" ]; then
-    exec bash "$HERE/show-deposit.sh" "$txid"
+    exec bash "$HERE/show-deposit.sh" "$txid" --keys "$(deposit_keys "$txid")"
   fi
 
   need jq node
@@ -489,6 +583,9 @@ print_proc() {
       api)
         if grep -qF -- "$API_READY" "$DATA/api.log" 2>/dev/null; then note="ready"; else note="no ready line yet"; fi
         ;;
+      partner)
+        if grep -qF -- "$PARTNER_READY" "$DATA/partner.log" 2>/dev/null; then note="ready, $PARTNER_URL"; else note="no ready line yet"; fi
+        ;;
       clock)
         note="$(tail -n 1 "$DATA/clock.log" 2>/dev/null | redact || true)"
         ;;
@@ -510,6 +607,7 @@ cmd_status() {
   print_proc clock
   print_proc facilitator
   print_proc api
+  print_proc partner
 
   step "Chain"
   if height="$(zrpc zebra getblockcount 2>/dev/null)"; then
@@ -616,8 +714,9 @@ cmd_down() {
     esac
   done
 
-  step "Stopping the demo processes (clock, api, facilitator)"
+  step "Stopping the demo processes (clock, partner, api, facilitator)"
   stop_proc clock || failed=1
+  stop_proc partner || failed=1
   stop_proc api || failed=1
   stop_proc facilitator || failed=1
 
@@ -654,6 +753,7 @@ main() {
   if [ $# -gt 0 ]; then shift; fi
   case "$cmd" in
     up) cmd_up "$@" ;;
+    partner) cmd_partner "$@" ;;
     clock) cmd_clock "$@" ;;
     honest) cmd_honest "$@" ;;
     cheat) cmd_cheat "$@" ;;
