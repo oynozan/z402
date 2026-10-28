@@ -25,9 +25,9 @@ Source spec: [`docs/spec/mvp-build-doc.md`](../../spec/mvp-build-doc.md). Eviden
 
 | # | Decision | Recommendation | Why |
 | --- | --- | --- | --- |
-| D1 | Deposit decryptor | **zdecrypt** (our Rust CLI, promoted from the research spike) instead of Hanko | Built and tested here (5/5 offline tests, 17 live txs parsed, real Ironwood payments decrypted), stable crates, 2.5 ms per call, exact receiver match and expiry. It does not re-verify proofs, so zero-conf trusts Zebra's mempool and lightwalletd, as Kage does; that risk sits inside the W cap. Kage and Hanko are credited (MIT) |
+| D1 | Deposit decryptor | **zdecrypt** (our Rust CLI, promoted from the research spike) instead of Hanko | Built and tested here (5/5 offline tests, 17 live txs parsed, real Ironwood payments decrypted), stable crates, 2.5 ms per call, exact receiver match and expiry. It does not re-verify proofs, so zero-conf trusts Zebra's mempool and lightwalletd, as Kage does. That risk sits inside the W cap only while the endpoint is honest: zdecrypt checks no proofs, signatures or inclusion, and mined status comes from lightwalletd, so a dishonest endpoint can report a fabricated deposit as mined, and it then counts in D_conf with no cap. Real money needs a node the merchant operates. Kage and Hanko are credited (MIT) |
 | D2 | Demo terms | **p = 500 zat**, W = 100,000, 2500 bps, cap 200,000; honest run at 1 call/s; cheat run at local speed | P(no stall) = 1.000 in 4,000 simulated runs; deposit 2 and the credit line appear in 87–92 % of runs. The fallback, keeping p = 1,000, needs deposit 1 confirmed off camera |
-| D3 | Restart safety | **JSONL ledger** (about 40 lines, `appendFileSync` in `/settle`, replayed at boot) | Closes double-crediting and voucher replay after a restart. It is not a database; the doc's "no durable storage" still holds for everything else |
+| D3 | Restart safety | **JSONL ledger** (about 40 lines, `appendFileSync` in `/settle`, replayed at boot) | Closes double-crediting and voucher replay after a restart. It is not a database; the doc's "no durable storage" still holds for everything else. One writer, through `<ledger>.lock`. A failed write refuses every later write until a restart replays the file. Appends survive a process crash, not a power loss (nothing calls fsync) |
 | D4 | Builds of external code | Approve building **zingo-cli** at tag `zingolib_v8.0.0-rc.0` (client side). Hanko is not needed if D1 is accepted | Research agents were denied "code from external" builds. The client wallet cannot work without zingo-cli |
 | D5 | Merchant keys | Generate them with `zdecrypt keygen` (a seed stored in a gitignored `.secrets/`), payTo = the Orchard-only UA | No zingo-cli is needed on the server side. The facilitator holds only the UIVK |
 | D6 | Git | `git init` at the repo root and commit per task | The folder is not a repo yet; the plans commit after every task |
@@ -99,21 +99,22 @@ Per-session worst-case loss is min(W, Σ pending) + min(C_max, r·D_conf), plus 
 2. Check the ed25519 voucher signature over the received strings. Failure gives `z402_invalid_signature`.
 3. Check c_new − c_last ≥ amount; otherwise `z402_cumulative_mismatch`.
 4. If `depositTxid` is present and new to this session, check ownership first:
-   - Owned by another session gives `z402_deposit_other_session`; recorded dead gives `z402_deposit_dead`.
+   - Owned by another session gives `z402_deposit_memo_mismatch`, the one answer for every found deposit this session cannot use, after the same chain read an uncredited txid costs. Recorded dead, or credited pending and unmined past its expiry at the current tip, gives `z402_deposit_dead`.
    - If the voucher fits **without** the deposit, return valid at once and look the deposit up in the background (lazy crediting).
    - Otherwise wait for the lookup, at most 30 s (`depositWaitMs`). Load-balanced lightwalletd backends see a new tx up to about 16 s apart, so the API's facilitator client allows 60 s.
-5. If the voucher still does not fit and a live pending deposit exists, refresh that session's deposits from the chain (at most once per 5 s per session) and recompute.
+   - A found lookup result is evidence for 30 s; settle never credits an older one, and death is judged at the current tip.
+5. If the voucher still does not fit and the session holds a credited pending deposit, refresh that session's deposits from the chain (at most once per 5 s per session) and recompute. The refresh waits at most 5 s, since it can queue behind a full watcher pass.
 6. If it still does not fit: `z402_awaiting_confirmation` if a live pending deposit exists, else `z402_deposit_required`. A presented txid whose lookup is still in flight, or whose cached result is a live deposit for this session, counts as pending. The facilitator never answers `deposit_required` while a presented deposit is unresolved (protocol.md v1.1 §7.3, where only a successful settle acks a deposit).
 7. Reply HTTP 200 `{isValid, invalidReason?, payer: sessionKey, extra: {session}}`. The snapshot is projected as if the presented deposit were credited.
 
 The lookup behind step 4:
 - GetTransaction every 1 s within the budget.
-- Only the message `-5: Transaction not found in mempool or best chain` counts as not-found. Other errors are retried, then reported as `z402_chain_unavailable`.
-- Concurrent lookups of one txid share one request, at most 4 run at a time, and a txid that came back not-found within the last 10 s gets one quick probe instead of a 15 s wait.
+- Only the definitive not-found answers in the matcher table of protocol.md §15 count as not-found: the lightwalletd, Zaino ≥ 0.10.1 and Zebra ≥ 6.4 rows. Other errors are retried, then reported as `z402_chain_unavailable`.
+- Concurrent lookups of one txid share one request, at most 4 run at a time, and a txid that came back not-found within the last 10 s gets one quick probe instead of the full 30 s (`depositWaitMs`).
+- At most 16 lookups wait for a slot. Past that, or once a lookup spent its whole budget waiting, it answers `z402_chain_unavailable` without reading the chain.
 - The verdict comes from zdecrypt output:
   - any transparent part gives `deposit_transparent`;
-  - no output to payTo gives `deposit_not_to_merchant`;
-  - outputs to payTo with no memo matching `^<sessionKey>:(0|[1-9][0-9]{0,8})$` give `deposit_memo_mismatch`;
+  - no output to payTo, or outputs to payTo with no memo matching `^<sessionKey>:(0|[1-9][0-9]{0,8})$`, give `deposit_memo_mismatch`, one code for both so that the answer never tells whether a transaction pays the merchant;
   - unmined past its expiry gives `deposit_dead`.
 - Otherwise the value is the sum of the matching external outputs. Sub-window and short-expiry deposits are recorded with `zeroConf: false` and count once mined.
 
@@ -158,7 +159,7 @@ Every reply is HTTP 200 and schema-complete: `{success, errorReason?, errorMessa
 2. `zdecrypt` decrypts the bundled Kage vector `030c3cbf…8351` to Ironwood 100,000 zat with memo `x402z-f19a63da20cbc0749ea800b3`.
 3. `zdecrypt owns --address <payTo>` reports `ownedByKey: true` and no transparent receiver.
 4. `GetLightdInfo.consensusBranchId` equals the configured expected branch: `37a5165b` on regtest (NU6.3), `77190ad9` on testnet (NU7); on mainnet it only logs. `chainName` is never trusted, since Zaino reports `"test"` on regtest.
-5. The ledger replays cleanly; a truncated last line is dropped with a warning.
+5. The ledger is locked through `<ledger>.lock` and proven writable, then it replays cleanly; a truncated last line is dropped with a warning.
 
 ## 5. What the server side needs from `protocol.md`
 
@@ -186,7 +187,7 @@ Proposed to the client agent on 2026-10-27; it is to be frozen as v1 with both A
 
 ## 7. Known limits (updated)
 
-- **Zero-conf trust:** an unconfirmed deposit is trusted on Zebra's mempool validation and an honest lightwalletd. Loss is bounded by §4.2.
+- **Zero-conf trust:** an unconfirmed deposit is trusted on Zebra's mempool validation and an honest lightwalletd. Loss is bounded by §4.2 only for an honest endpoint (see D1).
 - **Single lightwalletd:** testnet.zec.rocks is the only working public testnet endpoint. If it goes down, crediting and confirmations stop, but voucher-only calls keep working up to the limit.
   - It load-balances across five backends, which see a new tx up to about 16 s apart. Its tip comes from an edge cache that lags 0–9 s.
   - For the demo, the agent wallet and the facilitator can both point at the same backend (`Z402_LWD_URL=https://na-lax.testnet.zec.rocks:443`, an undocumented name, used as a config switch only).
