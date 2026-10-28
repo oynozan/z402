@@ -10,6 +10,8 @@ const NOT_FOUND: TxInspection = { found: false };
 const PAY_TO = "uregtest1merchant";
 
 const outage = () => new ChainUnavailableError("lightwalletd is unreachable");
+/** Longer than any wait for a slot below, so a queued lookup still makes its one inspect */
+const QUEUED_BUDGET_MS = 1000;
 
 function found(txid: string, over: Partial<FoundInspection> = {}): FoundInspection {
   return {
@@ -181,7 +183,7 @@ describe("single-flight", () => {
     chain.script(T, [new TypeError("boom")]);
 
     const failing = resolver.lookup(T, 0);
-    const queued = resolver.lookup(txidOf(2), 0);
+    const queued = resolver.lookup(txidOf(2), QUEUED_BUDGET_MS);
     await expect(failing).rejects.toThrow("boom");
     expect(await queued).toEqual({ kind: "not_found" });
 
@@ -202,7 +204,7 @@ describe("concurrency limit", () => {
     chain.delayMs = 100;
     const resolver = new DepositResolver({ chain, maxConcurrent: limit });
 
-    const lookups = [1, 2, 3, 4, 5, 6].map((n) => resolver.lookup(txidOf(n), 0));
+    const lookups = [1, 2, 3, 4, 5, 6].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
     await vi.advanceTimersByTimeAsync(300);
 
     expect(await Promise.all(lookups)).toEqual(lookups.map(() => ({ kind: "not_found" })));
@@ -215,9 +217,9 @@ describe("concurrency limit", () => {
     chain.delayMs = 100;
     const resolver = new DepositResolver({ chain, maxConcurrent: 2 });
 
-    const early = [1, 2, 3, 4].map((n) => resolver.lookup(txidOf(n), 0));
+    const early = [1, 2, 3, 4].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
     await vi.advanceTimersByTimeAsync(150);
-    const late = [5, 6].map((n) => resolver.lookup(txidOf(n), 0));
+    const late = [5, 6].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
     await vi.advanceTimersByTimeAsync(300);
     await Promise.all([...early, ...late]);
 
@@ -230,7 +232,7 @@ describe("concurrency limit", () => {
     chain.delayMs = 100;
     const resolver = new DepositResolver({ chain, maxConcurrent: 2 });
 
-    const lookups = [1, 2, 3, 4, 5].map((n) => resolver.lookup(txidOf(n), 0));
+    const lookups = [1, 2, 3, 4, 5].map((n) => resolver.lookup(txidOf(n), QUEUED_BUDGET_MS));
     await vi.advanceTimersByTimeAsync(300);
     await Promise.all(lookups);
 
@@ -248,13 +250,65 @@ describe("concurrency limit", () => {
     expect(inspect.mock.calls.map(([txid]) => txid)).toEqual([txidOf(1), txidOf(1), txidOf(1), txidOf(2)]);
   });
 
-  test("the wait for a slot counts against the budget", async () => {
+  test("the wait for a slot counts against the budget, and a lookup that spent it all there makes no inspect", async () => {
     const { chain, resolver } = rig({ maxConcurrent: 1 });
 
-    await Promise.all([resolver.lookup(txidOf(1), 5000), resolver.lookup(txidOf(2), 5000)]);
+    const [, second] = await Promise.all([resolver.lookup(txidOf(1), 5000), resolver.lookup(txidOf(2), 5000)]);
 
     expect(chain.calls.get(txidOf(1))).toBe(6);
+    expect(chain.calls.get(txidOf(2))).toBeUndefined();
+    expect(errorOf(second)).toBeInstanceOf(ChainUnavailableError);
+    expect(resolver.peek(txidOf(2))).toBeUndefined();
+  });
+
+  test("a lookup that spent its budget waiting for a slot answers the result held for its txid", async () => {
+    const { chain, resolver } = rig({ maxConcurrent: 1 });
+    chain.script(txidOf(2), [found(txidOf(2))]);
+    await resolver.lookup(txidOf(2), 0);
+
+    const [, second] = await Promise.all([resolver.lookup(txidOf(1), 5000), resolver.lookup(txidOf(2), 5000)]);
+
+    expect(second).toMatchObject({ kind: "found", inspection: { txid: txidOf(2) } });
     expect(chain.calls.get(txidOf(2))).toBe(1);
+  });
+});
+
+describe("a bounded queue", () => {
+  /** A chain whose inspect of txid 1 never settles, so that lookup keeps its slot */
+  function stuck(over: Partial<ConstructorParameters<typeof DepositResolver>[0]>) {
+    const r = rig(over);
+    const inspect = vi
+      .spyOn(r.chain, "inspect")
+      .mockImplementation((txid) =>
+        txid === txidOf(1) ? new Promise<TxInspection>(() => undefined) : Promise.resolve(NOT_FOUND),
+      );
+    return { ...r, inspect };
+  }
+
+  test("with every slot busy and maxQueued callers waiting, the next lookup is unavailable at once", async () => {
+    const { inspect, resolver } = stuck({ maxConcurrent: 1, maxQueued: 1 });
+    void resolver.lookup(txidOf(1), 5000);
+    void resolver.lookup(txidOf(2), 5000);
+    await nextTick();
+
+    const third = await Promise.race([resolver.lookup(txidOf(3), 5000), nextTick().then(() => "still waiting")]);
+
+    expect(third).toMatchObject({ kind: "unavailable" });
+    expect(errorOf(third as Lookup)).toBeInstanceOf(ChainUnavailableError);
+    expect((errorOf(third as Lookup) as Error).message).toBe("deposit lookups are saturated");
+    expect(inspect.mock.calls.map(([txid]) => txid)).toEqual([txidOf(1)]);
+    expect(resolver.peek(txidOf(3))).toBeUndefined();
+  });
+
+  test("16 callers may wait by default, and the 17th is turned away", async () => {
+    const { resolver } = stuck({ maxConcurrent: 1 });
+    void resolver.lookup(txidOf(1), 5000);
+    for (let n = 2; n <= 17; n++) void resolver.lookup(txidOf(n), 5000);
+    await nextTick();
+
+    expect(resolver.inFlight(txidOf(17))).toBe(true);
+    const turnedAway = Promise.race([resolver.lookup(txidOf(18), 5000), nextTick().then(() => "still waiting")]);
+    expect(await turnedAway).toMatchObject({ kind: "unavailable" });
   });
 });
 
@@ -443,7 +497,7 @@ describe("inFlight", () => {
     const resolver = new DepositResolver({ chain, maxConcurrent: 1 });
 
     const running = resolver.lookup(txidOf(1), 0);
-    const queued = resolver.lookup(txidOf(2), 0);
+    const queued = resolver.lookup(txidOf(2), QUEUED_BUDGET_MS);
     expect(chain.calls.has(txidOf(2))).toBe(false);
     expect(resolver.inFlight(txidOf(2))).toBe(true);
 

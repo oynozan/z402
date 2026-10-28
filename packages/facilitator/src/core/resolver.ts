@@ -9,6 +9,7 @@ export type Lookup =
 export class DepositResolver {
   readonly #chain: ChainView;
   readonly #maxConcurrent: number;
+  readonly #maxQueued: number;
   readonly #pollMs: number;
   readonly #negativeTtlMs: number;
   readonly #resultTtlMs: number;
@@ -22,6 +23,8 @@ export class DepositResolver {
   constructor(o: {
     chain: ChainView;
     maxConcurrent?: number;
+    /** Callers that may wait for a slot, past which a lookup is answered unavailable at once */
+    maxQueued?: number;
     pollMs?: number;
     negativeTtlMs?: number;
     resultTtlMs?: number;
@@ -30,6 +33,7 @@ export class DepositResolver {
   }) {
     this.#chain = o.chain;
     this.#maxConcurrent = o.maxConcurrent ?? 4;
+    this.#maxQueued = o.maxQueued ?? 16;
     this.#pollMs = o.pollMs ?? 1000;
     this.#negativeTtlMs = o.negativeTtlMs ?? 10_000;
     this.#resultTtlMs = o.resultTtlMs ?? 600_000;
@@ -37,7 +41,7 @@ export class DepositResolver {
     this.#sleep = o.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  /** A caller who finds the txid already being looked up joins that flight, whatever its own budget */
+  /** Settles within the longest budget in use plus one inspect and one tip, and joins a flight already under way */
   lookup(txid: string, budgetMs: number): Promise<Lookup> {
     const running = this.#flights.get(txid);
     if (running !== undefined) return running;
@@ -77,8 +81,16 @@ export class DepositResolver {
 
   async #fly(txid: string, budgetMs: number): Promise<Lookup> {
     const startedAt = this.#now();
-    await this.#acquire();
+    if (this.#running >= this.#maxConcurrent && this.#queue.length >= this.#maxQueued) {
+      return { kind: "unavailable", error: new ChainUnavailableError("deposit lookups are saturated") };
+    }
+    const waited = await this.#acquire();
     try {
+      // A caller whose budget ran out in the queue gets what is known, not one more read past its budget
+      if (waited && this.#now() - startedAt >= budgetMs) {
+        const error = new ChainUnavailableError("deposit lookup waited its whole budget for a slot");
+        return this.peek(txid) ?? { kind: "unavailable", error };
+      }
       const lookup = await this.#poll(txid, budgetMs, startedAt);
       this.#remember(txid, lookup);
       return lookup;
@@ -120,12 +132,14 @@ export class DepositResolver {
     this.#results.set(txid, { lookup, at });
   }
 
-  async #acquire(): Promise<void> {
+  /** Takes a slot, true when the caller had to wait in the queue for it */
+  async #acquire(): Promise<boolean> {
     if (this.#running < this.#maxConcurrent) {
       this.#running++;
-      return;
+      return false;
     }
     await new Promise<void>((resolve) => this.#queue.push(resolve));
+    return true;
   }
 
   #release(): void {
