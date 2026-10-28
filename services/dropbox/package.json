@@ -1,0 +1,25 @@
+{
+  "name": "@z402/service-dropbox",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@x402/extensions": "2.28.0",
+    "@z402/protocol": "workspace:*",
+    "@z402/service-kit": "workspace:*",
+    "express": "5.3.0",
+    "@z402/lightwalletd": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@x402/fetch": "2.28.0"
+  }
+}
