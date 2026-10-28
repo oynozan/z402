@@ -53,6 +53,8 @@ function startMain(stack: TestStack, provider: FakeProvider, more: Record<string
       PORT: "0",
       LLM_BASE_URL: provider.baseUrl,
       LLM_MODEL: "test-model",
+      // Set but empty, which counts as unset, so a price in a local .env cannot replace the service's own
+      Z402_PRICE_ZAT: "",
       ...more,
     },
     stdio: ["ignore", "pipe", "pipe"],

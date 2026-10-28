@@ -76,6 +76,8 @@ function envFor(stack: TestStack, fake: FakeProvider, extra: Record<string, stri
     Z402_PAY_TO: TEST_PAY_TO,
     EMBEDDINGS_BASE_URL: fake.url,
     EMBEDDINGS_API_KEY: "sk-main-test-key",
+    // Set but empty, which counts as unset, so a price in a local .env cannot replace the service's own
+    Z402_PRICE_ZAT: "",
     ...extra,
   };
 }
