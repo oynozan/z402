@@ -168,6 +168,51 @@ describe("listLines", () => {
     expect(listLines([resource({ ...MARKDOWN_SPEC, amount: "0.5" })])[0]).toContain("  -  Fetch a web page");
   });
 
+  describe("activity, from the lastSeen and paidCallsToday the facilitator adds", () => {
+    const NOW = Date.parse("2026-10-28T12:00:00.000Z");
+    const ago = (ms: number): string => new Date(NOW - ms).toISOString();
+
+    it("says up, stale or down from the age of lastSeen, and counts today's paid calls", () => {
+      const lines = listLines(
+        [
+          { ...MARKDOWN, lastSeen: ago(30_000), paidCallsToday: 12 },
+          { ...LLM, lastSeen: ago(5 * 60_000), paidCallsToday: 0 },
+          { ...EMBEDDINGS, lastSeen: ago(11 * 60_000) },
+          { ...DROPBOX, paidCallsToday: 1234 },
+          HOLD,
+        ],
+        NOW,
+      );
+      expect(lines[0]).toMatch(/500 zat per page +up, 12 paid today +Fetch a web page/);
+      expect(lines[1]).toMatch(/500 zat per output chunk +stale, 0 paid today +Generate text/);
+      expect(lines[2]).toMatch(/500 zat per 1k tokens +down +Turn text/);
+      expect(lines[3]).toMatch(/500 zat per 10 blocks +1,234 paid today +Hold an age-encrypted/);
+      expect(lines[4]).toMatch(/500 zat per 10 blocks +- +Keep a stored file/);
+    });
+
+    it("draws the line between up and stale at 90 s, and between stale and down at 10 min", () => {
+      const status = (ms: number): string => listLines([{ ...MARKDOWN, lastSeen: ago(ms) }], NOW)[0]!;
+      expect(status(89_999)).toContain("  up  ");
+      expect(status(90_000)).toContain("  stale  ");
+      expect(status(599_999)).toContain("  stale  ");
+      expect(status(600_000)).toContain("  down  ");
+      expect(status(-5_000)).toContain("  up  ");
+    });
+
+    it("ignores a lastSeen or a count it cannot read", () => {
+      const odd = { ...MARKDOWN, lastSeen: "yesterday", paidCallsToday: -1 } as Listed;
+      const also = { ...MARKDOWN, lastSeen: 1_700_000_000, paidCallsToday: "7" } as unknown as Listed;
+      expect(listLines([odd, also], NOW)).toEqual(listLines([MARKDOWN, MARKDOWN], NOW));
+    });
+
+    it("adds no column to a list that carries neither", () => {
+      expect(listLines(ALL, NOW)).toEqual(listLines(ALL));
+      expect(listLines([MARKDOWN], NOW)[0]).toBe(
+        "Markdown  GET  http://127.0.0.1:4032/v1/markdown  500 zat per page  Fetch a web page and return it as clean markdown",
+      );
+    });
+  });
+
   it("keeps one line per resource whatever the text holds", () => {
     const rude: Listed = { ...MARKDOWN, serviceName: "Mark\ndown", description: "Line one\r\nline\ttwo \u001b[31mred" };
     const lines = listLines([rude]);

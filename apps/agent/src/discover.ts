@@ -33,11 +33,11 @@ export interface DiscoverLimits {
   maxBytes?: number;
 }
 
-/** One entry of the list, of which only the URL is certain */
-export type Listed = Partial<DiscoveryResource> & { resource: string };
+/** One entry of the list, of which only the URL is certain. The z402 facilitator adds lastSeen and paidCallsToday */
+export type Listed = Partial<DiscoveryResource> & { resource: string; lastSeen?: string; paidCallsToday?: number };
 
 const LIST_PATH = "/discovery/resources";
-/** Where a longer list is cut, the same 1000 the discovery service allows in one page */
+/** Where a longer list is cut */
 const MAX_RESOURCES = 1000;
 /** So that a service that sends one new entry per page cannot keep the command asking */
 const MAX_PAGES = 100;
@@ -49,6 +49,9 @@ const EXCERPT_CHARS = 120;
 const MIN_WORD_CHARS = 3;
 /** The most characters a cell of the list shows, so that one long text cannot widen the column of every row */
 const CELL_CHARS = { name: 48, method: 16, url: 300, price: 64, description: 240 } as const;
+/** The z402 facilitator's own reading of lastSeen: up under 90 s, stale under 10 min, down after */
+const UP_MS = 90_000;
+const STALE_MS = 600_000;
 /** Digits only, and short: formatZat takes time that grows with the square of a run of digits */
 const AMOUNT_RE = /^[0-9]{1,40}$/;
 /** Format characters (bidi overrides, zero-width spaces, tags) except the joiners that emoji and some scripts need */
@@ -120,6 +123,7 @@ interface Row {
   method: string;
   url: string;
   price: string;
+  activity: string;
   description: string;
 }
 
@@ -132,26 +136,43 @@ function priceOf(item: Listed): string {
   return unit === "" ? price : `${price} per ${unit}`;
 }
 
-function rowOf(item: Listed): Row {
+/** Liveness and today's paid calls, empty when the list carries neither */
+function activityOf(item: Listed, now: number): string {
+  const parts: string[] = [];
+  const seen = at(item, "lastSeen");
+  const seenAt = typeof seen === "string" ? Date.parse(seen) : Number.NaN;
+  if (Number.isFinite(seenAt)) {
+    const age = now - seenAt;
+    parts.push(age < UP_MS ? "up" : age < STALE_MS ? "stale" : "down");
+  }
+  const paid = at(item, "paidCallsToday");
+  if (typeof paid === "number" && Number.isSafeInteger(paid) && paid >= 0) parts.push(`${formatZat(String(paid))} paid today`);
+  return parts.join(", ");
+}
+
+function rowOf(item: Listed, now: number): Row {
   const cell = (value: unknown, max: number): string => clip(oneLine(str(value) ?? ""), max) || "-";
   return {
     name: cell(item.serviceName, CELL_CHARS.name),
     method: cell(methodOf(item), CELL_CHARS.method),
     url: cell(item.resource, CELL_CHARS.url),
     price: clip(oneLine(priceOf(item)), CELL_CHARS.price),
+    activity: activityOf(item, now),
     description: clip(oneLine(str(item.description) ?? ""), CELL_CHARS.description),
   };
 }
 
-/** One aligned line per resource with its service, method, URL, price and unit, then the description */
-export function listLines(items: readonly Listed[]): string[] {
-  const rows = items.map(rowOf);
+/** One aligned line per resource with its service, method, URL, price and unit, its activity when listed, then the description */
+export function listLines(items: readonly Listed[], now: number = Date.now()): string[] {
+  const rows = items.map((item) => rowOf(item, now));
+  const active = rows.some((r) => r.activity !== "");
   const widest = (cell: (row: Row) => string): number => rows.reduce((n, row) => Math.max(n, cell(row).length), 0);
   const width = {
     name: widest((r) => r.name),
     method: widest((r) => r.method),
     url: widest((r) => r.url),
     price: widest((r) => r.price),
+    activity: widest((r) => r.activity || "-"),
   };
   return rows.map((r) =>
     [
@@ -159,6 +180,7 @@ export function listLines(items: readonly Listed[]): string[] {
       r.method.padEnd(width.method),
       r.url.padEnd(width.url),
       r.price.padEnd(width.price),
+      ...(active ? [(r.activity || "-").padEnd(width.activity)] : []),
       r.description,
     ]
       .join("  ")
@@ -225,7 +247,7 @@ export function rankByIntent(items: readonly Listed[], intent: string): Ranked[]
 function pickLine(ranked: readonly Ranked[]): string {
   const best = ranked[0];
   if (best === undefined || best.matched.length === 0) return "pick: none, no word of the intent matches a resource";
-  const row = rowOf(best.item);
+  const row = rowOf(best.item, Date.now());
   return `pick: ${row.name} ${row.method} ${row.url} (matched ${best.matched.join(", ")})`;
 }
 
