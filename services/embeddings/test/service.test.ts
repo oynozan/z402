@@ -57,6 +57,10 @@ const raw = (body: string, contentType = "application/json"): RequestInit => ({
   body,
 });
 
+/** A JSON escape for one UTF-16 code unit, written out the way a client that escapes everything writes it */
+const unitEscape = (unit: number): string => `\\u${unit.toString(16).padStart(4, "0")}`;
+const escapeAll = (text: string): string => Array.from({ length: text.length }, (_, i) => unitEscape(text.charCodeAt(i))).join("");
+
 /** No deposit and no voucher, so the client never paid for this service */
 const unpaid = (h: Harness): boolean => h.stack.scheme.session(TEST_PAY_TO) === undefined;
 
@@ -126,8 +130,8 @@ describe("the 402", () => {
                   input: {
                     description: expect.stringMatching(/up to 8 strings.*at most 1234 characters/),
                     oneOf: [
-                      { type: "string", minLength: 1 },
-                      { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1 } },
+                      { type: "string", minLength: 1, maxLength: 1234 },
+                      { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1234 } },
                     ],
                   },
                 },
@@ -136,6 +140,21 @@ describe("the 402", () => {
           },
         },
       },
+    });
+  });
+
+  test("states the cap on one string in the schema, where it is the lower one", async () => {
+    const h = await harness({ config: { maxInputs: 8, maxChars: 4000, maxInputChars: 500 } });
+    const res = await fetch(h.url, post({ input: "hello" }));
+    const bazaar = decodeHeader(res.headers.get("payment-required")).extensions.bazaar as DiscoveryExtension;
+    const schema = bazaar.schema as unknown as { properties: { input: { properties: { body: { properties: { input: unknown } } } } } };
+    const input = schema.properties.input.properties.body.properties.input;
+    expect(input).toMatchObject({
+      description: expect.stringMatching(/at most 4000 characters in total, at most 500 per string/),
+      oneOf: [
+        { type: "string", minLength: 1, maxLength: 500 },
+        { type: "array", items: { type: "string", minLength: 1, maxLength: 500 } },
+      ],
     });
   });
 
@@ -228,6 +247,14 @@ describe("a paid call", () => {
     expect(body.usageEstimated).toBe(true);
   });
 
+  test("ignores the fields it does not know, even one nested 20,000 levels deep, and sends only the model and the inputs", async () => {
+    const h = await harness();
+    const deep = `{"a":`.repeat(20_000) + "1" + "}".repeat(20_000);
+    const res = await h.stack.paidFetch(h.url, raw(`{"input":["a"],"model":"another","dimensions":2,"user":"u","x":${deep}}`));
+    expect(res.status).toBe(200);
+    expect(h.fake.embedRequests().map((r) => r.body)).toEqual([{ model: FAKE_MODEL, input: ["a"] }]);
+  });
+
   test("sends the key to the provider when one is set", async () => {
     const h = await harness({ fake: { apiKey: "sk-test-key" } });
     const res = await h.stack.paidFetch(h.url, post({ input: "hello" }));
@@ -259,6 +286,26 @@ describe("length", () => {
     expect(await res.json()).toEqual({ error: "too_many_tokens", maxChars: 4000 });
     expect(unpaid(h)).toBe(true);
     expect(h.fake.embedRequests()).toHaveLength(0);
+  });
+
+  test("a call at a large cap is served when a client writes every character as an escape, which is how Python writes JSON", async () => {
+    const h = await harness({ config: { maxChars: 60_000 } });
+    const emoji = escapeAll("\u{1f600}".repeat(30_000));
+    expect(emoji.length).toBe(360_000);
+    const astral = await h.stack.paidFetch(h.url, raw(`{"input":"${emoji}"}`));
+    expect(astral.status).toBe(200);
+
+    const cjk = await h.stack.paidFetch(h.url, raw(`{"input":"${escapeAll("\u6f22".repeat(60_000))}"}`));
+    expect(cjk.status).toBe(200);
+    expect(h.fake.embedRequests()).toHaveLength(2);
+  });
+
+  test("the body limit follows the cap, and a body past what the cap allows is still refused", async () => {
+    const h = await harness({ config: { maxChars: 60_000 } });
+    const res = await h.stack.paidFetch(h.url, post({ input: "a".repeat(1_000_000) }));
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "too_many_tokens", maxChars: 60000 });
+    expect(unpaid(h)).toBe(true);
   });
 
   test("the cap follows the configuration", async () => {
@@ -302,6 +349,15 @@ describe("an invalid request", () => {
     ["token ids", post({ input: [[1, 2, 3]] })],
     ["an empty string among the strings", post({ input: ["ok", "", "fine"] })],
     ["a blank string among the strings", post({ input: ["ok", "  "] })],
+    ["objects among the strings", post({ input: [{ text: "a" }] })],
+    ["null among the strings", post({ input: ["ok", null] })],
+    ["true as input", post({ input: true })],
+    ["null as input", post({ input: null })],
+    ["a number too big for a double as input", raw('{"input":1e999}')],
+    ["NaN as input, which is not JSON", raw('{"input":NaN}')],
+    ["a string with a trailing comma", raw('{"input":["a",]}')],
+    ["60,000 strings, which fit the body limit and not the limit on strings", raw(`{"input":[${Array(60_000).fill('"a"').join(",")}]}`)],
+    ["arrays nested 100,000 levels deep", raw(`{"input":${"[".repeat(100_000)}${"]".repeat(100_000)}}`)],
   ];
 
   test.each(cases)("%s is refused with a 400 before payment", async (_name, init) => {
@@ -313,6 +369,42 @@ describe("an invalid request", () => {
     expect(body.message).toEqual(expect.any(String));
     expect(unpaid(h)).toBe(true);
     expect(h.fake.embedRequests()).toHaveLength(0);
+  });
+
+  describe("text no provider can parse", () => {
+    const high = unitEscape(0xd800);
+    const low = unitEscape(0xdc00);
+    const pair = `${unitEscape(0xd83d)}${unitEscape(0xde00)}`;
+    const refused: [string, string, string][] = [
+      ["a lone high surrogate", `{"input":"abc${high}def"}`, "input must be valid Unicode text, with no unpaired surrogate"],
+      ["a lone low surrogate", `{"input":"${low}"}`, "input must be valid Unicode text, with no unpaired surrogate"],
+      ["a high surrogate at the end", `{"input":"abc${high}"}`, "input must be valid Unicode text, with no unpaired surrogate"],
+      ["a pair written the wrong way round", `{"input":"${low}${high}"}`, "input must be valid Unicode text, with no unpaired surrogate"],
+      ["a lone surrogate in the second string", `{"input":["fine","a${high}"]}`, "input[1] must be valid Unicode text, with no unpaired surrogate"],
+      ["a pair split over two strings", `{"input":["${unitEscape(0xd83d)}","${unitEscape(0xde00)}"]}`, "input[0] must be valid Unicode text, with no unpaired surrogate"],
+    ];
+
+    test.each(refused)("%s is refused with a 400 before payment", async (_name, body, message) => {
+      const h = await harness();
+      const res = await h.stack.paidFetch(h.url, raw(body));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid_request", message });
+      expect(unpaid(h)).toBe(true);
+      expect(h.fake.embedRequests()).toHaveLength(0);
+    });
+
+    test("a surrogate pair, which is one character, is served and sent on as the emoji", async () => {
+      const h = await harness();
+      const res = await h.stack.paidFetch(h.url, raw(`{"input":["a${pair}b"]}`));
+      expect(res.status).toBe(200);
+      expect(h.fake.embedRequests().map((r) => r.body)).toEqual([{ model: FAKE_MODEL, input: ["a\u{1f600}b"] }]);
+    });
+
+    test("is refused before the cap on characters is even looked at", async () => {
+      const h = await harness({ config: { maxChars: 3 } });
+      const res = await h.stack.paidFetch(h.url, raw(`{"input":"${high}${high}${high}${high}"}`));
+      expect(res.status).toBe(400);
+    });
   });
 
   test("the message names what is wrong", async () => {

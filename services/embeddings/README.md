@@ -28,12 +28,14 @@ These are answered on the unpaid first attempt, so no voucher is sent and nothin
 
 | Status | Body | When |
 | --- | --- | --- |
-| 400 | `{ "error": "invalid_request", "message" }` | The body is not JSON, or `input` is missing, not a string or array of strings, too many strings, or holds an empty or blank string |
-| 413 | `{ "error": "too_many_tokens", "maxChars" }` | The inputs hold more than `EMBEDDINGS_MAX_CHARS` characters in total or one string holds more than `EMBEDDINGS_MAX_INPUT_CHARS`, counted in Unicode code points (an emoji is one), or the body is over 256 kB |
+| 400 | `{ "error": "invalid_request", "message" }` | The body is not JSON, or `input` is missing, not a string or array of strings, too many strings, or holds an empty or blank string or one with an unpaired surrogate (`"\ud800"`), which is not text and which a strict provider refuses to parse |
+| 413 | `{ "error": "too_many_tokens", "maxChars" }` | The inputs hold more than `EMBEDDINGS_MAX_CHARS` characters in total or one string holds more than `EMBEDDINGS_MAX_INPUT_CHARS`, counted in Unicode code points (an emoji is one), or the body is over 256 kB, or over 12 bytes for each of `EMBEDDINGS_MAX_CHARS` when that is more, which is what a call at the cap weighs when a client writes every character as an escape |
 | 405 | `{ "error": "method_not_allowed" }` | Any method but POST |
 | 503 | `{ "error": "not_ready" }` | The provider is down or does not list the model (checked about every 10 s) |
 
 After payment a call fails only when the provider does: `502 { "error": "provider_failed" }`. The client counts such a call, which is why the 503 above exists. A call is never failed for being long.
+
+The provider is trusted to be up and not to be right: its answer is read up to 1 MiB plus 256 KiB for each input (8 MiB for the model list) and cut off there, an error status is not read at all, and a list that does not hold one finite vector of the same length for each input, by a distinct index, is refused as a failure of the provider.
 
 ## Settings
 

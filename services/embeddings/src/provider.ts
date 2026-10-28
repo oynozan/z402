@@ -35,12 +35,49 @@ export interface EmbeddingsProvider {
 /** A cold model load can take a while, the readiness check uses the short one */
 const EMBED_TIMEOUT_MS = 30_000;
 const LIST_TIMEOUT_MS = 5_000;
+/**
+ * The most a provider's answer may hold, so that one that never stops cannot fill the memory of the service. A vector of
+ * 4096 numbers is about 100 KiB of JSON, and the room for each input is two and a half times that. A list of the models
+ * of a big hosted provider is a few MB at the most.
+ */
+const EMBED_BASE_BYTES = 1024 * 1024;
+const EMBED_BYTES_PER_INPUT = 256 * 1024;
+const LIST_MAX_BYTES = 8 * 1024 * 1024;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-const isCount = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0;
+const isCount = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+
+function size(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  return `${Math.round(mib * 10) / 10} MiB`;
+}
+
+/** The body as text, or undefined once it is past `max` bytes, with the rest of it left unread */
+async function readCapped(res: Response, max: number): Promise<string | undefined> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    res.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
+  if (res.body === null) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > max) {
+      reader.cancel().catch(() => undefined);
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
 
 /** A short cause for a request that got no answer, never the URL */
 function reason(e: unknown): string {
@@ -110,9 +147,13 @@ export function createOpenAiProvider(c: Pick<EmbeddingsConfig, "baseUrl" | "apiK
   const auth: Record<string, string> = c.apiKey === undefined ? {} : { authorization: `Bearer ${c.apiKey}` };
 
   /** Errors never quote the provider's own words, some providers echo the key */
-  async function call(path: string, timeoutMs: number, body?: unknown): Promise<{ status: number; json: unknown }> {
+  async function call(
+    path: string,
+    limits: { timeoutMs: number; maxBytes: number },
+    body?: unknown,
+  ): Promise<{ status: number; json: unknown }> {
     let status: number;
-    let text: string;
+    let text: string | undefined;
     try {
       const res = await fetch(`${base}${path}`, {
         method: body === undefined ? "GET" : "POST",
@@ -122,14 +163,17 @@ export function createOpenAiProvider(c: Pick<EmbeddingsConfig, "baseUrl" | "apiK
           ...(body !== undefined && { "content-type": "application/json" }),
         },
         ...(body !== undefined && { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(limits.timeoutMs),
       });
       status = res.status;
-      text = await res.text();
+      // What a failing provider says is never used, so it is not read
+      if (status < 200 || status >= 300) res.body?.cancel().catch(() => undefined);
+      else text = await readCapped(res, limits.maxBytes);
     } catch (e) {
       throw new ProviderError(`provider unreachable (${reason(e)})`, undefined, { cause: e });
     }
     if (status < 200 || status >= 300) throw new ProviderError(`provider answered ${status}${hint(status)}`, status);
+    if (text === undefined) throw new ProviderError(`provider answer is larger than ${size(limits.maxBytes)}`, status);
     try {
       return { status, json: JSON.parse(text) };
     } catch (e) {
@@ -139,11 +183,13 @@ export function createOpenAiProvider(c: Pick<EmbeddingsConfig, "baseUrl" | "apiK
 
   return {
     async embed(inputs) {
-      const { status, json } = await call("/embeddings", EMBED_TIMEOUT_MS, { model: c.model, input: inputs });
+      const maxBytes = EMBED_BASE_BYTES + EMBED_BYTES_PER_INPUT * inputs.length;
+      const limits = { timeoutMs: EMBED_TIMEOUT_MS, maxBytes };
+      const { status, json } = await call("/embeddings", limits, { model: c.model, input: inputs });
       return parseEmbeddings(json, inputs.length, status);
     },
     async listModels() {
-      const { status, json } = await call("/models", LIST_TIMEOUT_MS);
+      const { status, json } = await call("/models", { timeoutMs: LIST_TIMEOUT_MS, maxBytes: LIST_MAX_BYTES });
       return parseModelIds(json, status);
     },
   };

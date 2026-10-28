@@ -16,7 +16,7 @@ export const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 export const DEFAULT_MODEL = "nomic-embed-text";
 const DEFAULT_MAX_CHARS = 4000;
 const DEFAULT_MAX_INPUTS = 64;
-/** The paid route reads at most 256 kB of JSON, which carries this many characters even at four bytes each */
+/** About 720 kB of JSON when every character is written as two escapes, which the paid route makes room for */
 const MAX_CHARS_LIMIT = 60_000;
 const MAX_INPUTS_LIMIT = 2048;
 /** Visible ASCII without spaces, which is what a bearer token can carry */

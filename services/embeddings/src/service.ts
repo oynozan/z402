@@ -24,8 +24,15 @@ export interface EmbeddingsServiceOptions {
 
 export const EMBEDDINGS_PATH = "/v1/embeddings";
 
-/** Room for `EMBEDDINGS_MAX_CHARS` characters at four bytes each, see MAX_CHARS_LIMIT in config.ts */
-const JSON_LIMIT = "256kb";
+/**
+ * What a body may weigh: room for `EMBEDDINGS_MAX_CHARS` characters at 12 bytes each, which is a character outside the
+ * BMP written as two \uXXXX escapes, the way a client that escapes everything writes it, and for the quotes, commas and
+ * indents between the strings. 256 kB is the least, which is also what the default caps need many times over.
+ */
+const MIN_JSON_BYTES = 256 * 1024;
+const BYTES_PER_CHAR = 12;
+const BYTES_PER_STRING = 16;
+const BODY_SLACK_BYTES = 4096;
 /** The kit asks for readiness every 5 s, so the provider hears from us about every 10 s */
 const READY_CACHE_MS = 10_000;
 /** For a provider that reports no usage, about four characters to a token */
@@ -33,8 +40,13 @@ const CHARS_PER_TOKEN = 4;
 /** Where `prepare` leaves the normalized inputs for the handler */
 const INPUTS_KEY = "embeddingInputs";
 
-// Not strict, so that a JSON string or number reaches parseInput and gets its own message
-const parseJson = express.json({ limit: JSON_LIMIT, strict: false });
+function jsonLimit(c: EmbeddingsConfig): number {
+  return Math.max(MIN_JSON_BYTES, c.maxChars * BYTES_PER_CHAR + c.maxInputs * BYTES_PER_STRING + BODY_SLACK_BYTES);
+}
+
+// A lone surrogate is not text: JSON.stringify writes it as an escape, and a strict provider refuses the whole body
+const LONE_SURROGATE_RE = /\p{Surrogate}/u;
+const NOT_UNICODE = "must be valid Unicode text, with no unpaired surrogate";
 
 /** Unicode code points, so that an emoji counts once whatever its UTF-16 length */
 function codePoints(s: string): number {
@@ -54,18 +66,24 @@ function parseInput(body: unknown, maxInputs: number): Parsed {
   }
   const input: unknown = (body as { input?: unknown }).input;
   if (typeof input === "string") {
-    return isBlank(input) ? { message: "input must not be blank" } : { inputs: [input] };
+    if (isBlank(input)) return { message: "input must not be blank" };
+    return LONE_SURROGATE_RE.test(input) ? { message: `input ${NOT_UNICODE}` } : { inputs: [input] };
   }
   if (!Array.isArray(input)) return { message: "input must be a string or an array of strings" };
   if (input.length === 0 || input.length > maxInputs) return { message: `input must hold 1 to ${maxInputs} strings` };
   const items: unknown[] = input;
   const bad = items.findIndex((s) => typeof s !== "string" || isBlank(s));
   if (bad >= 0) return { message: `input[${bad}] must be a string that is not blank` };
-  return { inputs: items as string[] };
+  const strings = items as string[];
+  const broken = strings.findIndex((s) => LONE_SURROGATE_RE.test(s));
+  if (broken >= 0) return { message: `input[${broken}] ${NOT_UNICODE}` };
+  return { inputs: strings };
 }
 
 /** Parses the JSON body and checks it, answering the refusal itself so that no voucher is ever sent for it */
 function checkRequest(config: EmbeddingsConfig): RequestHandler {
+  // Not strict, so that a JSON string or number reaches parseInput and gets its own message
+  const parseJson = express.json({ limit: jsonLimit(config), strict: false });
   const tooLong = (res: Response): void => {
     res.status(413).json({
       error: "too_many_tokens",
@@ -111,6 +129,8 @@ function inputsOf(res: Response): string[] {
 function route(config: EmbeddingsConfig): PaidRoute {
   const { maxInputs, maxChars, maxInputChars } = config;
   const perInput = maxInputChars < maxChars ? `, at most ${maxInputChars} per string` : "";
+  // JSON Schema counts a length in code points, as the checks before payment do
+  const maxLength = Math.min(maxChars, maxInputChars);
   return {
     method: "POST",
     path: EMBEDDINGS_PATH,
@@ -126,8 +146,8 @@ function route(config: EmbeddingsConfig): PaidRoute {
           input: {
             description: `A string, or up to ${maxInputs} strings, with at most ${maxChars} characters in total${perInput}`,
             oneOf: [
-              { type: "string", minLength: 1 },
-              { type: "array", minItems: 1, maxItems: maxInputs, items: { type: "string", minLength: 1 } },
+              { type: "string", minLength: 1, maxLength },
+              { type: "array", minItems: 1, maxItems: maxInputs, items: { type: "string", minLength: 1, maxLength } },
             ],
           },
         },

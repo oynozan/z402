@@ -1,3 +1,5 @@
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, test } from "vitest";
 import { createOpenAiProvider, ProviderError } from "../src/index.js";
 import {
@@ -12,8 +14,13 @@ import {
 } from "./fake-provider.js";
 
 const fakes: FakeProvider[] = [];
+const servers: Server[] = [];
 afterEach(async () => {
   for (const f of fakes.splice(0)) await f.close();
+  for (const server of servers.splice(0)) {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 /** A fake provider and a client for it, which sends `clientKey` (by default the key the fake wants) */
@@ -66,6 +73,8 @@ describe("embed", () => {
     ["a usage of zero tokens, which a provider that does not count reports", { prompt_tokens: 0, total_tokens: 0 }],
     ["a usage that is not a number", { prompt_tokens: "3" }],
     ["a usage that is not an object", 3],
+    ["a usage with a fraction", { prompt_tokens: 2.5, total_tokens: 2.5 }],
+    ["a usage too big to be a count", { prompt_tokens: 1e300, total_tokens: 1e300 }],
   ])("leaves the usage out for %s", async (_name, usage) => {
     const { fake, client } = await setup();
     fake.embed = () => ({ json: { data: vector, usage } });
@@ -95,6 +104,13 @@ describe("embed", () => {
     ["an empty vector", one({ index: 0, embedding: [] })],
     ["a vector of strings", one({ index: 0, embedding: ["1", "2"] })],
     ["a vector that is a base64 string", one({ index: 0, embedding: "AAAAAA==" })],
+    ["a vector with NaN in it, which is not JSON", { text: '{"data":[{"index":0,"embedding":[1,NaN]}]}' }],
+    ["a vector with a number too big for a double", { text: '{"data":[{"index":0,"embedding":[1,1e999]}]}' }],
+    ["a vector with null in it", one({ index: 0, embedding: [1, null] })],
+    ["a vector with a boolean in it", one({ index: 0, embedding: [1, true] })],
+    ["an index written as text", one({ index: "0", embedding: [1] })],
+    ["an index too big to be a count", one({ index: 1e300, embedding: [1] })],
+    ["an item without a vector", one({ index: 0 })],
   ])("rejects %s", async (_name, reply) => {
     const { fake, client } = await setup();
     fake.embed = () => reply;
@@ -191,5 +207,92 @@ describe("listModels", () => {
     const failure = await failureOf(client.listModels());
     expect(failure).toBeInstanceOf(ProviderError);
     expect((failure as ProviderError).status).toBe(401);
+  });
+});
+
+/** A provider that answers 200 and then writes filler for as long as the client reads, up to `total` bytes */
+async function flood(total: number, o: { declare?: number } = {}) {
+  let written = 0;
+  const server = createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, {
+      "content-type": "application/json",
+      ...(o.declare !== undefined && { "content-length": String(o.declare) }),
+    });
+    const chunk = "0,".repeat(32 * 1024);
+    const pump = (): void => {
+      while (!res.destroyed && written < total) {
+        written += chunk.length;
+        if (!res.write(chunk)) {
+          res.once("drain", pump);
+          return;
+        }
+      }
+      if (!res.destroyed && o.declare === undefined) res.end();
+    };
+    pump();
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
+  return { url, written: () => written, client: createOpenAiProvider({ baseUrl: url, apiKey: undefined, model: FAKE_MODEL }) };
+}
+
+describe("a provider that sends more than an answer can hold", () => {
+  const total = 256 * 1024 * 1024;
+
+  test("embed stops reading once the answer is larger than vectors for the inputs can be", async () => {
+    const provider = await flood(total);
+    const failure = await failureOf(provider.client.embed(["x"]));
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect((failure as ProviderError).message).toBe("provider answer is larger than 1.3 MiB");
+    expect((failure as ProviderError).status).toBe(200);
+    expect(provider.written()).toBeLessThan(total / 4);
+  });
+
+  test("the size an answer may have grows with the number of inputs", async () => {
+    const { fake, client } = await setup();
+    const dimensions = 3072;
+    const inputs = Array.from({ length: 64 }, (_, i) => `text ${i}`);
+    fake.embed = () => ({
+      json: { data: inputs.map((_, index) => ({ index, embedding: Array.from({ length: dimensions }, (_v, i) => (i + index) / 7) })) },
+    });
+    const result = await client.embed(inputs);
+    expect(result.data).toHaveLength(64);
+    expect(result.data[63]?.embedding).toHaveLength(dimensions);
+  });
+
+  test("listModels stops reading once the list is larger than 8 MiB", async () => {
+    const provider = await flood(total);
+    const failure = await failureOf(provider.client.listModels());
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect((failure as ProviderError).message).toBe("provider answer is larger than 8 MiB");
+    expect(provider.written()).toBeLessThan(total / 4);
+  });
+
+  test("an answer that declares more than it may have is refused without waiting for it", async () => {
+    const provider = await flood(1024, { declare: 200 * 1024 * 1024 });
+    const started = performance.now();
+    const failure = await failureOf(provider.client.embed(["x"]));
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect((failure as ProviderError).message).toBe("provider answer is larger than 1.3 MiB");
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  test("an error status is not read at all", async () => {
+    const failing = createServer((req, res) => {
+      req.resume();
+      res.writeHead(500, { "content-type": "text/plain" });
+      const timer = setInterval(() => res.write("x".repeat(65536)), 1);
+      res.on("close", () => clearInterval(timer));
+    });
+    servers.push(failing);
+    await new Promise<void>((resolve) => failing.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(failing.address() as AddressInfo).port}/v1`;
+    const client = createOpenAiProvider({ baseUrl: url, apiKey: undefined, model: FAKE_MODEL });
+    const started = performance.now();
+    const failure = await failureOf(client.embed(["x"]));
+    expect((failure as ProviderError).message).toBe("provider answered 500");
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });
