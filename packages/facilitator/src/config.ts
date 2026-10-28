@@ -17,6 +17,7 @@ import {
   type Terms,
   type ZcashNetwork,
 } from "@z402/protocol";
+import { MAX_PAY_TO_LENGTH } from "./payTo.js";
 
 /** The repository root, found from this file and never from the working directory, which `pnpm --filter` changes */
 export const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -44,6 +45,8 @@ export interface FacilitatorEnv {
   maxProviders: number;
   /** Bearer token that POST /providers requires, and undefined leaves registration open to anyone */
   registrationToken: string | undefined;
+  /** False answers POST /providers with 403 registration_disabled, as mainnet does with no token and no opt-in */
+  registrationEnabled: boolean;
   host: string;
   port: number;
   terms: Terms;
@@ -95,6 +98,12 @@ const PROFILES: Readonly<Record<string, Profile>> = {
 const MAX_UIVK_LENGTH = 1024;
 const DEFAULT_MAX_PROVIDERS = 32;
 const MAX_PROVIDERS_LIMIT = 1000;
+/** Characters a registration token needs, since nothing limits how often a caller may guess one */
+const MIN_REGISTRATION_TOKEN_LENGTH = 32;
+const OPEN_REGISTRATION = "POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token";
+const CLOSED_REGISTRATION =
+  "POST /providers answers 403 registration_disabled on mainnet: set Z402_REGISTRATION_TOKEN to require a token, " +
+  "or Z402_REGISTRATION_OPEN=1 to let anyone register";
 const DEFAULT_ZDECRYPT_BIN = "crates/zdecrypt/target/release/zdecrypt";
 const BRANCH_ID_RE = /^[0-9a-f]{8}$/i;
 const PORT_RE = /^(0|[1-9][0-9]{0,4})$/;
@@ -208,7 +217,20 @@ function registrationTokenOf(env: Env): string | undefined {
       "Z402_REGISTRATION_TOKEN: must be one token of letters, digits and -._~+/ (no spaces or control characters)",
     );
   }
+  if (token !== undefined && token.length < MIN_REGISTRATION_TOKEN_LENGTH) {
+    throw new ConfigError(
+      `Z402_REGISTRATION_TOKEN: must be at least ${MIN_REGISTRATION_TOKEN_LENGTH} characters, ` +
+        "for example the output of openssl rand -hex 32",
+    );
+  }
   return token;
+}
+
+/** Whether the operator opted in to open registration, which is exactly 1 or nothing */
+function openRegistrationOf(env: Env): boolean {
+  const raw = read(env, "Z402_REGISTRATION_OPEN");
+  if (raw !== undefined && raw !== "1") throw new ConfigError("Z402_REGISTRATION_OPEN: expected 1, or leave it unset");
+  return raw === "1";
 }
 
 function portOf(env: Env): number {
@@ -282,6 +304,9 @@ export function loadConfig(env: Env): FacilitatorEnv {
   };
 
   const pay = keyed("Z402_PAY_TO", "orchardOnlyAddress", "the shielded-only unified address deposits go to");
+  if (pay.value.length > MAX_PAY_TO_LENGTH) {
+    throw new ConfigError(`Z402_PAY_TO${pay.origin}: must be at most ${MAX_PAY_TO_LENGTH} characters`);
+  }
   if (!isValidPayTo(pay.value, network)) {
     throw new ConfigError(
       `Z402_PAY_TO${pay.origin}: not a shielded-only unified address for ${network} (expected ${profile.payToHint})`,
@@ -317,6 +342,7 @@ export function loadConfig(env: Env): FacilitatorEnv {
   const providersDir = pathOf(read(env, "Z402_PROVIDERS_DIR") ?? `.data/providers.${name}`);
   const maxProviders = maxProvidersOf(env);
   const registrationToken = registrationTokenOf(env);
+  const optedIn = openRegistrationOf(env);
   const host = read(env, "Z402_FACILITATOR_HOST") ?? "127.0.0.1";
   if (host.trim() === "") throw new ConfigError("Z402_FACILITATOR_HOST: must not be blank");
   if (!isLoopback(host)) {
@@ -332,6 +358,11 @@ export function loadConfig(env: Env): FacilitatorEnv {
   }
   const terms = termsOf(env);
 
+  // Anyone may take the provider slots while registration is open, and a mainnet facilitator waits to be told so
+  const open = registrationToken === undefined && maxProviders > 0;
+  const registrationEnabled = !(open && network === NETWORK_MAINNET && !optedIn);
+  if (open) warnings.push(registrationEnabled ? OPEN_REGISTRATION : CLOSED_REGISTRATION);
+
   return {
     network,
     payTo: pay.value,
@@ -344,6 +375,7 @@ export function loadConfig(env: Env): FacilitatorEnv {
     providersDir,
     maxProviders,
     registrationToken,
+    registrationEnabled,
     host,
     port,
     terms,

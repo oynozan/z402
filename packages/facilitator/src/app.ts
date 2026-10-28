@@ -44,6 +44,8 @@ export interface ProvidersOptions {
   max?: number;
   /** Bearer token that POST /providers requires, and left out means anyone may register */
   registrationToken?: string;
+  /** False refuses POST /providers as registration_disabled, and registered providers keep serving, default true */
+  registrationEnabled?: boolean;
 }
 
 export interface FacilitatorOptions {
@@ -95,6 +97,8 @@ export interface AppOptions {
   register?: Registrar;
   /** Bearer token that POST /providers requires, and left out means anyone may call it */
   registrationToken?: string;
+  /** False refuses every POST /providers as registration_disabled, unread and with no token asked, default true */
+  registrationEnabled?: boolean;
   /** The Bazaar's catalog, and without one there are no discovery routes */
   catalog?: Catalog;
   log?: Log;
@@ -120,6 +124,8 @@ const BEARER = /^bearer +(.+)$/i;
 const B64TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
 const NO_TOKEN = "leave it out to run without a token";
 const OPEN_REGISTRATION = "leave it out to let anyone register";
+const NO_PROVIDERS_DIRECTORY = "this facilitator has no providers directory";
+const REGISTRATION_CLOSED = "registration is closed on this facilitator";
 /** The longest delay setInterval honours, past which Node fires it after 1 ms */
 const MAX_TIMER_MS = 2_147_483_647;
 /** The scheme's own ceiling, the wait the API's 60 s for a verify was sized for */
@@ -276,7 +282,7 @@ function jsonBody(): RequestHandler {
 }
 
 export function createFacilitatorApp(o: AppOptions): Express {
-  const { operator, tenantOf, register, registrationToken, log } = o;
+  const { operator, tenantOf, register, registrationToken, registrationEnabled, log } = o;
   checkToken("providers.registrationToken", registrationToken, OPEN_REGISTRATION);
   const diagnose = log ?? stderr;
 
@@ -321,9 +327,9 @@ export function createFacilitatorApp(o: AppOptions): Express {
     res.json(operator.facilitator.getSupported());
   });
 
-  if (register === undefined) {
+  if (register === undefined || registrationEnabled === false) {
     app.post("/providers", (_req: Request, res: Response) => {
-      refuse(res, 403, "registration_disabled", "this facilitator has no providers directory");
+      refuse(res, 403, "registration_disabled", register === undefined ? NO_PROVIDERS_DIRECTORY : REGISTRATION_CLOSED);
     });
   } else {
     app.post("/providers", registrationGate(registrationToken), jsonBody(), async (req: Request, res: Response) => {
@@ -424,6 +430,9 @@ function checkProviders(p: ProvidersOptions | undefined): void {
   if (typeof p.owns !== "function") throw new Error("providers.owns: must be a function");
   wholeNumber("providers.max", p.max, 0, MAX_PROVIDERS_LIMIT);
   checkToken("providers.registrationToken", p.registrationToken, OPEN_REGISTRATION);
+  if (p.registrationEnabled !== undefined && typeof p.registrationEnabled !== "boolean") {
+    throw new Error("providers.registrationEnabled: must be true or false");
+  }
 }
 
 /** Refuses a bad option before anything is opened, naming the field */
@@ -611,6 +620,7 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
       tenantOf,
       register,
       registrationToken: providers?.registrationToken,
+      registrationEnabled: providers?.registrationEnabled,
       catalog,
       log: o.log,
     });

@@ -6,6 +6,7 @@
  */
 import { isValidPayTo, type ZcashNetwork } from "@z402/protocol";
 import { isValidUivk } from "../config.js";
+import { MAX_PAY_TO_LENGTH } from "../payTo.js";
 import type { Log, ProviderRuntime } from "../runtime.js";
 import { keyDigest, newApiKey } from "./apiKey.js";
 import { providerId } from "./id.js";
@@ -74,6 +75,9 @@ function asked(body: unknown, network: ZcashNetwork): Proof {
   const invalid = (message: string) => refuse(400, "invalid_request", message);
   if (!isRecord(body)) throw invalid("the request body must be a JSON object");
   const { payTo, uivk, network: named } = body;
+  if (typeof payTo === "string" && payTo.length > MAX_PAY_TO_LENGTH) {
+    throw invalid(`payTo: expected at most ${MAX_PAY_TO_LENGTH} characters`);
+  }
   if (typeof payTo !== "string" || !isValidPayTo(payTo, network)) {
     throw invalid(`payTo: expected a shielded-only unified address for ${network}`);
   }

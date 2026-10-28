@@ -15,6 +15,25 @@ const bech32 = (hrp: string, length = 60): string => `${hrp}1${"q".repeat(length
 const PAY_TO = bech32("uregtest");
 const UIVK = bech32("uivkregtest", 100);
 
+/** The settings each network needs, mainnet's endpoint included, which the tests of registration lay under env() */
+const ON = {
+  regtest: {},
+  testnet: { Z402_NETWORK: "testnet", Z402_PAY_TO: bech32("utest"), Z402_UIVK: bech32("uivktest", 100) },
+  mainnet: {
+    Z402_NETWORK: "mainnet",
+    Z402_PAY_TO: bech32("u"),
+    Z402_UIVK: bech32("uivk", 100),
+    Z402_LWD_URL: "https://127.0.0.1:9067",
+  },
+} as const;
+
+/** A registration token of the 32 characters the facilitator asks for, for the tests that are not about registration */
+const REGISTRATION = "r-5d1b84-secret-token-0123456789";
+const OPEN = "POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token";
+const CLOSED =
+  "POST /providers answers 403 registration_disabled on mainnet: set Z402_REGISTRATION_TOKEN to require a token, " +
+  "or Z402_REGISTRATION_OPEN=1 to let anyone register";
+
 const BASE: Record<string, string | undefined> = {
   Z402_PAY_TO: PAY_TO,
   Z402_UIVK: UIVK,
@@ -57,10 +76,11 @@ describe("defaults", () => {
       providersDir: join(ROOT, ".data", "providers.regtest"),
       maxProviders: 32,
       registrationToken: undefined,
+      registrationEnabled: true,
       host: "127.0.0.1",
       port: 4022,
       terms: { windowZat: 100000n, creditRatioBps: 2500, creditCapZat: 200000n, zeroConfMinExpiryBlocks: 20 },
-      warnings: [],
+      warnings: [OPEN],
     });
   });
 
@@ -117,7 +137,7 @@ describe("defaults", () => {
     const config = loadConfig(
       env({ Z402_NETWORK: "", Z402_PRICE_ZAT: "", Z402_LWD_URL: "", Z402_FACILITATOR_PORT: "" }),
     );
-    expect(config).toMatchObject({ network: NETWORK_REGTEST, port: 4022, warnings: [] });
+    expect(config).toMatchObject({ network: NETWORK_REGTEST, port: 4022, warnings: [OPEN] });
   });
 });
 
@@ -141,6 +161,25 @@ describe("Z402_PAY_TO", () => {
 
   test("a missing address is refused", () => {
     expect(refusal(env({ Z402_PAY_TO: undefined })).message).toMatch(/Z402_PAY_TO/);
+  });
+
+  test("an address of exactly 1024 characters is accepted", () => {
+    const payTo = bech32("uregtest", 1015);
+    expect(payTo).toHaveLength(1024);
+    expect(loadConfig(env({ Z402_PAY_TO: payTo })).payTo).toBe(payTo);
+  });
+
+  test.each([1025, 59_000])("an address of %d characters is refused, naming the variable and not quoting it", (n) => {
+    const payTo = bech32("uregtest", n - 9);
+    const error = refusal(env({ Z402_PAY_TO: payTo }));
+    expect(error.message).toBe("Z402_PAY_TO: must be at most 1024 characters");
+    expect(error.message).not.toContain(payTo);
+  });
+
+  test("an address of 1025 characters in the keys file is refused, naming the variable and the file", () => {
+    const path = keysFile({ orchardOnlyAddress: bech32("uregtest", 1016), uivk: UIVK }, "long-address.json");
+    const error = refusal({ Z402_FACILITATOR_TOKEN: "t", Z402_MERCHANT_KEYS_FILE: path });
+    expect(error.message).toBe("Z402_PAY_TO (from Z402_MERCHANT_KEYS_FILE): must be at most 1024 characters");
   });
 
   test("the revision 2 shielded-only address is accepted", () => {
@@ -307,7 +346,7 @@ describe("Z402_MERCHANT_KEYS_FILE", () => {
       const path = keysFile(merchant, "regtest-seed.json");
       const config = loadConfig({ Z402_FACILITATOR_TOKEN: "t", Z402_MERCHANT_KEYS_FILE: path });
       expect(config).toMatchObject({ payTo: PAY_TO, uivk: UIVK });
-      expect(config.warnings).toEqual([advice(path, "the spending seed")]);
+      expect(config.warnings).toEqual([advice(path, "the spending seed"), OPEN]);
       expect(config.warnings.join(" ")).not.toContain(merchant.seedHex);
     });
 
@@ -319,6 +358,7 @@ describe("Z402_MERCHANT_KEYS_FILE", () => {
         Z402_PAY_TO: MAINNET.orchardOnlyAddress,
         Z402_UIVK: MAINNET.uivk,
         Z402_FACILITATOR_TOKEN: "t",
+        Z402_REGISTRATION_TOKEN: REGISTRATION,
         Z402_MERCHANT_KEYS_FILE: path,
       });
       expect(config.warnings).toEqual([]);
@@ -332,6 +372,7 @@ describe("Z402_MERCHANT_KEYS_FILE", () => {
       Z402_NETWORK: "mainnet",
       Z402_LWD_URL: "https://127.0.0.1:9067",
       Z402_FACILITATOR_TOKEN: "t",
+      Z402_REGISTRATION_TOKEN: REGISTRATION,
       Z402_MERCHANT_KEYS_FILE: path,
     });
     expect(config).toMatchObject({ payTo: viewOnly.orchardOnlyAddress, uivk: viewOnly.uivk, warnings: [] });
@@ -392,8 +433,32 @@ describe("Z402_REGISTRATION_TOKEN", () => {
     expect(loadConfig(env({ Z402_REGISTRATION_TOKEN: "" })).registrationToken).toBeUndefined();
   });
 
-  test.each(["r-3f9a1c-secret", "dGhlIHRva2Vu==", "a.b_c~d+e/f"])("%j is kept exactly as given", (token) => {
+  test.each([
+    "r-3f9a1c-secret-0123456789abcdef",
+    `${"A".repeat(30)}==`,
+    `a.b_c~d+e/f${"0".repeat(21)}`,
+    "x".repeat(200),
+  ])("%j is kept exactly as given", (token) => {
     expect(loadConfig(env({ Z402_REGISTRATION_TOKEN: token })).registrationToken).toBe(token);
+  });
+
+  test("of 32 characters is the shortest that is taken", () => {
+    expect(loadConfig(env({ Z402_REGISTRATION_TOKEN: "r".repeat(32) })).registrationToken).toBe("r".repeat(32));
+  });
+
+  test.each([1, 8, 16, 31])("of %d characters is refused, naming the variable and not quoting the token", (length) => {
+    const token = "Q".repeat(length);
+    const error = refusal(env({ Z402_REGISTRATION_TOKEN: token }));
+    expect(error.message).toBe(
+      "Z402_REGISTRATION_TOKEN: must be at least 32 characters, for example the output of openssl rand -hex 32",
+    );
+    expect(error.message).not.toContain(token);
+  });
+
+  test("counts a padding sign like any character", () => {
+    const padded = `${"r".repeat(31)}=`;
+    expect(loadConfig(env({ Z402_REGISTRATION_TOKEN: padded })).registrationToken).toBe(padded);
+    expect(refusal(env({ Z402_REGISTRATION_TOKEN: `${"r".repeat(30)}=` })).message).toMatch(/at least 32/);
   });
 
   test.each([" a b ", "s3cret\n", "a b", "tab\there", "a=b"])("%j, which no header can match, is refused", (token) => {
@@ -405,7 +470,98 @@ describe("Z402_REGISTRATION_TOKEN", () => {
   });
 
   test("can be the same as the facilitator token", () => {
-    expect(loadConfig(env({ Z402_REGISTRATION_TOKEN: "token" })).registrationToken).toBe("token");
+    const same = env({ Z402_FACILITATOR_TOKEN: REGISTRATION, Z402_REGISTRATION_TOKEN: REGISTRATION });
+    expect(loadConfig(same)).toMatchObject({ authToken: REGISTRATION, registrationToken: REGISTRATION });
+  });
+});
+
+describe("Z402_REGISTRATION_OPEN", () => {
+  test.each([undefined, ""])("%j is unset", (value) => {
+    expect(loadConfig(env({ Z402_REGISTRATION_OPEN: value })).registrationEnabled).toBe(true);
+  });
+
+  test("1 is accepted", () => {
+    expect(loadConfig(env({ Z402_REGISTRATION_OPEN: "1" })).registrationEnabled).toBe(true);
+  });
+
+  test.each(["yes", "true", "TRUE", "0", "2", "01", "10", " 1", "1 ", "1\n", "on", "open", "-1"])(
+    "%j is refused, naming the variable and not quoting the value",
+    (value) => {
+      const error = refusal(env({ Z402_REGISTRATION_OPEN: value }));
+      expect(error.message).toBe("Z402_REGISTRATION_OPEN: expected 1, or leave it unset");
+    },
+  );
+
+  test("is refused on every network and beside a token, since it is judged before it is needed", () => {
+    for (const over of [ON.regtest, ON.testnet, ON.mainnet, { Z402_REGISTRATION_TOKEN: REGISTRATION }]) {
+      expect(refusal(env({ ...over, Z402_REGISTRATION_OPEN: "yes" })).message).toMatch(/^Z402_REGISTRATION_OPEN: /);
+    }
+  });
+});
+
+describe("registration exposure", () => {
+  const names = ["regtest", "testnet", "mainnet"] as const;
+  const withToken = { Z402_REGISTRATION_TOKEN: REGISTRATION };
+
+  test.each(["regtest", "testnet"] as const)("on %s, with no token, registration is open and warned about", (name) => {
+    const config = loadConfig(env(ON[name]));
+    expect(config).toMatchObject({ registrationToken: undefined, registrationEnabled: true });
+    expect(config.warnings).toEqual([OPEN]);
+  });
+
+  test("on mainnet, with no token and no opt-in, registration is off and one warning says why", () => {
+    const config = loadConfig(env(ON.mainnet));
+    expect(config).toMatchObject({ registrationToken: undefined, registrationEnabled: false });
+    expect(config.warnings).toEqual([CLOSED]);
+  });
+
+  test("on mainnet, an empty token and an empty opt-in count as unset, so registration is off", () => {
+    const config = loadConfig(env({ ...ON.mainnet, Z402_REGISTRATION_TOKEN: "", Z402_REGISTRATION_OPEN: "" }));
+    expect(config).toMatchObject({ registrationToken: undefined, registrationEnabled: false });
+    expect(config.warnings).toEqual([CLOSED]);
+  });
+
+  test("on mainnet, Z402_REGISTRATION_OPEN=1 opens registration, with the warning of open registration", () => {
+    const config = loadConfig(env({ ...ON.mainnet, Z402_REGISTRATION_OPEN: "1" }));
+    expect(config).toMatchObject({ registrationToken: undefined, registrationEnabled: true });
+    expect(config.warnings).toEqual([OPEN]);
+  });
+
+  test.each(names)("on %s, a token gates registration and nothing is warned about", (name) => {
+    const config = loadConfig(env({ ...ON[name], ...withToken }));
+    expect(config).toMatchObject({ registrationToken: REGISTRATION, registrationEnabled: true });
+    expect(config.warnings).toEqual([]);
+  });
+
+  test.each(names)("on %s, Z402_REGISTRATION_OPEN=1 beside a token changes nothing", (name) => {
+    const config = loadConfig(env({ ...ON[name], ...withToken, Z402_REGISTRATION_OPEN: "1" }));
+    expect(config).toMatchObject({ registrationToken: REGISTRATION, registrationEnabled: true });
+    expect(config.warnings).toEqual([]);
+  });
+
+  test.each(names)("on %s, Z402_MAX_PROVIDERS=0 admits no one, so nothing is open or warned about", (name) => {
+    const config = loadConfig(env({ ...ON[name], Z402_MAX_PROVIDERS: "0" }));
+    expect(config).toMatchObject({ maxProviders: 0, registrationEnabled: true });
+    expect(config.warnings).toEqual([]);
+  });
+
+  test.each(names)("on %s, one provider slot is enough for the warning", (name) => {
+    const config = loadConfig(env({ ...ON[name], Z402_MAX_PROVIDERS: "1", Z402_REGISTRATION_OPEN: "1" }));
+    expect(config.warnings).toEqual([OPEN]);
+  });
+
+  test("the warning comes after the others and names no token", () => {
+    const config = loadConfig(env({ Z402_FACILITATOR_HOST: "0.0.0.0", Z402_PRICE_ZAT: "800" }));
+    expect(config.warnings).toHaveLength(3);
+    expect(config.warnings[2]).toBe(OPEN);
+    const gated = loadConfig(env({ ...withToken, Z402_FACILITATOR_HOST: "0.0.0.0" }));
+    expect(gated.warnings.join(" ")).not.toContain(REGISTRATION);
+  });
+
+  test("the warning for a mainnet that is off tells both ways out and nothing else about it", () => {
+    expect(CLOSED).toContain("Z402_REGISTRATION_TOKEN");
+    expect(CLOSED).toContain("Z402_REGISTRATION_OPEN=1");
+    expect(loadConfig(env(ON.mainnet)).warnings).toHaveLength(1);
   });
 });
 
@@ -467,7 +623,7 @@ describe("numbers", () => {
       const config = loadConfig(env({ Z402_PRICE_ZAT: value }));
 
       expect(config).not.toHaveProperty("priceZat");
-      expect(config.warnings).toEqual(["Z402_PRICE_ZAT is ignored: each provider prices its own routes"]);
+      expect(config.warnings).toEqual(["Z402_PRICE_ZAT is ignored: each provider prices its own routes", OPEN]);
       expect({ ...config, warnings: [] }).toEqual({ ...loadConfig(env()), warnings: [] });
     },
   );
@@ -531,23 +687,30 @@ describe("plaintext http://", () => {
   );
 
   test("on regtest to any host is accepted, as a compose network names its own", () => {
-    const config = loadConfig(env({ Z402_LWD_URL: "http://zaino:8137" }));
+    const config = loadConfig(env({ Z402_LWD_URL: "http://zaino:8137", Z402_REGISTRATION_TOKEN: REGISTRATION }));
     expect(config).toMatchObject({ lwdUrl: "http://zaino:8137", warnings: [] });
   });
 });
 
 describe("warnings", () => {
-  const MAINNET = { Z402_NETWORK: "mainnet", Z402_PAY_TO: bech32("u"), Z402_UIVK: bech32("uivk", 100) };
+  // A token keeps the warning about open registration out, so that each test sees the one warning it is about
+  const MAINNET = {
+    Z402_NETWORK: "mainnet",
+    Z402_PAY_TO: bech32("u"),
+    Z402_UIVK: bech32("uivk", 100),
+    Z402_REGISTRATION_TOKEN: REGISTRATION,
+  };
+  const tokened = (over: Record<string, string | undefined>) => env({ Z402_REGISTRATION_TOKEN: REGISTRATION, ...over });
 
   test("a facilitator host that is not loopback is warned about once", () => {
-    expect(loadConfig(env({ Z402_FACILITATOR_HOST: "0.0.0.0" })).warnings).toEqual([
+    expect(loadConfig(tokened({ Z402_FACILITATOR_HOST: "0.0.0.0" })).warnings).toEqual([
       "Z402_FACILITATOR_HOST: 0.0.0.0 is not a loopback host, so the facilitator and its bearer token are reachable " +
         "over plain http",
     ]);
   });
 
   test.each(["127.0.0.1", "localhost", "::1"])("a facilitator host of %s is not warned about", (host) => {
-    expect(loadConfig(env({ Z402_FACILITATOR_HOST: host })).warnings).toEqual([]);
+    expect(loadConfig(tokened({ Z402_FACILITATOR_HOST: host })).warnings).toEqual([]);
   });
 
   test("a mainnet endpoint that is not loopback is named in one warning", () => {
@@ -562,11 +725,11 @@ describe("warnings", () => {
   });
 
   test("an empty Z402_PRICE_ZAT counts as unset and is not warned about", () => {
-    expect(loadConfig(env({ Z402_PRICE_ZAT: "" })).warnings).toEqual([]);
+    expect(loadConfig(tokened({ Z402_PRICE_ZAT: "" })).warnings).toEqual([]);
   });
 
   test("the price warning comes once, after the warnings of the settings it sits beside", () => {
-    expect(loadConfig(env({ Z402_FACILITATOR_HOST: "0.0.0.0", Z402_PRICE_ZAT: "800" })).warnings).toEqual([
+    expect(loadConfig(tokened({ Z402_FACILITATOR_HOST: "0.0.0.0", Z402_PRICE_ZAT: "800" })).warnings).toEqual([
       "Z402_FACILITATOR_HOST: 0.0.0.0 is not a loopback host, so the facilitator and its bearer token are reachable " +
         "over plain http",
       "Z402_PRICE_ZAT is ignored: each provider prices its own routes",
@@ -575,7 +738,7 @@ describe("warnings", () => {
 
   test("a testnet endpoint is not warned about, as no real money is at stake", () => {
     const testnet = { Z402_NETWORK: "testnet", Z402_PAY_TO: bech32("utest"), Z402_UIVK: bech32("uivktest", 100) };
-    expect(loadConfig(env(testnet)).warnings).toEqual([]);
+    expect(loadConfig(tokened(testnet)).warnings).toEqual([]);
   });
 });
 

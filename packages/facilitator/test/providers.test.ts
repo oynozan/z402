@@ -718,6 +718,16 @@ describe("POST /providers", () => {
       ["no payTo", { body: { uivk: A.uivk } }, /^payTo: /],
       ["a payTo that is no address", { body: { payTo: "nope", uivk: A.uivk } }, /^payTo: /],
       ["a payTo of another network", { body: { payTo: `utest1${"q".repeat(60)}`, uivk: A.uivk } }, /^payTo: /],
+      [
+        "a payTo of 1025 characters",
+        { body: { payTo: `uregtest1${"q".repeat(1016)}`, uivk: A.uivk } },
+        /^payTo: .*1024/,
+      ],
+      [
+        "a payTo of 59000 characters",
+        { body: { payTo: `uregtest1${"q".repeat(58_991)}`, uivk: A.uivk } },
+        /^payTo: .*1024/,
+      ],
       ["no uivk", { body: { payTo: A.payTo } }, /^uivk: /],
       ["a uivk of another network", { body: { payTo: A.payTo, uivk: `uivktest1${"q".repeat(90)}` } }, /^uivk: /],
       ["another network", { body: { payTo: A.payTo, uivk: A.uivk, network: NETWORK_TESTNET } }, /^network: /],
@@ -808,6 +818,77 @@ describe("POST /providers", () => {
       expect((await register(url, A)).status).toBe(201);
       expect((await register(url, A, { token: "anything" })).status).toBe(200);
       expect((await register(url, B, { token: TOKEN })).status).toBe(201);
+    });
+  });
+
+  describe("with registrationEnabled false", () => {
+    const closed = { registrationEnabled: false };
+
+    test("is a 403 registration_disabled for every request, and asks for no proof and stores nothing", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, closed);
+      const res = await register(url, A);
+
+      expect(res).toMatchObject({ status: 403, json: { error: "registration_disabled", message: expect.any(String) } });
+      expect(res.json.message).toMatch(/closed/);
+      expect(res.json.message).not.toMatch(/providers directory/);
+      expect(rig.owns).not.toHaveBeenCalled();
+      expect(existsSync(join(rig.providers, "registry.json"))).toBe(false);
+      expect(readdirSync(join(rig.providers, "ledgers"))).toEqual([]);
+    });
+
+    test("answers before it reads the body or the token, so a bad one is no 400 and no 401", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, { ...closed, registrationToken: REGISTRATION });
+      for (const init of [
+        { raw: "{ not json" },
+        { token: "wrong" },
+        { token: REGISTRATION },
+        { raw: "" },
+        { body: { payTo: "nope" } },
+      ] as Init[]) {
+        const res = await call(url, "/providers", { method: "POST", ...init });
+        expect(res).toMatchObject({ status: 403, json: { error: "registration_disabled" } });
+        expect(res.headers.get("www-authenticate")).toBeNull();
+      }
+      expect(rig.owns).not.toHaveBeenCalled();
+    });
+
+    test("leaves the operator serving", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, closed);
+      expect((await call(url, "/providers/me", { token: TOKEN })).json.providerId).toBe(ID_OPERATOR);
+      expect((await call(url, "/supported")).status).toBe(200);
+      expect((await call(url, "/discovery/resources")).status).toBe(200);
+    });
+
+    test("keeps serving the providers that registered before, and refuses their rotation like the rest", async () => {
+      const rig = newRig();
+      const first = await boot(rig);
+      const key = await enroll(first.url, A);
+      await first.close();
+
+      const again = await boot(rig, {}, closed);
+      expect(again.providerCount()).toBe(1);
+      expect((await call(again.url, "/providers/me", { token: key })).json.providerId).toBe(ID_A);
+      expect(await register(again.url, A)).toMatchObject({ status: 403, json: { error: "registration_disabled" } });
+      expect(await register(again.url, B)).toMatchObject({ status: 403, json: { error: "registration_disabled" } });
+      expect((await call(again.url, "/providers/me", { token: key })).status).toBe(200);
+      expect(again.providerCount()).toBe(1);
+    });
+
+    test("is the default of true: registration is open when the option is true or left out", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, { registrationEnabled: true });
+      expect((await register(url, A)).status).toBe(201);
+    });
+
+    test("does not change the 403 of a facilitator with no providers directory", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, null);
+      const res = await register(url, A);
+      expect(res).toMatchObject({ status: 403, json: { error: "registration_disabled" } });
+      expect(res.json.message).toMatch(/providers directory/);
     });
   });
 
@@ -1161,6 +1242,14 @@ describe("start-up", () => {
       expect((await refusal(rig))?.message).toBe(`providersDir: registry entry ${ID_B} does not match its payTo`);
     });
 
+    test("holds an entry whose payTo is over 1024 characters, before any viewing key is asked about it", async () => {
+      const rig = newRig();
+      writeRegistry(rig, [entry({ payTo: `uregtest1${"q".repeat(1016)}`, uivk: A.uivk }, KEY_A)]);
+      const error = await refusal(rig);
+      expect(error?.message).toMatch(/^providersDir: .*registry\.json is not a valid provider registry /);
+      expect(error?.message).toMatch(/\(entry 1: payTo is over 1024 characters\)$/);
+    });
+
     test("holds the operator's payTo", async () => {
       const rig = newRig();
       writeRegistry(rig, [entry({ payTo: OPERATOR, uivk: A.uivk }, KEY_A)]);
@@ -1252,6 +1341,8 @@ describe("start-up", () => {
     ["providers.registrationToken", { registrationToken: "" }],
     ["providers.registrationToken", { registrationToken: "two words" }],
     ["providers.registrationToken", { registrationToken: "s3cret\n" }],
+    ["providers.registrationEnabled", { registrationEnabled: "no" }],
+    ["providers.registrationEnabled", { registrationEnabled: 0 }],
     ["providers.chainFor", { chainFor: undefined }],
     ["providers.owns", { owns: undefined }],
   ] as Array<[string, Record<string, unknown>]>)(

@@ -921,11 +921,55 @@ describe("a settled payment", () => {
       x402Version: 2,
       accepts: [requirementsOf(B)],
       lastUpdated: expect.stringMatching(ISO),
-      description: "Echoed description",
       mimeType: "text/plain",
       extensions: { bazaar: BAZAAR_GET },
       paidCallsToday: 1,
     });
+  });
+
+  test("lists a payment with none of the text, tags or icon a payer echoes, in the list and in a search", async () => {
+    const rig = newRig();
+    const { url } = await boot(rig);
+    const keyB = await enroll(url, B);
+
+    await firstSale(rig, url, keyB, B, {
+      resource: {
+        url: "https://paypal-login.attacker.example/signin?uid=1",
+        description: "<script>alert(document.cookie)</script> Official support desk, send funds here",
+        mimeType: "text/html",
+        serviceName: "PayPal Support",
+        tags: ["paypal"],
+        iconUrl: "https://tracker.attacker.example/pixel.gif?uid=visitor",
+      } as PaymentPayload["resource"],
+    });
+
+    const [item, ...others] = await listing(url);
+    expect(others).toEqual([]);
+    expect(Object.keys(item).sort()).toEqual(
+      ["accepts", "extensions", "lastUpdated", "mimeType", "paidCallsToday", "resource", "type", "x402Version"].sort(),
+    );
+    expect(item.resource).toBe("https://paypal-login.attacker.example/signin");
+    for (const word of ["paypal", "official", "support"]) {
+      const found = (await call(url, `/discovery/search?query=${word}`)).json.resources;
+      expect(resources(found)).toEqual(word === "paypal" ? [item.resource] : []);
+    }
+    expect(JSON.stringify(item)).not.toMatch(/Official|tracker|PayPal Support|script/);
+  });
+
+  test("lists at most 8 resources from the payments of a provider that never declared, and still counts", async () => {
+    const rig = newRig();
+    const { url } = await boot(rig);
+    const keyB = await enroll(url, B);
+    const at = (n: number) => `http://127.0.0.1:4021/r${n}`;
+
+    await firstSale(rig, url, keyB, B, { resource: { url: at(0) } });
+    for (let n = 1; n < 9; n++) await sale(url, keyB, B, BigInt(500 * (n + 1)), { resource: { url: at(n) } });
+    await sale(url, keyB, B, 5000n, { resource: { url: at(1) } });
+
+    const items = await listing(url, "?limit=100");
+    expect(resources(items)).toEqual(Array.from({ length: 8 }, (_, n) => at(n)));
+    expect(items.find((i) => i.resource === at(1)).paidCallsToday).toBe(2);
+    expect(diagnostics(rig).filter((line) => line.startsWith("catalog:"))).toHaveLength(1);
   });
 
   test("lists a provider that never declared from the server's requirements, not the payer's accepted", async () => {
@@ -1213,6 +1257,18 @@ describe("createFacilitatorApp", () => {
     expect(refused.json.message).toMatch(/^items\[0\]\.accepts\[0\]\.extra\.termsVersion: /);
     expect(resources(await listing(url))).toEqual([CHUNK]);
     expect((await call(url, "/discovery/search?query=chunk")).json.resources).toHaveLength(1);
+  });
+
+  test("answers a declaration past the byte budget of the catalog with 400 invalid_request and no index", async () => {
+    const catalog = Catalog.load({ maxBytes: 1 });
+    const url = await serve(createFacilitatorApp({ operator, tenantOf: () => operator, catalog }));
+    const accepts = [requirementsOf(OP, { termsVersion: "0123456789abcdef" })];
+
+    const res = await declare(url, undefined, [route(OP, { accepts })]);
+
+    expect(res).toMatchObject({ status: 400, json: { error: "invalid_request", message: "the catalog is full" } });
+    expect(res.json).not.toHaveProperty("index");
+    expect(await listing(url)).toEqual([]);
   });
 
   test("counts a payment that settled even when its answer cannot be sent", async () => {
