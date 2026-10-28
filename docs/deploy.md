@@ -181,9 +181,11 @@ reaches the facilitator can take its provider slots (32 by default) and list res
 ## The agent
 
 ```bash
-docker compose run --rm agent --calls 20            # honest agent, one paid call per second
-docker compose run --rm agent --calls 20 --cheat    # one deposit, then refused at its credit limit
-docker compose run --rm discover                   # the service catalog, as an agent sees it (no wallet)
+docker compose run --rm agent --calls 20                            # honest agent, one paid call per second
+docker compose run --rm agent --calls 300 --interval-ms 0 --cheat   # one deposit, then refused at its credit limit
+docker compose run --rm discover                                    # the service catalog, as an agent sees it
+docker compose run --rm agent --url http://api:4021/chunk \
+  --url "http://markdown:4032/v1/markdown?url=https://example.com"  # one agent paying both providers
 ```
 
 It pays from Zallet account 0. Each run first checks that the agent still holds 1 ZEC and tops it up if not.
