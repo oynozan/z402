@@ -290,7 +290,7 @@ The `outcome` function in the [complete agent](#a-complete-agent) handles both h
 
 A deposit is a payment to the provider, and it is the only thing that moves money. A voucher moves none, so the most an agent can lose to a provider is the deposits it made to it, plus the network fee of each. z402 has no refunds: whatever is left of a window when the agent stops stays with the provider. The session also lives only in memory. A restart starts a new session with a new key, and the old session's unused deposit is never used again.
 
-The provider sets three numbers in its offer, and they are the same for every provider on one facilitator:
+The offer carries a price and two terms of the deposit. The price is the provider's own, set for each route. The two terms are the facilitator's, the same for every provider on it:
 
 | Term | Demo value | What it means for the agent |
 |---|---|---|

@@ -550,7 +550,7 @@ const TEST_PUBLIC_URL: string; // http://service.test
   - an item has no field beyond `resource`, `type`, `x402Version`, `accepts`, `description`, `mimeType`, `serviceName`, `tags`, `iconUrl` and `extensions`;
   - `resource` is an absolute `http(s)` URL of at most 2,048 characters with no user or password, `type` is `http` and `x402Version` is 2;
   - `accepts` holds 1 to 4 entries, each `prepaid-voucher` on the rail's network, asset `ZEC`, the rail's `payTo`, an amount from 1 to `windowZat`, and the rail's terms and `termsVersion`;
-  - `description` is at most 512 characters, `mimeType` at most 128, `serviceName` 1 to 32 printable ASCII characters, and `tags` at most 5, each 1 to 32 printable ASCII characters, with no repeat ignoring case;
+  - `description` is at most 512 characters, `mimeType` at most 128, `serviceName` 1 to 32 printable ASCII characters, and `tags` at most 5, each 1 to 32 printable ASCII characters (the stub also refuses a repeat that differs only in case, where the real catalog drops it and takes the item);
   - `extensions` is an object of at most 8 KB, and `extensions.bazaar.info.input.method`, when present, is one of `GET`, `POST`, `PUT`, `PATCH`, `DELETE` or `HEAD`.
 
 ## Limits and timings

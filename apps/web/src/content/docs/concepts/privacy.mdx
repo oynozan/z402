@@ -93,6 +93,7 @@ What limits the exposure:
 - **The log records paths only.** No query string is written. That covers searches, though z402's own readers do not send any.
 - **Totals, not signatures.** The ledger records a voucher's running total and never its signature. `PAYMENT-SIGNATURE` is never logged.
 - **Aggregates only.** The catalog shows how many paid calls an item had today. It never shows a session, a key or an amount per call.
+- **Payments list little.** A payment never gives the catalog a description, a service name, tags or an icon, and a provider that never declares has at most 8 items listed from its payments.
 - **It can be your own.** The operator is a provider like any other, and the facilitator is ordinary software. A provider that does not want another party to read its deposits can run the facilitator itself.
 
 ## What leaks anyway
@@ -134,7 +135,7 @@ Two more belong to the provider's own keys. Give the facilitator only the viewin
 
 - [ ] A lightwalletd you operate, so that no one else sees the lookups and the endpoint is one you trust
 - [ ] Only viewing keys in its configuration: a `uivk` and an address, never a `seedHex` or a `ufvk`
-- [ ] TLS in front of it, and a registration token set, before outside providers connect
+- [ ] TLS in front of it, and a registration token of at least 32 characters set, before outside providers connect. Open registration warns at every start, and on mainnet it is off unless `Z402_REGISTRATION_OPEN=1`
 - [ ] The providers directory and its files kept at mode 0700 and 0600
 - [ ] Logs left as they are: paths only, with no keys
 

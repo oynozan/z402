@@ -159,13 +159,14 @@ An empty variable counts as unset. A relative path is relative to the repository
 | `Z402_LWD_URL` | by network | The lightwalletd endpoint. Required on mainnet. |
 | `Z402_LEDGER` | `.data/facilitator-ledger.<network>.jsonl` | The operator's ledger. |
 | `Z402_PROVIDERS_DIR` | `.data/providers.<network>` | The registry, the registered providers' ledgers and the catalog. |
-| `Z402_REGISTRATION_TOKEN` | unset | When set, `POST /providers` needs it as a bearer token. |
+| `Z402_REGISTRATION_TOKEN` | unset | When set, `POST /providers` needs it as a bearer token. At least 32 characters. |
+| `Z402_REGISTRATION_OPEN` | unset | `1` lets anyone register on mainnet when no token is set. Only mainnet reads it. |
 | `Z402_MAX_PROVIDERS` | `32` | The most providers that can register. The operator is not counted. `0` turns away new providers. |
 | `Z402_FACILITATOR_HOST`, `Z402_FACILITATOR_PORT` | `127.0.0.1`, `4022` | Where it listens. |
 
 The trust terms (`Z402_WINDOW_ZAT`, `Z402_CREDIT_RATIO_BPS`, `Z402_CREDIT_CAP_ZAT`, `Z402_ZERO_CONF_MIN_EXPIRY_BLOCKS`) are the same for every provider. Resource servers read them from `GET /supported` when they start, so restart them after you change one.
 
-Prices are not a facilitator setting. Each provider sets the price of each of its routes, any whole number of zat from 1 to `windowZat`. `Z402_PRICE_ZAT` is no longer read by the facilitator.
+Prices are not a facilitator setting. Each provider sets the price of each of its routes, any whole number of zat from 1 to `windowZat`. The facilitator ignores `Z402_PRICE_ZAT`. If it is set, it prints one warning, `facilitator: warning: Z402_PRICE_ZAT is ignored: each provider prices its own routes`.
 
 ## The providers directory
 
@@ -176,13 +177,13 @@ Prices are not a facilitator setting. Each provider sets the price of each of it
 | `registry.json` | 0600 | One entry per provider: `id`, `payTo`, `uivk`, `keyHash`, `createdAt` and `keyIssuedAt`. |
 | `registry.json.lock` | 0600 | The lock that makes one process the only writer of the registry. |
 | `ledgers/<id>.jsonl` and its `.lock` | 0600 | One ledger per registered provider, in the same format as the operator's. Its first line names that provider's `payTo`. |
-| `discovery.json` | 0600 | The Bazaar catalog. It is not critical: a file that cannot be read is set aside and the catalog starts empty. |
+| `discovery.json` | 0600 | The Bazaar catalog, at most 16 MiB of items. It is not critical: a file that cannot be read is set aside and the catalog starts empty. |
 
 - **The provider id** is the first 16 hex characters of the SHA-256 of `z402-provider-v1`, a newline, the network, a newline and the `payTo`. It depends only on the address, so rotating a key keeps the provider's ledger and its catalog entries.
 - **API keys are stored as hashes.** The registry holds the SHA-256 of each key and never the key. The key itself is shown once, when it is issued.
 - **The registry holds each provider's viewing key.** Treat the directory as a secret.
 - **Writes are atomic.** The registry is written to a temporary file, synced, renamed over the old file, and the directory is synced. A crash leaves the old file or the new one, whole.
-- **A bad registry stops the start.** A registry that is not exactly what the facilitator writes, or is for another network, refuses the start. So does an entry whose stored viewing key no longer owns its address: the facilitator checks every entry again at start-up and names the provider id.
+- **A bad registry stops the start.** A registry that is not exactly what the facilitator writes (an entry whose `payTo` is over 1,024 characters is not), or is for another network, refuses the start. So does an entry whose stored viewing key no longer owns its address: the facilitator checks every entry again at start-up and names the provider id.
 
 ## Register providers
 
@@ -233,7 +234,9 @@ The key goes in on stdin, so it never shows in `ps`. The request and its answers
 
 ### Registration token and limits
 
-By default anyone who can reach `POST /providers` can register. That is right for a private network. Before you let outside providers connect, set `Z402_REGISTRATION_TOKEN` to a random token, for example `openssl rand -hex 32`. Registration then needs `Authorization: Bearer <registration token>`.
+On regtest and testnet, anyone who can reach `POST /providers` can register until you set a token, and every start of the facilitator warns while registration is open: `facilitator: warning: POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token`. That is right for a private network. Before you let outside providers connect, set `Z402_REGISTRATION_TOKEN` to a random token of at least 32 characters, for example `openssl rand -hex 32`. A shorter one stops the start. Registration then needs `Authorization: Bearer <registration token>`.
+
+On mainnet, open registration is off. With no token and no `Z402_REGISTRATION_OPEN=1`, the facilitator still starts and serves the operator and the providers already registered, `POST /providers` answers `403 registration_disabled`, and the start prints a warning that says so. `Z402_REGISTRATION_OPEN=1` lets anyone register there, with the warning about open registration. It takes exactly `1`, or nothing. A token always gates registration, so `1` beside a token changes nothing.
 
 With open registration, anyone can take your provider slots, which cost a runtime each, and list resources on your site. `Z402_MAX_PROVIDERS` caps the slots. A rotation is not a new provider, so it works even when the cap is reached.
 
@@ -241,7 +244,11 @@ With open registration, anyone can take your provider slots, which cost a runtim
 
 Registering an address that is already registered, with a viewing key that owns it, rotates the key. The answer is `200` with the same shape and a new key, and the old key stops working at once, on every route. This is also how a provider recovers a lost key.
 
-Whoever holds a provider's viewing key controls its API key. Providers have to keep that key private anyway, because it shows their incoming payments. There is no route to remove a provider: revocation beyond key rotation is not supported.
+Whoever holds a provider's viewing key controls its API key. Providers have to keep that key private anyway, because it shows their incoming payments. There is no route to remove a provider: revocation beyond key rotation is not supported. [Remove a provider](#remove-a-provider) says how to do it by hand.
+
+### Remove a provider
+
+Nothing removes a provider while the facilitator runs, and an idle provider keeps its slot, which `Z402_MAX_PROVIDERS` counts. To free the slot or to drop an abusive provider, edit the files by hand. Stop the facilitator, remove the provider's entry from `registry.json` and keep its ledger under `ledgers/`, so that the deposits it consumed stay consumed if the same `payTo` registers again. Optionally delete `discovery.json`, which the heartbeats rebuild: the removed provider's items otherwise stay in the catalog until a start finds them untouched for 7 days. Then start the facilitator. The removed provider's key stops working at that start. The README has the whole procedure, with a command for the edit, under "Removing a provider": <Source path="packages/facilitator/README.md" />.
 
 ## The ledger and its lock
 
@@ -318,6 +325,9 @@ When a check fails, the message tells you where to look:
 | `not a shielded-only unified address for` | `Z402_PAY_TO` is for another network, or has a transparent receiver. | Use the address that `merchant-keygen` printed for this network. |
 | `not a unified incoming viewing key for` | `Z402_UIVK` is for another network. | Use the `uivk` of the same keys file. |
 | `Z402_FACILITATOR_TOKEN is required` | No operator token. | Set it. It must be one token of letters, digits and `-._~+/`. |
+| `Z402_REGISTRATION_TOKEN: must be at least 32 characters` | The registration token is too short. | Use a longer one, for example the output of `openssl rand -hex 32`. |
+| `Z402_REGISTRATION_OPEN: expected 1, or leave it unset` | The variable holds something other than `1`. | Set it to `1`, or leave it out. |
+| `Z402_PAY_TO: must be at most 1024 characters` | The operator's address is longer than any real one. | Use the address that `merchant-keygen` printed. |
 | `Z402_LWD_URL: plaintext http:// is allowed only to a loopback host` | Testnet or mainnet over plain `http://` to another host. | Use `https://`. |
 | `startup check failed (self-test)` | `zdecrypt` is missing, old or not executable. | Run `pnpm --filter @z402/facilitator build:native`, or set `Z402_ZDECRYPT_BIN`. |
 | `startup check failed (ownedByKey)` | The viewing key is not the key of the address. | Take both from the same keys file. |
@@ -337,15 +347,15 @@ There is no health route and no metrics endpoint. The facilitator listens only a
 
 - **stdout** carries the ready lines and nothing else.
 - **stderr** carries one line per request and the diagnostics.
-- **A request line** is `METHOD path status`, then the reason code of the answer if there is one, then the provider id if the request carried a key: `POST /verify 200 z402_deposit_required 3f9a1c2b4d5e6f70`. It records the path only, never a query string, so what agents search for stays private. A key, a viewing key, a token and a request body are never logged.
-- **Warnings** start with `facilitator: warning:` and appear before the checks. They are a keys file that holds a seed or a full viewing key (off mainnet), a non-loopback `Z402_LWD_URL` on mainnet, and a non-loopback `Z402_FACILITATOR_HOST`. Two more print during the checks: a missing `Z402_EXPECTED_BRANCH_ID` on mainnet, and a dropped truncated ledger line.
+- **A request line** is `METHOD path status`, then the reason code of the answer if there is one, then the provider id if the request passed the key check (`/verify`, `/settle`, `GET /providers/me`, `POST /discovery/resources`): `POST /verify 200 z402_deposit_required 3f9a1c2b4d5e6f70`. It records the path only, never a query string, so what agents search for stays private. A key, a viewing key, a token and a request body are never logged.
+- **Warnings** start with `facilitator: warning:` and appear before the checks. They are a keys file that holds a seed or a full viewing key (off mainnet), a non-loopback `Z402_LWD_URL` on mainnet, a non-loopback `Z402_FACILITATOR_HOST`, a set `Z402_PRICE_ZAT` (`Z402_PRICE_ZAT is ignored: each provider prices its own routes`), and a `POST /providers` that anyone may call or that mainnet has switched off (`POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token`). Two more print during the checks: a missing `Z402_EXPECTED_BRANCH_ID` on mainnet, and a dropped truncated ledger line.
 
 | Line | Meaning |
 | --- | --- |
 | `facilitator: registered provider <id> payTo=<address>` | A provider registered. |
 | `facilitator: rotated the key of provider <id>` | A provider's key was rotated. |
 | `facilitator: provider registration failed` | A registration hit an error of ours. The request got a 500 and nothing changed. |
-| `verify failed unexpectedly`, `settle failed unexpectedly`, `request failed` | A bug. The caller got `unexpected_verify_error`, `unexpected_settle_error` or a 500. |
+| `prepaid-voucher verify failed`, `prepaid-voucher settle failed`, `settle batch refused`, `verify failed unexpectedly`, `settle failed unexpectedly`, `request failed` | A bug. The caller got `unexpected_verify_error`, `unexpected_settle_error` or a 500. |
 | `facilitator: the ledger cannot be written, exiting so that a restart replays it` | The fatal case. The process exits 1. |
 | `catalog: ...` | A catalog notice, such as a full catalog or a file that was set aside. |
 
@@ -382,13 +392,13 @@ The facilitator speaks plain HTTP and has no rate limit. By default it listens o
 | Route | Who calls it | Exposure |
 | --- | --- | --- |
 | `GET /supported`, `GET /discovery/resources`, `GET /discovery/search` | Anyone | Public. A request that carries a key must carry one that belongs to a provider. |
-| `POST /providers` | A provider, once | Gate it with `Z402_REGISTRATION_TOKEN` before it is reachable from outside. |
+| `POST /providers` | A provider, once | Gate it with `Z402_REGISTRATION_TOKEN` before it is reachable from outside. On mainnet it stays closed until you do, or set `Z402_REGISTRATION_OPEN=1`. |
 | `POST /verify`, `POST /settle`, `GET /providers/me`, `POST /discovery/resources` | Resource servers | Need an API key. Keep them on a private network if the providers run beside the facilitator. |
 
 When providers connect over the internet:
 
 1. Put the facilitator behind a reverse proxy that terminates TLS. API keys, the registration token and every voucher cross this link, and a provider's viewing key does too when it registers.
-2. Set `Z402_REGISTRATION_TOKEN`.
+2. Set `Z402_REGISTRATION_TOKEN`, with at least 32 characters.
 3. Add a per-client rate limit in the proxy. The public routes have none, and lookups can be flooded.
 4. Allow requests of at least 60 s. A worst-case `POST /verify` waits up to 30 s for a deposit lookup and up to 5 s for a refresh, and the resource servers allow it 60 s.
 

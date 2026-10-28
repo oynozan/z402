@@ -42,7 +42,7 @@ Three kinds of caller reach the facilitator, and each route says which it needs.
 | --- | --- | --- |
 | `public` | None | `GET /supported`, `GET /discovery/resources`, `GET /discovery/search`. A request that does carry a key must carry one that belongs to a provider, or it gets 401. |
 | `api-key` | `Authorization: Bearer <API key>` | `POST /verify`, `POST /settle`, `GET /providers/me`, `POST /discovery/resources`. |
-| `registration-token` | `Authorization: Bearer <registration token>` | `POST /providers`, but only when the facilitator sets `Z402_REGISTRATION_TOKEN`. Otherwise the route is public. |
+| `registration-token` | `Authorization: Bearer <registration token>` | `POST /providers`, but only when the facilitator sets `Z402_REGISTRATION_TOKEN`. Otherwise the route is public, except on mainnet, where it is closed (`403 registration_disabled`) unless the facilitator sets `Z402_REGISTRATION_OPEN=1`. |
 
 - **The API key picks the provider.** Its scheme refuses any `paymentRequirements.payTo` that is not that provider's. The operator's key is `Z402_FACILITATOR_TOKEN`. Every other provider gets a key from `POST /providers`.
 - **Key format.** An issued key is `z402_` followed by 43 base64url characters, 32 random bytes. Every key and token must be an RFC 6750 b64token: letters, digits and `-._~+/`, optionally ending in `=`. The word `Bearer` can be in any letter case, followed by one or more spaces.
@@ -54,7 +54,7 @@ Three kinds of caller reach the facilitator, and each route says which it needs.
 | Method and path | Auth | What it does |
 | --- | --- | --- |
 | `GET /supported` | public | The scheme, network, trust terms and extensions this rail supports. |
-| `POST /verify` | api-key | Checks a voucher. Reads state and writes none. |
+| `POST /verify` | api-key | Checks a voucher. It commits no voucher and credits no deposit. |
 | `POST /settle` | api-key | Records a voucher against the provider's ledger. |
 | `POST /providers` | registration-token | Registers a provider, or rotates its key. |
 | `GET /providers/me` | api-key | The provider a key belongs to. |
@@ -86,7 +86,7 @@ curl -s http://127.0.0.1:4022/supported
         "creditRatioBps": 2500,
         "creditCapZat": "200000",
         "zeroConfMinExpiryBlocks": 20,
-        "termsVersion": "0123456789abcdef"
+        "termsVersion": "cb7f148af0fda19a"
       }
     }
   ],
@@ -153,7 +153,7 @@ curl -s http://127.0.0.1:4022/verify \
         "creditRatioBps": 2500,
         "creditCapZat": "200000",
         "zeroConfMinExpiryBlocks": 20,
-        "termsVersion": "0123456789abcdef"
+        "termsVersion": "cb7f148af0fda19a"
       }
     },
     "payload": {
@@ -175,7 +175,7 @@ curl -s http://127.0.0.1:4022/verify \
       "creditRatioBps": 2500,
       "creditCapZat": "200000",
       "zeroConfMinExpiryBlocks": 20,
-      "termsVersion": "0123456789abcdef"
+      "termsVersion": "cb7f148af0fda19a"
     }
   }
 }
@@ -185,7 +185,7 @@ curl -s http://127.0.0.1:4022/verify \
 
 1. The key names a provider, or the answer is 401.
 2. The body is a JSON object whose `paymentPayload` and `paymentRequirements` fit the x402 v2 schemas (`invalid_payload`), and `paymentPayload.x402Version` is 2 (`invalid_x402_version`).
-3. The requirements fit the rail (`invalid_payment_requirements`): scheme `prepaid-voucher`, the facilitator's network, asset `ZEC`, `payTo` equal to the key's provider, `amount` a canonical zat from 1 to `windowZat`, and `extra` carrying exactly the rail's terms. `termsVersion` is not compared.
+3. The requirements name scheme `prepaid-voucher` on the facilitator's network (`unsupported_scheme` otherwise) and fit the rail (`invalid_payment_requirements`): asset `ZEC`, `payTo` equal to the key's provider, `amount` a canonical zat from 1 to `windowZat`, and `extra` carrying exactly the rail's terms. `termsVersion` is not compared.
 4. `accepted.scheme` and `accepted.network` equal the requirements' (`invalid_scheme`, `invalid_network`).
 5. The voucher parses (`invalid_payload`) and its signature verifies over the scheme, network, `payTo`, session key and total (`z402_invalid_signature`).
 6. The total advances by at least this call's `amount` (`z402_cumulative_mismatch`).
@@ -303,12 +303,12 @@ After a successful settle the facilitator also tells the catalog, so the item th
 
 <Endpoint method="POST" path="/providers" auth="registration-token">
 
-Registers a provider, or rotates the key of one that is registered. Public unless the facilitator sets `Z402_REGISTRATION_TOKEN`, and then `Authorization: Bearer <registration token>` is required.
+Registers a provider, or rotates the key of one that is registered. Public unless the facilitator sets `Z402_REGISTRATION_TOKEN`, and then `Authorization: Bearer <registration token>` is required. That token has at least 32 characters. On mainnet the route is closed, and answers `403 registration_disabled`, unless a token is set or the facilitator was started with `Z402_REGISTRATION_OPEN=1`. While it is open, every start of the facilitator prints `facilitator: warning: POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token`.
 
 </Endpoint>
 
 <Params>
-<Param name="payTo" type="string" required>The provider's shielded-only unified address for the facilitator's network, such as `uregtest1...`.</Param>
+<Param name="payTo" type="string" required>The provider's shielded-only unified address for the facilitator's network, such as `uregtest1...`. At most 1,024 characters.</Param>
 <Param name="uivk" type="string" required>The unified incoming viewing key that owns `payTo`, such as `uivkregtest1...`. It can see payments and cannot spend.</Param>
 <Param name="network" type="string">`zcash:regtest`, `zcash:testnet` or `zcash:mainnet`. If given, it must be the facilitator's network.</Param>
 </Params>
@@ -371,9 +371,9 @@ The refusals, in the order the facilitator checks them:
 
 | Status | `error` | When |
 | --- | --- | --- |
-| 403 | `registration_disabled` | The facilitator has no providers directory, as an embedded or test facilitator has. Nothing else is checked. |
+| 403 | `registration_disabled` | The facilitator has no providers directory, as an embedded or test facilitator has, or it runs on mainnet with no registration token and no `Z402_REGISTRATION_OPEN=1` (`registration is closed on this facilitator`). Nothing else is checked, and the body is not read. |
 | 401 | `unauthorized` | A registration token is set and the request did not carry it. |
-| 400 | `invalid_request` | The body is not a JSON object, or a field is missing or invalid. The `message` names the field. |
+| 400 | `invalid_request` | The body is not a JSON object, or a field is missing or invalid. The `message` names the field: a `payTo` of more than 1,024 characters is one. |
 | 409 | `operator` | `payTo` is the operator's own address, which is not registered. |
 | 403 | `provider_limit` | `Z402_MAX_PROVIDERS` is reached, and this address is new. A rotation is not a new provider. |
 | 403 | `not_owner` | The viewing key does not own `payTo`, or `payTo` has a transparent receiver. |
@@ -463,7 +463,7 @@ Declares the caller's paid routes to the catalog. A service sends this when it i
             "creditRatioBps": 2500,
             "creditCapZat": "200000",
             "zeroConfMinExpiryBlocks": 20,
-            "termsVersion": "0123456789abcdef"
+            "termsVersion": "cb7f148af0fda19a"
           }
         }
       ],
@@ -497,7 +497,7 @@ The answer is `200` with the items as the catalog serves them:
       "resource": "https://md.example.com/v1/markdown",
       "type": "http",
       "x402Version": 2,
-      "accepts": [ { "scheme": "prepaid-voucher", "network": "zcash:regtest", "asset": "ZEC", "amount": "1000", "payTo": "uregtest1...", "maxTimeoutSeconds": 60, "extra": { "windowZat": "100000", "creditRatioBps": 2500, "creditCapZat": "200000", "zeroConfMinExpiryBlocks": 20, "termsVersion": "0123456789abcdef" } } ],
+      "accepts": [ { "scheme": "prepaid-voucher", "network": "zcash:regtest", "asset": "ZEC", "amount": "1000", "payTo": "uregtest1...", "maxTimeoutSeconds": 60, "extra": { "windowZat": "100000", "creditRatioBps": 2500, "creditCapZat": "200000", "zeroConfMinExpiryBlocks": 20, "termsVersion": "cb7f148af0fda19a" } } ],
       "lastUpdated": "2026-10-28T12:00:00.000Z",
       "description": "Turn a web page into clean markdown.",
       "mimeType": "application/json",
@@ -527,7 +527,9 @@ How the catalog treats declarations:
 - Declaring one service never removes another service's items.
 - A provider's first declaration removes the items that came from its payments and that the declaration does not itself declare. The facilitator writes that change to disk before it answers.
 - After that, the provider's settled payments only update items it declared, and never create one. A payment's `resource.url` and `extensions.bazaar` are echoed by the agent, so without this rule any payer could list a resource under a declaring provider's address for the price of one call.
-- A provider that has never declared is listed from its payments, as standard x402 Bazaar facilitators do. Such an item has no `lastSeen`.
+- A provider that has never declared is listed from its payments, as standard x402 Bazaar facilitators do. Such an item has no `lastSeen`. It holds only the canonical URL, `accepts` built from the server's own requirements (never the `accepted` the agent sent), and the `mimeType` and `bazaar` extension that the payer echoed, which pass the same field checks as a declaration and nothing more. A payment never supplies a `description`, `serviceName`, `tags` or `iconUrl`.
+- A provider has at most 8 such items. A payment for a ninth lists nothing, and the facilitator logs it once. A payment for a listed item still counts. A declaration is how a provider lists more, with text of its own.
+- The items of the whole catalog take at most 16 MiB. A declaration that would pass that is refused whole with `400 invalid_request` and the message `the catalog is full`, and a payment that would pass it lists nothing.
 
 ## List resources
 
@@ -573,7 +575,7 @@ console.log(`${pagination.total} items in all`);
 ```json
 {
   "x402Version": 2,
-  "items": [ { "resource": "https://md.example.com/v1/markdown", "type": "http", "x402Version": 2, "accepts": [ { "scheme": "prepaid-voucher", "network": "zcash:regtest", "asset": "ZEC", "amount": "1000", "payTo": "uregtest1...", "maxTimeoutSeconds": 60, "extra": { "windowZat": "100000", "creditRatioBps": 2500, "creditCapZat": "200000", "zeroConfMinExpiryBlocks": 20, "termsVersion": "0123456789abcdef" } } ], "lastUpdated": "2026-10-28T12:00:00.000Z", "lastSeen": "2026-10-28T12:00:20.000Z", "paidCallsToday": 12 } ],
+  "items": [ { "resource": "https://md.example.com/v1/markdown", "type": "http", "x402Version": 2, "accepts": [ { "scheme": "prepaid-voucher", "network": "zcash:regtest", "asset": "ZEC", "amount": "1000", "payTo": "uregtest1...", "maxTimeoutSeconds": 60, "extra": { "windowZat": "100000", "creditRatioBps": 2500, "creditCapZat": "200000", "zeroConfMinExpiryBlocks": 20, "termsVersion": "cb7f148af0fda19a" } } ], "lastUpdated": "2026-10-28T12:00:00.000Z", "lastSeen": "2026-10-28T12:00:20.000Z", "paidCallsToday": 12 } ],
   "pagination": { "limit": 20, "offset": 0, "total": 1 }
 }
 ```
@@ -604,7 +606,7 @@ curl -s 'http://127.0.0.1:4022/discovery/search?query=markdown&limit=10'
 ```json
 {
   "x402Version": 2,
-  "resources": [ { "resource": "https://md.example.com/v1/markdown", "type": "http", "x402Version": 2, "accepts": [ { "scheme": "prepaid-voucher", "network": "zcash:regtest", "asset": "ZEC", "amount": "1000", "payTo": "uregtest1...", "maxTimeoutSeconds": 60, "extra": { "windowZat": "100000", "creditRatioBps": 2500, "creditCapZat": "200000", "zeroConfMinExpiryBlocks": 20, "termsVersion": "0123456789abcdef" } } ], "lastUpdated": "2026-10-28T12:00:00.000Z", "lastSeen": "2026-10-28T12:00:20.000Z", "paidCallsToday": 12 } ],
+  "resources": [ { "resource": "https://md.example.com/v1/markdown", "type": "http", "x402Version": 2, "accepts": [ { "scheme": "prepaid-voucher", "network": "zcash:regtest", "asset": "ZEC", "amount": "1000", "payTo": "uregtest1...", "maxTimeoutSeconds": 60, "extra": { "windowZat": "100000", "creditRatioBps": 2500, "creditCapZat": "200000", "zeroConfMinExpiryBlocks": 20, "termsVersion": "cb7f148af0fda19a" } } ], "lastUpdated": "2026-10-28T12:00:00.000Z", "lastSeen": "2026-10-28T12:00:20.000Z", "paidCallsToday": 12 } ],
   "partialResults": false,
   "pagination": { "limit": 10, "cursor": null }
 }
@@ -656,7 +658,7 @@ The standard x402 Bazaar item, plus two fields the facilitator adds.
 | --- | --- |
 | `resource`, `type`, `x402Version`, `accepts` | As declared. `type` is `http` and `x402Version` is 2. |
 | `lastUpdated` | The time of the latest paid call, or of the first listing if there is none. ISO 8601. |
-| `description`, `mimeType`, `serviceName`, `tags`, `iconUrl`, `extensions` | As declared, when present. |
+| `description`, `mimeType`, `serviceName`, `tags`, `iconUrl`, `extensions` | As declared, when present. An item listed from payments has no `description`, `serviceName`, `tags` or `iconUrl`, and its `mimeType` and `extensions` are what the payer echoed, after the same field checks. |
 | `lastSeen` | The time of the provider's latest declaration. Absent for an item listed only from payments. Readers call an item up under 90 s, stale under 10 min and down after that. |
 | `paidCallsToday` | The successful settles for the item since 00:00 UTC. An aggregate only: no session, key or amount per call is ever exposed. |
 
@@ -668,6 +670,9 @@ The standard x402 Bazaar item, plus two fields the facilitator adds.
 | Providers | 32 by default, the operator not counted (`Z402_MAX_PROVIDERS`, up to 1,000) |
 | Items per declaration call | 1 to 32 |
 | Items per provider, and in all | 128, and 4,096 |
+| Items listed from payments, per provider | 8 |
+| Size of the catalog | 16 MiB of items, counted as the JSON of each |
+| `payTo` | At most 1,024 characters, at registration and in the operator's `Z402_PAY_TO` |
 | `accepts` entries per item | 1 to 4 |
 | `extensions` of one item | 8 KB of JSON |
 | List page size | 1 to 100, default 20 |
@@ -680,7 +685,7 @@ The standard x402 Bazaar item, plus two fields the facilitator adds.
 | Catalog file write | At most every 2 s, and a provider's first declaration at once |
 | Unseen catalog items | Dropped at load after 7 days with no declaration and no payment |
 
-Past the item caps, a declaration for a new item is refused with a 400, and a payment does not create one. Either way the facilitator logs it once. The public routes have no rate limit.
+Past the item caps or the 16 MiB budget, a declaration for a new item is refused with a 400, and a payment does not create one. Either way the facilitator logs it once. The public routes have no rate limit.
 
 ## Status codes
 

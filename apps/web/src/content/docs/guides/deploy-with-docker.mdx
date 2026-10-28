@@ -235,7 +235,7 @@ When the facilitator refuses the registration, the job exits 1 and `markdown` do
 | `the facilitator refused the registration token` | The two tokens differ. | Make them equal in `.env`, then `docker compose up -d`. |
 | `the UIVK in the keys file does not own its payTo` | Provider 2's keys file was damaged or replaced. | Run `docker compose down`, then `docker volume rm z402_markdown-keys z402_markdown-runtime`, then `docker compose up -d`. Provider 2 gets new keys. |
 | `the facilitator has no provider slot left` | `Z402_MAX_PROVIDERS` is reached. | Raise it in the facilitator's environment in `compose.yaml`. |
-| `the facilitator takes no registrations` | The facilitator has no providers directory. | Set `Z402_PROVIDERS_DIR`. Compose sets it. |
+| `the facilitator takes no registrations` | The facilitator has no providers directory, or it runs on mainnet with registration neither opened (`Z402_REGISTRATION_OPEN=1`) nor gated by `Z402_REGISTRATION_TOKEN`. | Set `Z402_PROVIDERS_DIR` (compose sets it), or on mainnet set `Z402_REGISTRATION_TOKEN`. |
 | `the payTo is the facilitator operator's own` | Provider 2 has the operator's keys. | A provider needs keys of its own. |
 
 The job retries a facilitator that does not answer or answers 5xx, for up to 900 s. `Z402_FACILITATOR_WAIT_MS` changes that.
@@ -343,9 +343,9 @@ The facilitator's port is never published. The services, the API and the website
 Before outside providers connect:
 
 1. Put the facilitator behind TLS, with a reverse proxy that terminates HTTPS in front of port 4022.
-2. Set `Z402_REGISTRATION_TOKEN` in `.env` to a random token, for example `openssl rand -hex 32`, and run `docker compose up -d`. A provider then registers with `Authorization: Bearer <token>`, and `markdown-register` sends the token for provider 2.
+2. Set `Z402_REGISTRATION_TOKEN` in `.env` to a random token of at least 32 characters (the facilitator refuses to start with a shorter one), for example `openssl rand -hex 32`, and run `docker compose up -d`. A provider then registers with `Authorization: Bearer <token>`, and `markdown-register` sends the token for provider 2.
 
-With open registration, anyone who reaches the facilitator can take its provider slots, 32 by default, and list resources on the website. See [Run the facilitator](/docs/guides/run-a-facilitator#expose-it-safely) for the full list of what to protect.
+With open registration, anyone who reaches the facilitator can take its provider slots, 32 by default, and list resources on the website, so every start warns while it is open. On mainnet, registration stays closed unless a token is set or `Z402_REGISTRATION_OPEN=1`. To remove a provider, follow "Removing a provider" in <Source path="packages/facilitator/README.md" />. See [Run the facilitator](/docs/guides/run-a-facilitator#expose-it-safely) for the full list of what to protect.
 
 ## Beyond regtest
 

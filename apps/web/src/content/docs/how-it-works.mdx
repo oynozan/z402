@@ -193,8 +193,9 @@ The provider's middleware calls `POST /verify` on the facilitator with the payme
 
 | Check | Refusal |
 |---|---|
-| The requirements are this provider's: its `payTo`, a price from 1 to `windowZat`, the facilitator's terms | `invalid_payment_requirements` |
-| The payment is well formed: version 2, the same scheme and network as the offer, canonical fields | `invalid_payload`, `invalid_scheme`, `invalid_network`, `invalid_x402_version` |
+| The request is well formed: JSON that fits the x402 v2 schemas, with version 2 | `invalid_payload`, `invalid_x402_version` |
+| The requirements are this provider's: the rail's scheme and network, asset `ZEC`, its `payTo`, a price from 1 to `windowZat`, the facilitator's terms | `unsupported_scheme` (another scheme or network), `invalid_payment_requirements` |
+| The payment agrees with the offer: the same scheme and network, canonical voucher fields | `invalid_scheme`, `invalid_network`, `invalid_payload` |
 | The signature verifies under the session key | `z402_invalid_signature` |
 | The total grew by at least the price | `z402_cumulative_mismatch` |
 | A deposit the session has not used yet is usable: found, fully shielded, with an output to `payTo` that carries this session's memo | `z402_deposit_not_found`, `z402_chain_unavailable`, `z402_deposit_transparent`, `z402_deposit_memo_mismatch`, `z402_deposit_dead` |
@@ -204,7 +205,7 @@ To check a deposit, the facilitator asks the node for the transaction by its txi
 
 If the voucher fits without the new deposit, verify answers at once and looks the deposit up in the background. Otherwise it waits for the lookup, for up to 30 seconds, since a public node behind a load balancer can take about 16 seconds to show a new transaction. The provider allows the facilitator 60 seconds in all.
 
-The facilitator always answers with HTTP 200 and a complete body: `isValid`, `payer` (the session key), and `extra.session`, a snapshot of the session that the agent uses to stay in step:
+Once it accepts the API key, the facilitator answers with HTTP 200 and a complete body: `isValid`, `payer` (the session key), and `extra.session`, a snapshot of the session that the agent uses to stay in step:
 
 ```json
 {

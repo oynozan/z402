@@ -26,18 +26,18 @@ flowchart LR
 
 ## Reason codes
 
-The facilitator answers `POST /verify` and `POST /settle` with HTTP 200 whatever happens. A refusal is a reason code in the body: `invalidReason` for a verify, `errorReason` for a settle. Both use the same closed list of 19 codes, 8 from the x402 standard and 11 of this scheme. The facilitator emits nothing else, and a client treats a code it does not know as fatal.
+Once the API key is accepted, the facilitator answers `POST /verify` and `POST /settle` with HTTP 200 whatever happens. A missing or unknown key is a 401. A refusal is a reason code in the body: `invalidReason` for a verify, `errorReason` for a settle. Both use the same closed list of 19 codes, 8 from the x402 standard and 11 of this scheme. The facilitator emits nothing else, and a client treats a code it does not know as fatal.
 
 Only the code reaches the agent, so the code carries the action. A refused verify arrives as a 402 whose `PAYMENT-REQUIRED` header has the code as `error`, and, for this scheme, the session snapshot in `accepts[0].extra.session`. That is the corrective 402: it is the only way a refused client learns its limits. A refused settle arrives as the `errorReason` of the settlement result.
 
-An `invalidMessage` or `errorMessage` accompanies each code. A message names a field and a rule and never a value.
+An `invalidMessage` or `errorMessage` accompanies each code. A message names a field and a rule. It never repeats text the caller sent, though it may state a number, such as a total or a limit.
 
 ### Standard codes
 
 | Code | When | What the client does |
 | --- | --- | --- |
 | `invalid_payload` | The body is not a JSON object, is not JSON, or is over 64 KB. The payload or the requirements fail the x402 v2 schema. `accepted` is not an object. The voucher is malformed: a hex field in uppercase or of the wrong length, a `cumulativeZat` that is not canonical, a bad `depositTxid`. The message names the first field and rule. | Fatal. A bug or a version mismatch. |
-| `invalid_payment_requirements` | The requirements are not this rail's for this key: `payTo` is not the key's provider, `amount` is not a canonical zat from 1 to `windowZat`, the scheme, network or asset differ, or `extra` does not carry exactly the rail's terms. | Fatal. The resource server drifted from the facilitator. |
+| `invalid_payment_requirements` | The requirements are not this rail's for this key: `payTo` is not the key's provider, `amount` is not a canonical zat from 1 to `windowZat`, the asset is not `ZEC`, or `extra` does not carry exactly the rail's terms. A scheme or network that this facilitator does not serve is `unsupported_scheme`. | Fatal. The resource server drifted from the facilitator. |
 | `invalid_network` | `accepted.network` differs from `paymentRequirements.network`. | Fatal. |
 | `invalid_scheme` | `accepted.scheme` differs from `paymentRequirements.scheme`. | Fatal. |
 | `unsupported_scheme` | The requirements name a version, scheme and network that this facilitator does not serve. | Fatal. |
@@ -70,7 +70,7 @@ Most codes are the agent's business. A few point at your facilitator or at a res
 - **`unsupported_scheme`.** A resource server points at a facilitator on another network.
 - **`z402_chain_unavailable`, in numbers.** The facilitator cannot read the chain. Check the lightwalletd endpoint and `Z402_LWD_URL`.
 - **`z402_deposit_not_found`.** The deposit has not reached the endpoint the facilitator reads. On a load-balanced public endpoint, backends see a new transaction up to about 16 s apart.
-- **`unexpected_verify_error` and `unexpected_settle_error`.** The facilitator's log has the cause, on a line that starts with `verify failed unexpectedly` or `settle failed unexpectedly`. If the message says the facilitator must restart, a ledger write failed. The process logs `the ledger cannot be written, exiting so that a restart replays it` and exits 1.
+- **`unexpected_verify_error` and `unexpected_settle_error`.** The facilitator's log has the cause, on a line that starts with `prepaid-voucher verify failed` or `prepaid-voucher settle failed` (`verify failed unexpectedly` or `settle failed unexpectedly` for a failure outside the scheme). If the message says the facilitator must restart, a ledger write failed. The process logs `the ledger cannot be written, exiting so that a restart replays it` and exits 1.
 - **`z402_deposit_memo_mismatch` for a client that did deposit.** The client paid an address that is not the provider's, or its memo does not carry the session key it vouchers with.
 
 ## HTTP errors of the facilitator
@@ -79,13 +79,13 @@ Outside `/verify` and `/settle`, an error is an HTTP status with a JSON body. Th
 
 | Status | `error` | Where | Meaning and what to do |
 | --- | --- | --- | --- |
-| 400 | `invalid_request` | `POST /providers`, `POST /discovery/resources`, `GET /discovery/resources`, `GET /discovery/search` | A field is missing or invalid, or the body is not JSON or is over 64 KB. The `message` names the field and the rule. A refused declaration also carries the item's `index`. Fix the field and send it again. |
+| 400 | `invalid_request` | `POST /providers`, `POST /discovery/resources`, `GET /discovery/resources`, `GET /discovery/search` | A field is missing or invalid, or the body is not JSON or is over 64 KB. The `message` names the field and the rule. A `payTo` of more than 1,024 characters is refused (`payTo: expected at most 1024 characters`). A refused declaration also carries the item's `index`. Fix the field and send it again. |
 | 401 | `unauthorized` | `POST /verify`, `POST /settle`, `GET /providers/me`, `POST /discovery/resources` | The API key is missing, unknown, or was rotated out. The answer has `WWW-Authenticate: Bearer`. Use the current key. A resource server that gets this from `/verify` shows `Facilitator ... failed (401)`. |
 | 401 | `unauthorized` | `GET /supported`, `GET /discovery/resources`, `GET /discovery/search` | The request carried a key that names no provider. These routes need no key, so leave the header out or send a valid one. |
 | 401 | `unauthorized`, with `message` | `POST /providers` | The facilitator has a registration token and the request did not carry it: `registration needs the registration token as a bearer token`. Send `Authorization: Bearer <registration token>`. |
 | 403 | `not_owner` | `POST /providers` | The viewing key does not own `payTo`, or `payTo` has a transparent receiver. Take both from the same keys file, and use the Orchard-only address. |
 | 403 | `provider_limit` | `POST /providers` | `Z402_MAX_PROVIDERS` is reached and the address is new: `the limit of <n> providers is reached`. The operator raises it. |
-| 403 | `registration_disabled` | `POST /providers` | The facilitator has no providers directory: `this facilitator has no providers directory`. Only an embedded or test facilitator does. |
+| 403 | `registration_disabled` | `POST /providers` | The facilitator has no providers directory (`this facilitator has no providers directory`, which only an embedded or test facilitator has), or it runs on mainnet with no registration token and no `Z402_REGISTRATION_OPEN=1` (`registration is closed on this facilitator`). The operator sets the token or the opt-in. |
 | 404 | `not_found` | Any other path or method | The route does not exist. A wrong method on a known path is a 404 too. |
 | 409 | `operator` | `POST /providers` | `payTo` is the operator's own address, which is never registered. A provider needs keys of its own. |
 | 500 | `internal_error` | Any route | Something failed that the caller did not cause. The body has no detail. The cause is in the facilitator's log. A registration that gets a 500 changed nothing, and can be sent again. |
@@ -116,6 +116,7 @@ A refused `POST /discovery/resources` is a 400 with the item's `index`. One bad 
 | `items[i].extensions: must be a JSON object` or `must be at most 8192 bytes as JSON` | A plain object of at most 8 KB. |
 | `items[i].extensions.bazaar.info.input.method: must be one of GET, POST, PUT, PATCH, DELETE, HEAD` | A known HTTP method. |
 | `items[i]: this provider already lists 128 resources` or `the catalog already lists 4096 resources` | The caps. A new item is refused. |
+| `the catalog is full` | The items of the catalog already take 16 MiB. The whole call is refused. |
 
 ### Query refusals
 

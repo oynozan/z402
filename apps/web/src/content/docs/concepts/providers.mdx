@@ -49,12 +49,12 @@ A provider registers once. It proves it owns its `payTo`, and gets an API key.
 
 <Endpoint method="POST" path="/providers" auth="registration-token">
 
-Registers a provider, or rotates the key of one that is registered. The route is open until the operator sets `Z402_REGISTRATION_TOKEN`. After that it needs that token as a bearer. It answers `201` for a new provider and `200` for a rotated key.
+Registers a provider, or rotates the key of one that is registered. The route is open until the operator sets `Z402_REGISTRATION_TOKEN`, except on mainnet, where it is closed until the operator sets the token or `Z402_REGISTRATION_OPEN=1`. With a token set, it needs that token as a bearer. It answers `201` for a new provider and `200` for a rotated key.
 
 </Endpoint>
 
 <Params>
-<Param name="payTo" type="string" required>The provider's shielded-only unified address, valid for the facilitator's network.</Param>
+<Param name="payTo" type="string" required>The provider's shielded-only unified address, valid for the facilitator's network, and at most 1,024 characters.</Param>
 <Param name="uivk" type="string" required>The unified incoming viewing key of `payTo`. It has to own the address.</Param>
 <Param name="network" type="string">Optional. If given, it must be the facilitator's network, such as `zcash:regtest`.</Param>
 </Params>
@@ -112,17 +112,17 @@ node scripts/register-provider.mjs \
 
 </CodeTabs>
 
-The script reads `network`, `uivk` and `orchardOnlyAddress` from a view-only keys file, and sends only the address and the viewing key. It opens the key file, with mode 0600, before it sends the request, so a key that is issued always has somewhere to go. It refuses to replace an existing key file without `--force`, takes `--registration-token-file` when the operator set a token, and never prints the key, the viewing key or the token.
+The script reads `network`, `uivk` and `orchardOnlyAddress` from a view-only keys file, and sends only the address, the viewing key and the network. It opens the key file, with mode 0600, before it sends the request, so a key that is issued always has somewhere to go. It refuses to replace an existing key file without `--force`, takes `--registration-token-file` when the operator set a token, and never prints the key, the viewing key or the token.
 
 Refusals have the body `{"error": "<code>", "message": "<text>"}`:
 
 | Status | Code | When |
 |---|---|---|
-| 400 | `invalid_request` | A field is missing or invalid. The message names it. |
+| 400 | `invalid_request` | A field is missing or invalid. The message names it. A `payTo` of more than 1,024 characters is one. |
 | 401 | `unauthorized` | A registration token is set and was not presented. |
 | 403 | `not_owner` | The viewing key does not own `payTo`, or `payTo` has a transparent receiver. |
 | 403 | `provider_limit` | The limit, `Z402_MAX_PROVIDERS`, is reached. |
-| 403 | `registration_disabled` | The facilitator was started without a providers directory, as embedded and test facilitators are. |
+| 403 | `registration_disabled` | The facilitator was started without a providers directory, as embedded and test facilitators are, or it runs on mainnet with no registration token and no `Z402_REGISTRATION_OPEN=1`. |
 | 409 | `operator` | `payTo` is the operator's own address, which is never registered. |
 | 500 | `internal_error` | The registration failed. Nothing was changed. |
 
@@ -141,7 +141,7 @@ A provider sends its key as `Authorization: Bearer <apiKey>`.
 | Route | What it needs |
 |---|---|
 | `GET /supported`, `GET /discovery/resources`, `GET /discovery/search` | Nothing. A key that is presented must still be a real one, so a wrong key is found out at once. |
-| `POST /providers` | The registration token, when the operator has set one. |
+| `POST /providers` | The registration token, when the operator has set one. Without one it is open, except on mainnet, where it is closed unless the operator opened it with `Z402_REGISTRATION_OPEN=1`. |
 | `GET /providers/me`, `POST /verify`, `POST /settle`, `POST /discovery/resources` | The provider's API key. A request without a valid one gets `401` with `WWW-Authenticate: Bearer`. |
 
 ```json title="GET /providers/me"
@@ -259,17 +259,22 @@ The demo API calls `checkProvider` at start and exits on any error. The service 
 
 <Callout type="warning" title="Open registration takes slots">
 
-Until the operator sets `Z402_REGISTRATION_TOKEN`, anyone who can reach `POST /providers` can register, and each registration holds a runtime. They can fill the provider slots, and they can list resources on the site. Before outside providers connect over the internet, put the facilitator behind TLS and set a registration token.
+Until the operator sets `Z402_REGISTRATION_TOKEN`, anyone who can reach `POST /providers` can register, and each registration holds a runtime. They can fill the provider slots, and they can list resources on the site. Every start of the facilitator warns while registration is open: `POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token`. Before outside providers connect over the internet, put the facilitator behind TLS and set a registration token.
 
 </Callout>
+
+On mainnet, open registration is off. With no token and no `Z402_REGISTRATION_OPEN=1`, the facilitator still starts and serves the operator and the providers already registered, and `POST /providers` answers `403 registration_disabled`. The start prints a warning that says so.
 
 | Setting | Default | What it does |
 |---|---|---|
 | `Z402_PROVIDERS_DIR` | `.data/providers.<network>` | Where the registry, the provider ledgers and the catalog live. The directory has mode 0700. |
-| `Z402_MAX_PROVIDERS` | 32 | How many providers can register, the operator not counted. `0` turns registration off. |
-| `Z402_REGISTRATION_TOKEN` | none | A bearer token that `POST /providers` then requires. It must be one token of letters, digits and `-._~+/`. |
+| `Z402_MAX_PROVIDERS` | 32 | How many providers can register, the operator not counted. `0` turns away new providers. A registered provider can still rotate its key. |
+| `Z402_REGISTRATION_TOKEN` | none | A bearer token that `POST /providers` then requires. It must be one token of letters, digits and `-._~+/`, and at least 32 characters, for example `openssl rand -hex 32`. A shorter one stops the start. |
+| `Z402_REGISTRATION_OPEN` | unset | `1`, or unset. Only mainnet reads it: `1` lets anyone register there, with the warning above. A token always gates registration, so `1` beside a token changes nothing. |
 
 At start the facilitator opens the operator's runtime, then loads the registry and asks `zdecrypt` again whether each stored viewing key still owns its `payTo`. A malformed registry, or one for another network, stops the start. So does an entry whose key no longer owns its address, and that message names the provider id. Every provider's ledger is then opened in parallel and polled once. The facilitator prints its usual ready line, then a second line with the number of registered providers.
+
+Nothing removes a provider while the facilitator runs, and an idle provider keeps its slot. To free a slot or to drop an abusive provider, the operator stops the facilitator, removes the entry from `registry.json` and starts it again. [Run the facilitator](/docs/guides/run-a-facilitator#remove-a-provider) gives the steps, and the facilitator's README has the whole procedure under "Removing a provider": <Source path="packages/facilitator/README.md" />.
 
 <Cards>
   <Card title="Sell an API" href="/docs/guides/sell-an-api">Charge for a route and connect it to the facilitator.</Card>
@@ -287,7 +292,8 @@ At start the facilitator opens the operator's runtime, then loads the registry a
 - <Source path="packages/facilitator/src/providers/id.ts" />: the provider id.
 - <Source path="packages/facilitator/src/runtime.ts" />: one provider's runtime.
 - <Source path="packages/facilitator/src/app.ts" />: the routes, the key lookup and the start-up order.
-- <Source path="packages/facilitator/src/config.ts" />: `Z402_PROVIDERS_DIR`, `Z402_MAX_PROVIDERS` and `Z402_REGISTRATION_TOKEN`.
+- <Source path="packages/facilitator/src/config.ts" />: `Z402_PROVIDERS_DIR`, `Z402_MAX_PROVIDERS`, `Z402_REGISTRATION_TOKEN` and `Z402_REGISTRATION_OPEN`.
+- <Source path="packages/facilitator/README.md" />: the environment, registration, and removing a provider.
 - <Source path="packages/server/src/provider.ts" />: `checkProvider` and `ProviderCheckError`.
 - <Source path="scripts/register-provider.mjs" />: registration from a view-only keys file.
 - <Source path="docs/superpowers/specs/2026-10-27-z402-services-design.md" />: the starter services, with URL to markdown as provider 2.

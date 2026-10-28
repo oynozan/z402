@@ -27,7 +27,7 @@ The process is `pnpm --filter @z402/facilitator start`. Its ready lines go to st
 | --- | --- | --- |
 | `Z402_NETWORK` | `regtest` | `regtest`, `testnet` or `mainnet`. It picks the defaults of `Z402_LWD_URL` and `Z402_EXPECTED_BRANCH_ID`, and the address and key prefixes that are accepted. |
 | `Z402_MERCHANT_KEYS_FILE` | none | The operator's keys: the JSON that `zdecrypt keygen` prints, or the view-only file that `merchant-keygen.mjs --view-only` writes. Only `orchardOnlyAddress` and `uivk` are used, and only for the two variables below that are not set. A file with a `seedHex` or `ufvk` key is refused on mainnet and gives a warning elsewhere. |
-| `Z402_PAY_TO` | `orchardOnlyAddress` of the keys file | The operator's shielded-only unified address: `uregtest1...`, `utest1...` or `u1...`, and the ZIP 316 revision 2 `zu...` forms. Required unless the keys file has it. |
+| `Z402_PAY_TO` | `orchardOnlyAddress` of the keys file | The operator's shielded-only unified address: `uregtest1...`, `utest1...` or `u1...`, and the ZIP 316 revision 2 `zu...` forms. Required unless the keys file has it. At most 1,024 characters, else `Z402_PAY_TO: must be at most 1024 characters`. |
 | `Z402_UIVK` | `uivk` of the keys file | The operator's unified incoming viewing key: `uivkregtest1...`, `uivktest1...` or `uivk1...`, and the revision 2 `uvi...` forms. Required unless the keys file has it. It sees deposits and cannot spend. |
 | `Z402_FACILITATOR_TOKEN` | none, required | The operator's API key. Callers present it as `Authorization: Bearer <token>`. One b64token. |
 | `Z402_LWD_URL` | regtest `http://127.0.0.1:28137`, testnet `https://testnet.zec.rocks:443`, mainnet none | A lightwalletd-compatible gRPC endpoint. Required on mainnet. Plain `http://` is allowed to any host on regtest and only to a loopback host elsewhere. A user name or password in the URL is ignored. |
@@ -36,7 +36,8 @@ The process is `pnpm --filter @z402/facilitator start`. Its ready lines go to st
 | `Z402_LEDGER` | `.data/facilitator-ledger.<network>.jsonl` | The operator's ledger. One facilitator writes it at a time, through `<ledger>.lock`. |
 | `Z402_PROVIDERS_DIR` | `.data/providers.<network>` | The provider registry, the registered providers' ledgers and the catalog file. Created with mode 0700. |
 | `Z402_MAX_PROVIDERS` | `32` | The most providers that can register, the operator not counted. 0 to 1,000. `0` turns away new providers. |
-| `Z402_REGISTRATION_TOKEN` | unset | When set, `POST /providers` needs it as a bearer token. One b64token. Unset leaves registration open. |
+| `Z402_REGISTRATION_TOKEN` | unset | When set, `POST /providers` needs it as a bearer token. One b64token of at least 32 characters, for example `openssl rand -hex 32`, else `Z402_REGISTRATION_TOKEN: must be at least 32 characters`. Unset leaves registration open, and every start prints `facilitator: warning: POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token`. On mainnet, unset closes it unless `Z402_REGISTRATION_OPEN=1`. |
+| `Z402_REGISTRATION_OPEN` | unset | `1`, or unset, else `Z402_REGISTRATION_OPEN: expected 1, or leave it unset`. Only mainnet reads it. On mainnet with no token and no `1`, registration is off: the facilitator still starts and serves, `POST /providers` answers `403 registration_disabled`, and the start prints a warning that says why. With `1` and no token, mainnet is open like the other networks, with the warning above. A token always gates registration, so `1` beside a token changes nothing. |
 | `Z402_FACILITATOR_HOST` | `127.0.0.1` | The address to listen on. Anything that is not loopback prints a warning, because the only protection is the key. |
 | `Z402_FACILITATOR_PORT` | `4022` | 0 to 65,535. `0` picks a free port. |
 | `Z402_PRICE_ZAT` | unset | Not used. Each provider prices its own routes, from 1 zat to `windowZat`. If it is set, the facilitator prints one warning that says so. |
@@ -63,10 +64,10 @@ A whole-number term is limited to ten digits. An invalid term is reported with i
 | Option | Allowed | Default |
 | --- | --- | --- |
 | `network`, `payTo`, `chain`, `terms` | A Zcash network, the operator's address, a chain view and the trust terms | Required |
-| `priceZat` | A bigint of at least 1. Optional | Ignored: each provider prices its own routes |
+| `priceZat` | Any value. It is neither read nor checked | Ignored: each provider prices its own routes |
 | `authToken` | One b64token. Left out, a request with no `Authorization` header is the operator's | None |
 | `ledgerPath` | Not blank. Left out, the ledger is in memory and takes no lock | None |
-| `providers` | `{ dir, chainFor, owns, max?, registrationToken? }`. Left out, `POST /providers` answers `registration_disabled` | None |
+| `providers` | `{ dir, chainFor, owns, max?, registrationToken?, registrationEnabled? }`. `registrationEnabled: false` answers `POST /providers` with `registration_disabled` while the registered providers keep serving. Left out, `providers` makes `POST /providers` answer `registration_disabled` | None |
 | `host` | Not blank | `127.0.0.1` |
 | `port` | A whole number from 0 to 65,535 | `0`, a free port |
 | `pollIntervalMs` | A whole number from 1 to 2,147,483,647 | `5000` |
@@ -248,7 +249,7 @@ Copy `.env.example` to `.env` next to `compose.yaml` and change what you need. E
 | `Z402_DROPBOX_PORT` | `4034` | Host port of `dropbox`. |
 | `Z402_BLOCK_SECONDS` | `25` | Seconds between the blocks the clock mines. Nothing confirms or expires without blocks. |
 | `Z402_PRICE_ZAT` | `500` | The price of the demo API's `GET /chunk`. Compose gives it to the demo API only: each starter service charges its own price. |
-| `Z402_REGISTRATION_TOKEN` | empty | The token a provider presents to register with the facilitator. A b64token, for example from `openssl rand -hex 32`. Empty leaves registration open, which is safe only while the facilitator's port stays unpublished. `markdown-register` sends it for provider 2. |
+| `Z402_REGISTRATION_TOKEN` | empty | The token a provider presents to register with the facilitator. A b64token of at least 32 characters, for example from `openssl rand -hex 32`. Empty leaves registration open, which is safe only while the facilitator's port stays unpublished, and every start of the facilitator warns about it. `markdown-register` sends it for provider 2. |
 | `Z402_LLM_HF_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M` | The local chat model, as llama.cpp `-hf <Hugging Face repo>:<quant>`. Needs at least a 10,240-token context. The service asks for the alias `qwen2.5-0.5b-instruct`, which stays. |
 | `Z402_EMBED_HF_MODEL` | `nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M` | The local embedding model. Needs at least a 2,048-token context. The alias `nomic-embed-text` stays. |
 | `Z402_LLM_MODEL_SCALE` | `1` | `1` runs the local chat model. `0` leaves it out once `services/llm/.env` names a hosted provider. |

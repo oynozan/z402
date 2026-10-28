@@ -295,7 +295,7 @@ The string in `invalidReason` or `errorReason` that says why a verify or a settl
 
 ### Registration token
 
-An optional bearer token that gates `POST /providers`. Set it with `Z402_REGISTRATION_TOKEN` before a facilitator is reachable from the internet.
+An optional bearer token that gates `POST /providers`. Set it with `Z402_REGISTRATION_TOKEN`, at least 32 characters, before a facilitator is reachable from the internet.
 
 ### Regtest
 
@@ -387,7 +387,7 @@ A unified incoming viewing key (ZIP 316). It can read the payments an address re
 
 ### Verify
 
-The facilitator call that checks a voucher without changing any state: the signature, the increment, the limit and any deposit presented.
+The facilitator call that checks a voucher without committing it or crediting a deposit: the signature, the increment, the limit and any deposit presented.
 
 ### Viewing key
 

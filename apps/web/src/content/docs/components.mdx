@@ -63,7 +63,7 @@ A wide table scrolls inside its frame on a narrow screen:
 | --- | --- | --- | --- |
 | `Z402_FACILITATOR_URL` | required | every service | The facilitator's base URL, `http://` or `https://`, without credentials. |
 | `Z402_FACILITATOR_TOKEN` | none | every service | The provider's API key, sent as `Authorization: Bearer z402_…`. |
-| `Z402_REGISTRATION_TOKEN` | unset | the facilitator | When set, `POST /providers` needs it; when unset, registration is open. |
+| `Z402_REGISTRATION_TOKEN` | unset | the facilitator | When set (at least 32 characters), `POST /providers` needs it; when unset, registration is open, except on mainnet. |
 
 ## Code
 

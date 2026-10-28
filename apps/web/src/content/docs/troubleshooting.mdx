@@ -238,8 +238,8 @@ Whoever holds a provider's viewing key can rotate its API key, so keep the viewi
 | `400 invalid_request` | A field is missing or invalid. The message names it. |
 | `401 unauthorized` | The facilitator wants its registration token (`Z402_REGISTRATION_TOKEN`), and none was sent. |
 | `403 not_owner` | The viewing key does not own the address, or the address has a transparent receiver. |
-| `403 provider_limit` | The facilitator reached `Z402_MAX_PROVIDERS` (32 by default). `0` turns registration off. |
-| `403 registration_disabled` | The facilitator has no providers directory. |
+| `403 provider_limit` | The facilitator reached `Z402_MAX_PROVIDERS` (32 by default). `0` turns away new providers. A registered provider can still rotate its key. |
+| `403 registration_disabled` | The facilitator has no providers directory, or it runs on mainnet with no registration token and no `Z402_REGISTRATION_OPEN=1`. |
 | `409 operator` | The address is the operator's own, which needs no registration. |
 
 ### A lost registry

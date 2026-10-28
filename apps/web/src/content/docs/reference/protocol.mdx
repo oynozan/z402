@@ -87,7 +87,7 @@ A 402 offers the scheme as one entry of `accepts`. This is the abridged offer of
     "creditRatioBps": 2500,
     "creditCapZat": "200000",
     "zeroConfMinExpiryBlocks": 20,
-    "termsVersion": "9f3c0a5d7e21b684"
+    "termsVersion": "cb7f148af0fda19a"
   }
 }
 ```
@@ -261,7 +261,7 @@ The unit of credit is the lowercase transaction id. A transaction is consumed on
 
 **In v2.0**: in v1.2.1 the key was `<network>:<txid>`, with one ledger file per network.
 
-A found transaction that cannot be used is refused with one code:
+A found transaction that cannot be used is refused with one of these codes. The memo case has one code for three causes:
 
 | Code | When |
 | --- | --- |
@@ -345,7 +345,7 @@ console.log(checkVoucher({ cLast: 53_000n, cNew: 53_200n, price: 500n, limit: 12
 
 ### Verify and settle
 
-Every `/verify` and `/settle` answer is HTTP 200 and complete under the x402 schema. A 500 would leak its body into the client's error, and a 200 without `transaction` becomes a 502.
+Once the API key is accepted, every `/verify` and `/settle` answer is HTTP 200 and complete under the x402 schema. A missing or unknown key gets 401. A 500 would leak its body into the client's error, and a 200 without `transaction` becomes a 502.
 
 | Answer | Fields |
 | --- | --- |
@@ -409,8 +409,8 @@ Only `invalidReason` (verify) or `errorReason` (settle) reaches the client, so t
 | Code | Meaning | Client action |
 | --- | --- | --- |
 | `invalid_payload` | The payload broke the rules above. | Fatal. |
-| `invalid_payment_requirements` | The requirements differ from the facilitator's: the address, the amount, or the terms. | Fatal. |
-| `invalid_network` | The network is not the facilitator's. | Fatal. |
+| `invalid_payment_requirements` | The requirements are not acceptable for this API key: `payTo` is not the key's provider, `amount` is not a canonical zat from 1 to `windowZat`, the asset is not `ZEC`, or `extra` does not carry exactly the rail's terms. | Fatal. |
+| `invalid_network` | The payload and the requirements disagree on the network. | Fatal. |
 | `invalid_scheme` | The payload and the requirements disagree on the scheme. | Fatal. |
 | `unsupported_scheme` | No registered version, scheme and network. | Fatal. |
 | `invalid_x402_version` | The version is not 2. | Fatal. |
@@ -444,7 +444,7 @@ These are what a conforming client does. [`@z402/client`](/docs/reference/client
 
 ## Facilitator rules
 
-- `/verify` is read-only. `/settle` re-checks and commits synchronously, with no `await` between the check and the write.
+- `/verify` commits no voucher and credits no deposit. Its session refresh may record a change in a deposit's status. `/settle` re-checks and commits synchronously, with no `await` between the check and the write.
 - A tip-driven poller reads the chain every 5 s and re-checks deposits on each change. Before refusing a session that has a pending deposit, the facilitator re-queries it, at most once per 5 s per session.
 - Every chain call has a 5 s deadline. Transport errors map to `z402_chain_unavailable`. Only the definitive not-found answers of the spec's lightwalletd table mean not-found.
 - The API key picks the provider. `payTo` must be that provider's, `amount` a canonical zat from 1 to `windowZat`, and the terms equal to the rail's. Anything else answers `invalid_payment_requirements`. **In v2.0**: in v1.2.1 it compared the address, the amount and the terms with its own configuration.
@@ -470,7 +470,7 @@ A provider is one address with its own view-only key (<Term tip="Unified incomin
 
 | Route | Auth | What it does |
 | --- | --- | --- |
-| `POST /providers` | none, or the registration token when one is set | Registers `payTo` and its UIVK, after proving that the key owns the address. Answers `201` with `providerId`, `network`, `payTo` and `apiKey`. Registering a registered address again, with a key that owns it, rotates the API key and answers `200`. |
+| `POST /providers` | none, or the registration token when one is set (at least 32 characters). On mainnet with no token it answers `403 registration_disabled`, unless `Z402_REGISTRATION_OPEN=1` | Registers `payTo` (at most 1,024 characters) and its UIVK, after proving that the key owns the address. Answers `201` with `providerId`, `network`, `payTo` and `apiKey`. Registering a registered address again, with a key that owns it, rotates the API key and answers `200`. |
 | `GET /providers/me` | API key | Answers `providerId`, `network` and `payTo`, or `401`. |
 | `POST /verify`, `POST /settle` | API key | As before. `payTo` must be the key's provider. |
 
@@ -482,11 +482,11 @@ The facilitator serves the x402 Bazaar with the exact shapes of `@x402/extension
 
 | Route | Auth | What it does |
 | --- | --- | --- |
-| `GET /discovery/resources` | none | Lists resources. Filters `type`, `payTo`, `scheme`, `network`, `extensions`. `limit` defaults to 20 and is clamped to 1 to 100. `offset` defaults to 0. |
-| `GET /discovery/search` | none | The same items, matched by a case-insensitive substring of `query`. |
+| `GET /discovery/resources` | none (a key that is presented must belong to a provider, or the answer is 401) | Lists resources. Filters `type`, `payTo`, `scheme`, `network`, `extensions`. `limit` defaults to 20 and is clamped to 1 to 100. `offset` defaults to 0. |
+| `GET /discovery/search` | none (a key that is presented must belong to a provider, or the answer is 401) | The same items, matched by a case-insensitive substring of `query`. |
 | `POST /discovery/resources` | API key | A provider declares 1 to 32 items. A bad item refuses the whole call. Each valid item is upserted with `lastSeen` set to now. |
 
-A served item is the standard `DiscoveryResource` plus two fields: `lastSeen` (the provider's latest declaration, absent for a route listed only from payments) and `paidCallsToday` (settled calls since 00:00 UTC). A reader derives up (under 90 s), stale (under 10 min) and down from `lastSeen`. The access log records paths only, never query strings. See [Discovery](/docs/concepts/discovery).
+A served item is the standard `DiscoveryResource` plus two fields: `lastSeen` (the provider's latest declaration, absent for a route listed only from payments) and `paidCallsToday` (settled calls since 00:00 UTC). A reader derives up (under 90 s), stale (under 10 min) and down from `lastSeen`. A provider that never declares is listed from its payments: the item holds the canonical URL, `accepts` from the server's own requirements, and the `mimeType` and `bazaar` extension that the payer echoed, each kept only if it passes the field checks. A payment never supplies a `description`, `serviceName`, `tags` or `iconUrl`, and a provider has at most 8 such items. The catalog holds at most 128 items per provider and 4,096 in all, within 16 MiB. The access log records paths only, never query strings. See [Discovery](/docs/concepts/discovery).
 
 ## Chain access
 

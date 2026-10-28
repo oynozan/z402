@@ -24,7 +24,7 @@ flowchart LR
 | Source | Who writes it | What it gives |
 |---|---|---|
 | A declaration | The provider's service, with its API key | The full listing, and a liveness signal: `lastSeen`. A route is listed before its first sale. |
-| A settled payment | The facilitator, after a successful settle | A paid call on a listed route, and a new listing only for a provider that has never declared. |
+| A settled payment | The facilitator, after a successful settle | A paid call on a listed route, and a new listing only for a provider that has never declared, up to 8 of them. |
 
 ### Declarations
 
@@ -42,14 +42,14 @@ A declared item is checked field by field:
 |---|---|
 | `resource` | An absolute http or https URL of at most 2,048 characters, with no user name or password. |
 | `type`, `x402Version` | `"http"` and `2`. |
-| `accepts` | 1 to 4 entries. Each must be `prepaid-voucher` on the facilitator's network, `asset` `ZEC`, the provider's own `payTo`, an `amount` from 1 to `windowZat`, and an `extra` with the rail's terms and its `termsVersion`. The catalog therefore never lists a payment the facilitator would refuse. |
+| `accepts` | 1 to 4 entries. Each must be `prepaid-voucher` on the facilitator's network, `asset` `ZEC`, the provider's own `payTo`, an `amount` from 1 to `windowZat`, a positive `maxTimeoutSeconds`, and an `extra` with the rail's terms and its `termsVersion`. The catalog therefore never lists a payment the facilitator would refuse. |
 | `description`, `mimeType` | At most 512 and 128 characters. |
 | `serviceName` | 1 to 32 printable ASCII characters. |
 | `tags` | At most 5, each 1 to 32 printable ASCII characters. Repeats that differ only in case are dropped. |
 | `iconUrl` | An http or https URL on a named host, at most 2,048 characters. Loopback names and IP addresses are refused. |
 | `extensions` | A plain JSON object of at most 8 KB. It is kept as declared. |
 
-`extensions.bazaar.info.input.method`, when present, must be `GET`, `POST`, `PUT`, `PATCH`, `DELETE` or `HEAD`. It is the item's method, and `GET` when absent. A provider may list at most 128 items, and the catalog holds at most 4,096.
+`extensions.bazaar.info.input.method`, when present, must be `GET`, `POST`, `PUT`, `PATCH`, `DELETE` or `HEAD`. It is the item's method, and `GET` when absent. A provider may list at most 128 items, and the catalog holds at most 4,096, within 16 MiB. A declaration that would pass that budget is refused whole with `400 invalid_request` and the message `the catalog is full`.
 
 ```json title="POST /discovery/resources"
 {
@@ -71,7 +71,7 @@ A declared item is checked field by field:
             "creditRatioBps": 2500,
             "creditCapZat": "200000",
             "zeroConfMinExpiryBlocks": 20,
-            "termsVersion": "5a2a93e32c1aa9da"
+            "termsVersion": "cb7f148af0fda19a"
           }
         }
       ],
@@ -96,9 +96,9 @@ A declaration never removes another service's items. It upserts its own, sets th
 
 ### Settled payments
 
-Every successful settle tells the catalog. The item of that provider whose canonical resource and method match the payment gets a new `lastUpdated` and one more in `paidCallsToday`. The resource comes from `paymentPayload.resource.url` and the bazaar `routeTemplate`, and the method from `extensions.bazaar.info.input.method`. The stock client copies the 402's `extensions` into its payment, so these are the values the server sent.
+Every successful settle tells the catalog. The item of that provider whose canonical resource and method match the payment gets a new `lastUpdated` and one more in `paidCallsToday`. The resource comes from `paymentPayload.resource.url` and the bazaar `routeTemplate`, and the method from `extensions.bazaar.info.input.method`. The stock client copies the 402's `extensions` into its payment, so these are the values the server sent. Another client can echo anything, so the facilitator treats them as the payer's.
 
-A provider that has never declared anything is listed from its payments, as standard Bazaar facilitators do. The facilitator builds the item from `paymentRequirements`, which are the server's own and not the client's `accepted`, and from the bazaar extension the payment carried.
+A provider that has never declared anything is listed from its payments, as standard Bazaar facilitators do. Only the `accepts` of such an item comes from the server: the facilitator builds it from `paymentRequirements`, which are the server's own and not the client's `accepted`. The URL, the `mimeType` and the `bazaar` extension are echoed by the payer, and they pass the same field checks as a declaration and nothing more. A payment never supplies a `description`, `serviceName`, `tags` or `iconUrl`, and a provider has at most 8 such items. A declaration is how a provider lists more, with text of its own.
 
 <Callout type="warning" title="Once a provider declares, payments never create items">
 
@@ -110,7 +110,7 @@ A catalog error is logged. It never changes the answer to the settle.
 
 ## Reading the catalog
 
-Both reads are public. The site proxies them at `/discovery/resources` and `/discovery/search` and forwards only the parameters each one documents, so the site's address works as a Bazaar URL too.
+Both reads are public. They need no key, but a key that is presented must belong to a provider, or the answer is 401. The site proxies them at `/discovery/resources` and `/discovery/search` and forwards only the parameters each one documents, never an `Authorization` header, so the site's address works as a Bazaar URL too.
 
 <Endpoint method="GET" path="/discovery/resources" auth="public">
 
@@ -247,6 +247,7 @@ The agent treats the endpoint as untrusted. One run has a single deadline of 60 
 
 - **The 402 is authoritative.** A client pays what the resource's own 402 says, not what the catalog says. A catalog can be stale.
 - **Duplicates are possible.** Two providers can list one URL. The catalog shows each with its own `payTo`.
+- **A listing from payments is thin.** For a provider that never declares, a payer chooses the listed URL, within 8 items per provider. The `accepts` and the price are the server's, and the 402 that the URL returns stays authoritative. A provider that cares declares its routes.
 - **Poisoning is limited.** Only an authenticated provider writes its own items. Every `accepts` entry must name that provider's `payTo` and the rail's terms. Sizes and counts are capped. The facilitator never fetches a provider URL. Echoed metadata never overwrites a declared item, and never creates one for a provider that declares.
 - **There is no rate limit.** The public reads have none today.
 
@@ -256,6 +257,8 @@ The agent treats the endpoint as untrusted. One run has a single deadline of 60 
 |---|---|
 | Items per declaration | 1 to 32 |
 | Items per provider, and in all | 128 and 4,096. Past either cap a declaration gets `400`, and a payment lists nothing. Each is logged once. |
+| Items listed from payments | 8 per provider. A payment for a ninth lists nothing, and a payment for a listed item still counts. |
+| Size of the catalog | 16 MiB of items, counted as the JSON of each. A declaration past it gets `400` with `the catalog is full`, a payment past it lists nothing, and a file that holds more drops its oldest items at load. |
 | Request body | 64 KB |
 | Where it lives | In memory, and in `discovery.json` in the providers directory. Without a providers directory the catalog is memory-only. |
 | When it is written | At most every 2 seconds. A provider's first declaration is written before it is answered. |

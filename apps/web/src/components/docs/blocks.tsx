@@ -139,14 +139,17 @@ export function Video({ src, poster, title, caption }: { src: string; poster?: s
 type Auth = "public" | "api-key" | "registration-token";
 
 const AUTH: Record<Auth, { label: string; tip: string }> = {
-  public: { label: "Public", tip: "Open to anyone: no Authorization header." },
+  public: {
+    label: "Public",
+    tip: "Open to anyone: no Authorization header needed. On the facilitator, a request that does carry a key which names no provider (unknown or rotated) gets 401.",
+  },
   "api-key": {
     label: "API key",
-    tip: "Send the provider's API key from POST /providers: Authorization: Bearer z402_…",
+    tip: "Send your provider API key: Authorization: Bearer <key>. Registered providers get a z402_… key from POST /providers; the operator's key is the facilitator's Z402_FACILITATOR_TOKEN.",
   },
   "registration-token": {
     label: "Registration token",
-    tip: "Send the operator's registration token as Authorization: Bearer …, when the facilitator sets Z402_REGISTRATION_TOKEN. Without one the route is open.",
+    tip: "Send the operator's registration token as Authorization: Bearer …, when the facilitator sets Z402_REGISTRATION_TOKEN (an empty one counts as unset). Without one the route is open, except on mainnet, where it answers 403 registration_disabled unless Z402_REGISTRATION_OPEN=1.",
   },
 };
 

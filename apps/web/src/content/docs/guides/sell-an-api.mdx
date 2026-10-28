@@ -149,7 +149,7 @@ The key is in this answer and nowhere else. Run the command under `umask 077` an
 
 <Endpoint method="POST" path="/providers" auth="registration-token">
 
-Registers a provider, or rotates the key of a registered one. The route is public unless the facilitator sets `Z402_REGISTRATION_TOKEN`. Then the request needs `Authorization: Bearer <registration token>`.
+Registers a provider, or rotates the key of a registered one. The route is public unless the facilitator sets `Z402_REGISTRATION_TOKEN`. Then the request needs `Authorization: Bearer <registration token>`. On mainnet the route is closed unless a token is set or the operator opened registration with `Z402_REGISTRATION_OPEN=1`.
 
 </Endpoint>
 
@@ -167,7 +167,7 @@ Registers a provider, or rotates the key of a registered one. The route is publi
 | `401` | `unauthorized` | The facilitator wants a registration token and the request has none |
 | `403` | `not_owner` | The viewing key does not own `payTo`, or `payTo` has a transparent receiver |
 | `403` | `provider_limit` | The facilitator has reached its limit of providers |
-| `403` | `registration_disabled` | The facilitator has no providers directory, so it takes no registrations |
+| `403` | `registration_disabled` | The facilitator has no providers directory, or it runs on mainnet with registration neither opened nor gated by a token, so it takes no registrations |
 | `409` | `operator` | `payTo` is the operator's own address |
 | `500` | `internal_error` | The registration failed and nothing changed |
 

@@ -37,7 +37,7 @@ The facilitator owns the terms. They travel in the `extra` object of every offer
     "creditRatioBps": 2500,
     "creditCapZat": "200000",
     "zeroConfMinExpiryBlocks": 20,
-    "termsVersion": "5a2a93e32c1aa9da"
+    "termsVersion": "cb7f148af0fda19a"
   }
 }
 ```
@@ -232,12 +232,13 @@ A cheating agent that makes one deposit and no more is stopped by the same rules
 
 The facilitator judges every voucher in the same order, for verify and for settle:
 
-1. **The offer.** The requirements in the request must match what the provider is registered for: scheme, network, asset, `payTo`, a canonical `amount` from 1 to `windowZat`, and the rail's terms. Otherwise `invalid_payment_requirements`.
-2. **The payload.** `x402Version` is 2, and `accepted` agrees with the requirements. The voucher fields match their patterns. Otherwise `invalid_x402_version`, `invalid_scheme`, `invalid_network` or `invalid_payload`.
-3. **The signature.** Otherwise `z402_invalid_signature`.
-4. **The increment.** `c_new - c_last` is at least `amount`. Otherwise `z402_cumulative_mismatch`.
-5. **The deposit.** If `depositTxid` is new to this session, the facilitator looks it up. If the voucher fits without the deposit, verify answers at once and looks it up in the background. Otherwise it waits for the lookup, up to 30 seconds by default.
-6. **The limit.** `c_new` is at most the limit. Otherwise `z402_awaiting_confirmation` when a live pending deposit exists, and `z402_deposit_required` when none does.
+1. **The request.** The body is a JSON object that fits the x402 v2 schemas, and `x402Version` is 2. Otherwise `invalid_payload` or `invalid_x402_version`.
+2. **The offer.** The requirements name `prepaid-voucher` on the facilitator's network (another scheme or network is `unsupported_scheme`) and match what the provider is registered for: asset, `payTo`, a canonical `amount` from 1 to `windowZat`, and the rail's terms. Otherwise `invalid_payment_requirements`.
+3. **The payload.** `accepted` agrees with the requirements, and the voucher fields match their patterns. Otherwise `invalid_scheme`, `invalid_network` or `invalid_payload`.
+4. **The signature.** Otherwise `z402_invalid_signature`.
+5. **The increment.** `c_new - c_last` is at least `amount`. Otherwise `z402_cumulative_mismatch`.
+6. **The deposit.** If `depositTxid` is new to this session, the facilitator looks it up. If the voucher fits without the deposit, verify answers at once and looks it up in the background. Otherwise it waits for the lookup, up to 30 seconds by default.
+7. **The limit.** `c_new` is at most the limit. Otherwise `z402_awaiting_confirmation` when a live pending deposit exists, and `z402_deposit_required` when none does.
 
 Verify never commits a voucher or credits a deposit. At most it records a change in a deposit's status, when its refresh of the session finds one. Settle repeats the same judgment using only what verify and the background lookup already cached. It never waits on the chain, and it checks and commits with no `await` between the two, so two settles of one voucher cannot both succeed. A settle that succeeds appends to the ledger first, then updates its state, and then answers. A deposit is credited only in a successful settle.
 
@@ -257,7 +258,7 @@ Every answer from the facilitator, once the voucher's signature has verified, ca
 <Param name="deposits" type="object[]" required>Every deposit that is not final, plus the last four final ones. Each has `txid`, `valueZat`, `status`, `confirmations`, `expiryHeight` and `zeroConf`.</Param>
 </Params>
 
-This is a real corrective 402 from a session at its limit, with the address shortened and the extensions left out. The agent has made one deposit and has used 125,000 zat, which is all of its limit:
+This is a corrective 402 from a session at its limit, with the address shortened and the extensions left out. The agent has made one deposit and has used 125,000 zat, which is all of its limit:
 
 ```json title="PAYMENT-REQUIRED after z402_deposit_required"
 {
@@ -277,7 +278,7 @@ This is a real corrective 402 from a session at its limit, with the address shor
         "creditRatioBps": 2500,
         "creditCapZat": "200000",
         "zeroConfMinExpiryBlocks": 20,
-        "termsVersion": "65864168ef76d8ae",
+        "termsVersion": "cb7f148af0fda19a",
         "session": {
           "sessionKey": "d1684476...290a",
           "cumulativeZat": "125000",

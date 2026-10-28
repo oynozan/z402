@@ -40,7 +40,7 @@ sequenceDiagram
 <Step title="Ask">The client sends the request with no payment.</Step>
 <Step title="Offer">The server answers `402` and a `PAYMENT-REQUIRED` header that lists what it accepts.</Step>
 <Step title="Pay">The client picks an offer, builds a payment for it, and repeats the request with a `PAYMENT-SIGNATURE` header.</Step>
-<Step title="Verify">The server sends the payment and the offer it matched to the facilitator's `/verify`. Verify checks and reads. It commits nothing.</Step>
+<Step title="Verify">The server sends the payment and the offer it matched to the facilitator's `/verify`. Verify checks and reads. It commits no voucher and credits no deposit.</Step>
 <Step title="Serve">If the payment is valid, the server runs its handler. A handler that fails with a status of 400 or more ends the flow here, and nothing is settled.</Step>
 <Step title="Settle">The server calls `/settle`. The facilitator commits the payment. The server returns the handler's response with a `PAYMENT-RESPONSE` header.</Step>
 </Steps>
@@ -128,7 +128,7 @@ This is a decoded `PAYMENT-REQUIRED` from the URL to markdown service, with the 
         "creditRatioBps": 2500,
         "creditCapZat": "200000",
         "zeroConfMinExpiryBlocks": 20,
-        "termsVersion": "5a2a93e32c1aa9da"
+        "termsVersion": "cb7f148af0fda19a"
       }
     }
   ],
@@ -186,7 +186,7 @@ A facilitator exposes three routes to resource servers.
 
 | Route | Auth | What it does |
 |---|---|---|
-| `GET /supported` | Public | Lists what the facilitator can settle: `kinds` (version, scheme, network, `extra`), `extensions` and `signers`. |
+| `GET /supported` | Public (a key that is presented must belong to a provider, or the answer is 401) | Lists what the facilitator can settle: `kinds` (version, scheme, network, `extra`), `extensions` and `signers`. |
 | `POST /verify` | API key | Checks a payment against an offer. Read-only: it must not commit payment state. Answers `isValid`, with `invalidReason` and `invalidMessage` when not. |
 | `POST /settle` | API key | Commits the payment. Answers `success`, `transaction` and `network`, with `errorReason` and `errorMessage` when not. |
 
@@ -204,7 +204,7 @@ A resource server reads `/supported` when it starts, and it refuses to start a r
         "creditRatioBps": 2500,
         "creditCapZat": "200000",
         "zeroConfMinExpiryBlocks": 20,
-        "termsVersion": "5a2a93e32c1aa9da"
+        "termsVersion": "cb7f148af0fda19a"
       }
     }
   ],
