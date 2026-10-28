@@ -1,9 +1,15 @@
 # z402 wire contract
 
-**Version: v1.2** (2026-10-28; ACKed by both agents). v1.1 clarified §7.3: only a successful settle acknowledges a deposit, and refusal snapshots are projected and informational. v1.2 does three things:
+**Version: v1.2.1** (2026-10-28; ACKed by both agents). v1.1 clarified §7.3: only a successful settle acknowledges a deposit, and refusal snapshots are projected and informational. v1.2 does three things:
 - **One refusal code.** Every found but unusable txid answers `z402_deposit_memo_mismatch` (§5.2), so a refusal is no oracle on the merchant's viewing key.
 - **Corrections.** §2, §6, §8 and §10.
 - **New facilitator and API rules.** §15: the ledger lock, `onFatal`/`log`, `close()`, token and URL checks, and 405 on paid non-GET requests.
+
+v1.2.1 changes nothing on the wire. It records the facilitator's Wave B rules:
+- the startup network check (§11, §15);
+- the same answer for an other-session txid as for an uncredited one, for each read outcome (§5.2);
+- the heartbeat ledger lock and the ledger header (§15);
+- the rules for plaintext URLs and the keys file (§15).
 
 Drafted by the client agent and reviewed by the facilitator agent. Code may rely on every value here; changes need a message, both ACKs, and a version bump.
 
@@ -110,7 +116,7 @@ sig     = Ed25519 (RFC 8032, pure) over message, 64 bytes, lowercase hex
   | Code | Condition |
   |---|---|
   | `z402_deposit_transparent` | Any transparent input or output. |
-  | `z402_deposit_memo_mismatch` | The transaction is found, but this session cannot use it. Any of three cases:<br>- no output decrypts to `payTo`;<br>- no output to `payTo` carries this session's memo;<br>- the txid is already credited to another session.<br>All three get one code and one message, "the deposit cannot be credited". The other-session case also performs one chain read, so neither the code nor the timing tells them apart (v1.2). |
+  | `z402_deposit_memo_mismatch` | The transaction is found, but this session cannot use it. Any of three cases:<br>- no output decrypts to `payTo`;<br>- no output to `payTo` carries this session's memo;<br>- the txid is already credited to another session.<br>All three get one code and one message, "the deposit cannot be credited". A txid credited to another session gets exactly the answer an uncredited txid gets for the same read outcome. A successful read answers `z402_deposit_memo_mismatch`. A failed read, or a spent read budget, answers the same `z402_chain_unavailable` or `z402_deposit_not_found` (v1.2.1). |
   | `z402_deposit_not_to_merchant`, `z402_deposit_other_session` | Kept in the closed list (§8). Not emitted from v1.2: those cases answer `z402_deposit_memo_mismatch`. |
   | `z402_deposit_dead` | The txid is already known dead, or the presented transaction is unmined and `tip ≥ expiryHeight`. |
 
@@ -269,13 +275,14 @@ A facilitator timeout reaches the client as HTTP 502 with **neither** header, wh
   - Zallet RPC: `http://127.0.0.1:50232` (Basic `zebra:zebra`).
 - **Heights.** Overwinter…Canopy at 1, NU5…NU6.3 at 2, NU7 not active. Deposits are Ironwood outputs in v6 transactions, branch `0x37a5165b`.
 - **Blocks** exist only when mined: `infra/z3/rpc.mjs` exports `mineNow(n)`, and `infra/z3/clock.mjs run --every 25` mines on a clock. Without the clock nothing confirms or expires.
-- **`GetLightdInfo.chainName`** is `"test"` on regtest. Never derive the network from `chainName`; assert `consensusBranchId` against the configured network instead.
+- **`GetLightdInfo.chainName`** is `"test"` on regtest. Never derive the network from `chainName`. The facilitator identifies the network by `saplingActivationHeight` and checks the upgrade by `consensusBranchId` (§15). Z3's Zaino reports `saplingActivationHeight` 1.
 - Zaino polls the mempool every 500 ms, so one not-found right after a broadcast is normal.
 
 ### 11.1 Mainnet (Phase 2)
 
 - NU6.3 (Ironwood) is active, branch `0x37a5165b`. NU7 activates at 3,543,405 (branch `0x77190ad9`), about 2026-11-05/06, after the deadline.
 - Endpoint: `zec.rocks:443` (TLS) or a regional `na|eu|ap|sa.zec.rocks:443`. Use one host for both wallet and facilitator. Blocks average about 75 s.
+- For real money, the facilitator needs a lightwalletd the merchant operates, not the public zec.rocks. It trusts the endpoint on whether a deposit exists and how deep it is mined. A mainnet facilitator warns at startup when `Z402_LWD_URL` is not a loopback host.
 
 ### 11.2 Public testnet (research record, live-verified 2026-10-27; unusable for funding)
 
@@ -403,7 +410,7 @@ type RawTx = { found: false }
 createLightwalletdClient(opts: { url: string /* http:// = plaintext, https:// = TLS */; rpcDeadlineMs?: number /* 5000 */ }): {
   getTip(): Promise<number>;
   getTransaction(txid: string): Promise<RawTx>;   // txid = 64 lowercase hex, display order; TypeError otherwise
-  getLightdInfo(): Promise<{ chainName: string; consensusBranchId: string; blockHeight: number; version: string }>;
+  getLightdInfo(): Promise<{ chainName: string; consensusBranchId: string; blockHeight: number; version: string; saplingActivationHeight: number }>;
   close(): void;
 }
 ```
@@ -442,7 +449,15 @@ startApi(o: ApiOptions): Promise<{ url: string; close(): Promise<void> }>
 - Other methods:
   - An unpaid request gets 402, whatever the method.
   - A paid request with any method other than GET, `HEAD` and `OPTIONS` included, gets 405 with `Allow: GET` after verification. It is never settled, so the same voucher still buys a GET.
-- **The ledger lock.** `startFacilitator` takes `<ledger>.lock`. A second start on a ledger another live facilitator holds rejects with an error whose message starts with `ledgerPath:`. A lock left on this host is taken over when its pid is dead, or is this process's own pid, as pid 1 is after a container restart (so compose sets a fixed hostname). A lock from another host never is.
+- **The ledger lock.** `startFacilitator` takes `<ledger>.lock` and touches it every 5 s (the heartbeat). A clean stop removes it.
+  - **Taking over a stale lock.** A lock nobody has touched for 15 s was left by a crash, whatever pid or host it names, and is taken over. A crash takeover completes in about 15.25 s: the 15 s, plus one 250 ms poll.
+  - **Refusing a held lock.** A fresh lock whose pid is alive on this host is refused at once, with an error whose message starts with `ledgerPath:`. Any other fresh lock (a dead pid, this pid, another host, or unreadable content) is watched: a heartbeat means a live holder, and the start is refused.
+  - **Losing the lock.** The holder reads its lock again at every heartbeat and before every ledger write. Once it has lost the lock, it refuses every write.
+  - **A known gap.** The fencing has a measured window: after a takeover, one batch can pass between the ownership check and the append. Closing it needs flock or a lease, which is a mainnet item.
+- **The ledger header.** A new ledger starts with a header line that names its network and `payTo`. Startup refuses a ledger whose header names another network or `payTo`, with `ledgerPath: … is the ledger of …`. A ledger without a header (created before v1.2.1) still replays and is never rewritten. The exception is mainnet, where a facilitator opens only a ledger it created itself.
+- **The startup network check.** `getLightdInfo().saplingActivationHeight` must be 419200 on mainnet and 280000 on testnet. On regtest it must be neither (Z3 reports 1). `consensusBranchId` must equal the expected branch; that is the upgrade check. A mismatch on either refuses startup.
+- **Plaintext URLs.** Off regtest, `http://` is allowed only to a loopback host, both for the facilitator's `Z402_LWD_URL` and for the API's `facilitatorUrl`; use `https://` otherwise. Regtest keeps plaintext to any host, for compose networks.
+- **The keys file.** Startup refuses a `Z402_MERCHANT_KEYS_FILE` on mainnet when it holds the spending seed (`seedHex`) or the full viewing key (`ufvk`). On other networks it warns once instead. Give the facilitator only `uivk` and `orchardOnlyAddress`, or set `Z402_UIVK` and `Z402_PAY_TO`. A non-loopback `Z402_FACILITATOR_HOST` also warns.
 - **`close()`** closes idle connections at once and resolves once in-flight requests have finished. A connection that was busy when `close()` ran can hold it for up to the 5 s keep-alive timeout after its response (about 3.3 s with undici). After it resolves, nothing writes the ledger. A settle that is already being served while `close()` runs is still recorded.
 - **The token.** `authToken`, and the API's `facilitatorToken`, must be an RFC 6750 b64token: letters, digits and `-._~+/`, optionally followed by `=` padding. Any other value makes startup refuse it.
 - **The facilitator URL.** `startApi` refuses a `facilitatorUrl` that carries credentials; pass `facilitatorToken` instead.
