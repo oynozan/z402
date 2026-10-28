@@ -1,10 +1,23 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { Component, useEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { Tip } from "./tip";
 
 const DitherVeil = dynamic(() => import("./dither-veil/DitherVeil"), { ssr: false });
+
+/** A veil whose code fails to load or to run leaves its cell empty, and the rest of the page as it is */
+class VeilBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? null : this.props.children;
+  }
+}
 
 /** coin.png is 1600 by 1100 */
 const PICTURE_ASPECT = 1600 / 1100;
@@ -63,22 +76,24 @@ export function HeroVeil() {
   const cell = useCell(box);
   return (
     <div className="veil" ref={box}>
-      <DitherVeil
-        src="/coin.png"
-        fit={cell?.fit ?? "contain"}
-        pattern="bayer"
-        pixelSize={2}
-        // The cell's own black, so the picture's ground and the page are one colour
-        inkColor="#000000"
-        paperColor="#ffffff"
-        // Without it the revealed ground lands half a level above the ink and shows as a faint disc
-        brightness={-0.02}
-        revealRadius={190}
-        softness={0.6}
-        linger={1}
-        wander
-        clickBurst={false}
-      />
+      <VeilBoundary>
+        <DitherVeil
+          src="/coin.png"
+          fit={cell?.fit ?? "contain"}
+          pattern="bayer"
+          pixelSize={2}
+          // The cell's own black, so the picture's ground and the page are one colour
+          inkColor="#000000"
+          paperColor="#ffffff"
+          // Without it the revealed ground lands half a level above the ink and shows as a faint disc
+          brightness={-0.02}
+          revealRadius={190}
+          softness={0.6}
+          linger={1}
+          wander
+          clickBurst={false}
+        />
+      </VeilBoundary>
       <div className="grid-bg" aria-hidden="true">
         {TILES.map((tile) => {
           const at = place(tile, cell);
