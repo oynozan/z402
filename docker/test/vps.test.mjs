@@ -4,7 +4,7 @@
 // skipped where no docker CLI with Compose is installed. The script checks run bash on a copy of scripts/vps.sh in a
 // temporary directory and need no Docker at all.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -18,6 +18,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -381,7 +382,7 @@ function checkout() {
       encoding: "utf8",
       input,
       timeout,
-      env: { ...process.env, ...path, ...env },
+      env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(Z402_|COMPOSE_)/.test(k))), ...path, ...env },
     });
     return { status: r.status, out: r.stdout, err: r.stderr, all: `${r.stdout}${r.stderr}` };
   };
@@ -706,6 +707,173 @@ test("vps.sh restore: when the copy of the volume fails nothing is replaced, and
   } finally {
     c.done();
   }
+});
+
+test("vps.sh backup: tar's exit 1 (a file changed as it was read) keeps the archive with a warning; 2, or no readable archive, fails and keeps nothing", { skip: bashMissing || tarMissing }, () => {
+  const c = readyCheckout();
+  try {
+    const good = archive(c.dir, "good", [LEDGER, `${PROVIDERS}/`]);
+    const backups = () => readdirSync(join(c.dir, ".data/backups"));
+
+    const changed = c.run(["backup"], "", { env: { FAKE_TAR_FILE: good, FAKE_TAR_RC: "1" } });
+    assert.equal(changed.status, 0, changed.all);
+    assert.match(changed.err, /warning: tar says a file changed while it was read/);
+    assert.match(changed.out, /^Backup: \.data\/backups\/z402-vps-\d{8}T\d{6}Z\.tar\.gz /m);
+    assert.equal(backups().length, 1);
+    const [kept] = backups();
+    assert.deepEqual(readFileSync(join(c.dir, ".data/backups", kept)), readFileSync(good));
+    assert.equal(statSync(join(c.dir, ".data/backups", kept)).mode & 0o777, 0o600);
+
+    // Exit 2 and above are tar's own failures. Exit 1 with no archive is docker or compose failing, which tar's
+    // warning must not hide. Neither leaves a file, and neither replaces the backup that is there
+    for (const [what, env] of [["tar exits 2", { FAKE_TAR_FILE: good, FAKE_TAR_RC: "2" }], ["exit 1 and no archive", { FAKE_TAR_RC: "1" }]]) {
+      const failed = c.run(["backup"], "", { env });
+      assert.equal(failed.status, 1, `${what}: ${failed.all}`);
+      assert.match(failed.err, /the backup failed/, what);
+      assert.deepEqual(backups(), [kept], `${what} left a file behind or replaced the backup`);
+    }
+
+    const clean = c.run(["backup"], "", { env: { FAKE_TAR_FILE: good } });
+    assert.equal(clean.status, 0, clean.all);
+    assert.ok(!clean.err.includes("warning: tar says"), clean.err);
+  } finally {
+    c.done();
+  }
+});
+
+test("vps.sh: a relative path given to keys or restore means the caller's directory, not the checkout's", { skip: bashMissing || tarMissing }, () => {
+  const c = readyCheckout();
+  try {
+    const here = join(c.dir, "elsewhere", "sub");
+    mkdirSync(here, { recursive: true });
+    // Files of the same names in the checkout stand for the ones a wrong guess would find
+    writeFileSync(join(c.dir, "view.json"), "not the keys\n");
+    writeFileSync(join(c.dir, "good.tar.gz"), "not an archive\n");
+    writeFileSync(join(here, "view.json"), view());
+    archive(here, "good", [LEDGER, `${PROVIDERS}/`]);
+
+    for (const path of ["view.json", "./view.json", "../sub/view.json", join(here, "view.json")]) {
+      const r = c.run(["keys", path], "", { cwd: here });
+      assert.equal(r.status, 0, `${path}: ${r.all}`);
+    }
+    const missing = c.run(["keys", "nothere.json"], "", { cwd: here });
+    assert.equal(missing.status, 1);
+    assert.match(missing.err, /no such file: nothere\.json/);
+
+    for (const path of ["good.tar.gz", "../sub/good.tar.gz"]) {
+      const r = c.run(["restore", path], "no\n", { cwd: here });
+      assert.match(r.err, /not restored/, `${path}: ${r.all}`);
+      assert.doesNotMatch(r.err, /not a readable tar\.gz/, path);
+    }
+    // From the checkout itself a relative path is what it says
+    const home = c.run(["restore", "good.tar.gz"], "no\n");
+    assert.match(home.err, /not a readable tar\.gz/);
+  } finally {
+    c.done();
+  }
+});
+
+test("vps.sh up: a hosted provider that is not https:// is warned about, unless it is this machine or a compose service", { skip: bashMissing }, () => {
+  const c = readyCheckout();
+  try {
+    const settings = { COMPOSE_PROFILES: "services", Z402_LLM_MODEL: "m", Z402_EMBEDDINGS_MODEL: "m", Z402_EMBEDDINGS_BASE_URL: "https://p.example/v1", FAKE_UP: "fail", Z402_WAIT_SECONDS: "1" };
+    const warned = (url) => {
+      const r = c.run(["up"], "", { env: { ...settings, Z402_LLM_BASE_URL: url } });
+      assert.match(r.err, /docker compose up failed/, `${url} did not reach compose up: ${r.err}`);
+      return r.err.split("\n").filter((l) => /warning: Z402_LLM_BASE_URL/.test(l));
+    };
+    for (const ok of ["https://p.example/v1", "http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:8080/v1", "http://ollama:11434/v1", "http://user:pw@llm-model/v1"]) {
+      assert.deepEqual(warned(ok), [], ok);
+    }
+    for (const bad of ["http://p.example/v1", "http://203.0.113.5:8080/v1", "http://127.example.com/v1", "ftp://p.example/v1", "p.example/v1"]) {
+      const lines = warned(bad);
+      assert.equal(lines.length, 1, `${bad} is not warned about`);
+      assert.match(lines[0], /unencrypted/);
+      assert.ok(!lines[0].includes("pw"), "a credential is shown");
+    }
+  } finally {
+    c.done();
+  }
+});
+
+test("vps compose: start_period outlasts the waits that the facilitator and the API run", { skip }, () => {
+  const seconds = (duration) => [...duration.matchAll(/(\d+(?:\.\d+)?)(h|ms|m|s)/g)].reduce((sum, [, n, u]) => sum + Number(n) * { h: 3600, m: 60, s: 1, ms: 0.001 }[u], 0);
+  const limit = (file) => Number(/const TIMEOUT_MS = ([\d_]+);/.exec(read(file))?.[1].replaceAll("_", "")) / 1000;
+  const { facilitator, api } = services().services;
+  // The wait for lightwalletd, then the start-up checks, the replay of the ledger and a cold compile (as in compose.yaml)
+  assert.ok(seconds(facilitator.healthcheck.start_period) >= limit("docker/wait-lightwalletd.mjs") + 120, facilitator.healthcheck.start_period);
+  // wait-facilitator.mjs, which waits for the facilitator's public name and so for Caddy's certificate
+  assert.ok(seconds(api.healthcheck.start_period) >= limit("docker/wait-facilitator.mjs"), api.healthcheck.start_period);
+  assert.ok(seconds(api.healthcheck.start_period) >= seconds(facilitator.healthcheck.start_period));
+});
+
+/** Runs docker/wait-facilitator.mjs against a server that answers with `statuses` in turn, the last one for ever */
+async function waitAgainst(statuses, args = []) {
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push([req.url, req.headers.authorization]);
+    res.writeHead(statuses[Math.min(seen.length, statuses.length) - 1]).end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const child = spawn(process.execPath, [join(ROOT, "docker/wait-facilitator.mjs"), ...args], {
+    env: { PATH: process.env.PATH, Z402_FACILITATOR_URL: `http://127.0.0.1:${server.address().port}` },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let printed = "";
+  child.stdout.on("data", (d) => (printed += d));
+  child.stderr.on("data", (d) => (printed += d));
+  const code = await new Promise((resolve) => child.on("exit", resolve));
+  await new Promise((resolve) => server.close(resolve));
+  return { code, printed, seen };
+}
+
+test("wait-facilitator: a 502 or 504 from the proxy is not the facilitator answering, a 200 or a refusal is", async () => {
+  // Caddy answers 502 while the facilitator is down and 504 when it does not answer in time; the API must keep waiting
+  const down = await waitAgainst([502, 504, 503, 200]);
+  assert.equal(down.code, 0);
+  assert.equal(down.seen.length, 4, `it stopped after ${down.seen.length} request(s): ${JSON.stringify(down.seen)}`);
+  assert.ok(down.seen.every(([url]) => url === "/supported"));
+  assert.equal(down.printed, "");
+
+  // The regtest stack (compose.yaml): the facilitator answers /supported with 200 to the token it is sent
+  const dir = mkdtempSync(join(tmpdir(), "z402-wait-"));
+  try {
+    const tokenFile = join(dir, "token");
+    writeFileSync(tokenFile, "t-regtest\n");
+    const regtest = await waitAgainst([200], [tokenFile]);
+    assert.equal(regtest.code, 0);
+    assert.deepEqual(regtest.seen, [["/supported", "Bearer t-regtest"]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // A facilitator that refuses the probe has still started
+  assert.equal((await waitAgainst([401])).code, 0);
+  assert.equal((await waitAgainst([404])).code, 0);
+});
+
+test("docs/deploy-vps.md: no AAAA records, jq is installed, the token stays off curl's command line, and the sections vps.sh names exist", () => {
+  const doc = read("docs/deploy-vps.md");
+  assert.match(doc, /\*\*Add no AAAA records\.\*\*/);
+  assert.ok(!/AAAA records only if/.test(doc));
+  assert.match(doc, /apt-get install -y [^\n]*\bjq\b/);
+  assert.ok(!/Authorization: Bearer \$TOKEN/.test(doc), "the registration token is on curl's command line");
+  assert.match(doc, /-K - \\/);
+  // The headings that the script's errors send the reader to, and the swap file that the table sends them to
+  const named = [...read("scripts/vps.sh").matchAll(/\(docs\/deploy-vps\.md, ([A-Za-z ]+)\)/g)];
+  assert.ok(named.length >= 2, "vps.sh no longer names a section of the runbook");
+  for (const [, section] of read("scripts/vps.sh").matchAll(/\(docs\/deploy-vps\.md, ([A-Za-z ]+)\)/g)) {
+    assert.match(doc, new RegExp(`^#{2,3} ${section}$`, "m"), `vps.sh names "${section}", which the runbook does not have`);
+  }
+  assert.ok(!/swap file of the first section/.test(doc));
+  assert.match(doc, /^## What you need$/m);
+  // The recovery does not tell the reader to delete the volume that holds the registry
+  assert.match(doc, /Do not delete the `facilitator-data` volume to do it/);
+  assert.match(doc, /rm -f \/data\/facilitator-ledger\.testnet\.jsonl\*/);
+  // The ledger and the providers directory that restore insists on are the ones the compose file sets
+  const env = services().services.facilitator.environment;
+  assert.equal(env.Z402_LEDGER, `/data/${LEDGER}`);
+  assert.equal(env.Z402_PROVIDERS_DIR, `/data/${PROVIDERS}`);
+  assert.match(doc, /Caddy runs as uid 0/);
 });
 
 test("vps.sh passes shellcheck", { skip: shellcheckMissing }, () => {

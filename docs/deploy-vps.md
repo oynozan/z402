@@ -67,11 +67,13 @@ sudo ufw enable
 
 If your provider has a firewall in front of the server, allow 22, 80 and 443 there too.
 
+### Install Docker
+
 Install Docker Engine from Docker's own repository ([the official page](https://docs.docker.com/engine/install/ubuntu/)
-has the current steps):
+has the current steps). `jq` is in the first line because the checks and the provider steps below use it:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl git openssl
+sudo apt-get update && sudo apt-get install -y ca-certificates curl git jq openssl
 sudo install -m 0755 -d /etc/apt/keyrings
 sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
@@ -125,8 +127,11 @@ scripts/vps.sh up
 ```
 
 `up` checks the settings, builds the images one at a time, runs `docker compose -f compose.vps.yaml --env-file .env.vps
-up -d --build`, and waits (up to 10 minutes, `Z402_WAIT_SECONDS`) until every service reports healthy. If one does not,
-it prints the state and the end of the log of those that do not, and exits 1. The first run downloads the base images,
+up -d --build`, and waits until every service reports healthy. It gives up after 10 minutes for `compose up` and the wait
+together; `Z402_WAIT_SECONDS=1200 scripts/vps.sh up` changes that. `Z402_WAIT_SECONDS` is read from the environment of the
+command only, not from `.env.vps`. If a service is not healthy by then, or `compose up` has not returned, `up` prints the
+state and the end of the log of those that are not, and exits 1. The containers go on starting by themselves meanwhile
+(the facilitator waits up to 10 minutes for the public lightwalletd), so running `up` or `status` again later may succeed. The first run downloads the base images,
 the npm packages and the Rust crates and takes several minutes; later runs reuse what they have. A build that fails on
 the network is run again by running `up` again.
 
@@ -139,8 +144,9 @@ curl -s -o /dev/null -w '%{http_code}\n' https://api.z402.net/chunk    # 402: pa
 curl -s https://z402.net/discovery/resources | jq '.items[].resource'  # the catalog, read from the facilitator
 ```
 
-Open `https://z402.net` and its `/services` page. The facilitator's log shows its start-up checks passing against
-`testnet.zec.rocks` and then one line that names the network and your address, and the number of providers:
+Open `https://z402.net` and its `/services` page. The facilitator checks `testnet.zec.rocks` when it starts and says
+nothing while the checks pass (a check that fails ends it with a message). Once it listens it logs two lines, which name
+the network and your address and count the providers:
 
 ```bash
 scripts/vps.sh logs --no-follow facilitator | grep -E 'listening|providers='
@@ -168,7 +174,8 @@ Z402_EMBEDDINGS_API_KEY=...
 Z402_EMBEDDINGS_MODEL=text-embedding-3-small
 ```
 
-Add the four DNS records (or the wildcard), then run `scripts/vps.sh up`. Each service gets `PUBLIC_URL`
+Add the four DNS records (or the wildcard), then run `scripts/vps.sh up`, which warns when a base URL is not `https://`
+(`http://` to `localhost` or to a compose service is fine; anything else sends the key and every prompt in the clear). Each service gets `PUBLIC_URL`
 `https://<name>.z402.net`, which is the resource URL in its 402s and in the catalog. All four are the operator's own
 provider, paid to the same address with the operator's token (in `compose.yaml` `markdown` is a second provider; here it
 is not). The drop box reads the chain tip from the same lightwalletd.
@@ -183,12 +190,13 @@ The facilitator serves any number of providers (32 by default, `Z402_MAX_PROVIDE
 viewing key and registers once with the registration token, which `init` put in `.env.vps`:
 
 ```bash
-# on the server; the token is read from the file and never shown
-TOKEN=$(sed -n 's/^Z402_REGISTRATION_TOKEN=//p' .env.vps)
-curl -sS -X POST https://facilitator.z402.net/providers \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data @provider.register.json
+# on the server. The token goes from the file to curl as a config line on its standard input, so it is never shown and
+# never on a command line, where `ps` would list it for every user of the machine
+sed -n 's/^Z402_REGISTRATION_TOKEN=\(.*\)$/header = "Authorization: Bearer \1"/p' .env.vps |
+  curl -sS -X POST https://facilitator.z402.net/providers \
+    -K - \
+    -H 'Content-Type: application/json' \
+    --data @provider.register.json
 ```
 
 `provider.register.json` is `{ "payTo": "utest1...", "uivk": "uivktest1...", "network": "zcash:testnet" }`, built from
@@ -238,7 +246,7 @@ The removed key stops working at that start. "Removing a provider" in `packages/
 | `scripts/vps.sh down` | removes the containers and keeps every volume |
 | `scripts/vps.sh update` | `git pull --ff-only`, then `up` from the new copy of the script, which rebuilds the images and recreates the containers whose image or settings changed |
 | `scripts/vps.sh backup` | a `tar.gz` of the facilitator's volume in `.data/backups/` (mode 0600) |
-| `scripts/vps.sh restore <file>` | empties that volume and puts a backup in it. Asks for `yes` |
+| `scripts/vps.sh restore <file>` | replaces that volume with a backup. It refuses a file that is not a facilitator backup (no operator ledger or no providers directory in it), asks for `yes`, stops everything, saves the volume as it is now to `.data/backups/z402-vps-before-restore-*.tar.gz`, and only then replaces it |
 
 **Reboots.** Every service has `restart: unless-stopped`, so the stack comes back with Docker. Nothing waits for
 anything at that moment, and the API and the services wait for the facilitator themselves.
@@ -257,11 +265,13 @@ archive off the server:
 
 ```bash
 scripts/vps.sh backup
+mkdir -p backups                       # on your laptop; scp does not make it
 scp you@server:z402/.data/backups/z402-vps-*.tar.gz ./backups/
 ```
 
 The archive holds every provider's viewing key, so keep it private. The backup reads the volume while the facilitator
-runs; its ledger only grows by appended lines, and a torn last line is dropped when the facilitator replays it. A
+runs; its ledger only grows by appended lines, and a torn last line is dropped when the facilitator replays it. `tar` may
+say that a file changed while it was read: `backup` warns and keeps the archive, which it has checked reads back. A
 restore puts back the state of the backup, so it forgets what happened after it: use it to recover from loss, not to
 roll back. Caddy's certificates (`caddy-data`) are left out; Caddy asks again if they are gone, but Let's Encrypt allows
 only a few new certificates for the same names each week, so do not delete that volume casually.
@@ -305,6 +315,9 @@ settings recreates only the services it touches. A new `.env.vps` value takes ef
   (`DROPBOX_RATE_PER_MIN`, 30 a minute) counts every client as Caddy and is shared by all of them.
 - **`llm` and `embeddings` send their input to the hosted provider.** The operator and the provider both see every
   prompt and every text, so say so wherever you list the services.
+- **Not hardened yet.** Caddy runs as uid 0 inside its container. It keeps only `NET_BIND_SERVICE` (every other
+  capability is dropped) and `no-new-privileges`, and the image is the official one, but a Caddy that runs as an
+  unprivileged user is still to do. No rate limit stands in front of the services either (see above).
 - **Testnet only.** The file runs `Z402_NETWORK=testnet`. A facilitator that trusts a public lightwalletd for whether a
   deposit exists and how deep it is mined is fine for testnet coins and not for real money, where you would run your
   own node (`packages/facilitator/README.md`, `Z402_LWD_URL`).
@@ -337,7 +350,7 @@ removes everything it made.
 | `facilitator` exits at once | `scripts/vps.sh logs --no-follow facilitator` names the variable. Typical: `Z402_REGISTRATION_TOKEN` under 32 characters, or `Z402_PAY_TO` and `Z402_UIVK` that do not match each other |
 | `facilitator` waits for `testnet.zec.rocks` | It is a shared public server and may be down. The facilitator waits up to 10 minutes and tries again on its own |
 | `... is the ledger of ... not of this facilitator` | `.env.vps` holds another account than the ledger was made for. Restore the keys, or start a new operator ledger as below. **Do not delete the `facilitator-data` volume to do it**: the volume holds the provider registry too (every registered provider with its viewing key, its ledger and the catalog), so every provider would have to register again and would get a new API key |
-| a build is "Killed" | Out of memory: add the swap file of the first section and run `up` again |
+| a build is "Killed" | Out of memory: add swap as shown under "What you need" (the `fallocate` lines) and run `up` again |
 
 **A new operator ledger, with the providers kept.** The operator's ledger is the one file `facilitator-ledger.testnet.jsonl`
 on the volume (with its lock files). Deleting it makes the facilitator forget which deposits to the operator's address it

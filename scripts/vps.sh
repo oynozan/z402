@@ -9,6 +9,9 @@
 
 set -euo pipefail
 
+# The directory the command was run from, which a relative path on the command line means; the script itself works from
+# the checkout
+caller_dir=$PWD
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
@@ -27,6 +30,14 @@ die() {
 
 warn() {
   printf 'vps.sh: warning: %s\n' "$*" >&2
+}
+
+# A path from the command line as an absolute one: a relative path is relative to where the caller stood, not to the checkout
+from_caller() {
+  case $1 in
+    /*) printf '%s' "$1" ;;
+    *) printf '%s/%s' "$caller_dir" "$1" ;;
+  esac
 }
 
 usage() {
@@ -256,8 +267,8 @@ cmd_keys() {
   if [ "$source" = - ]; then
     text=$(head -c 8193)
   else
-    [ -f "$source" ] || die "no such file: $source"
-    text=$(head -c 8193 "$source")
+    [ -f "$(from_caller "$source")" ] || die "no such file: $source"
+    text=$(head -c 8193 "$(from_caller "$source")")
   fi
   parse_view "$text"
 
@@ -287,6 +298,31 @@ check_registration_token() {
   fi
 }
 
+# Warns when the hosted provider in NAME is called over plain http:// to a host that is neither this machine nor a service
+# of the compose network: the API key and every prompt would cross the internet unencrypted. Only a warning, since an
+# operator may run a provider of their own on a private network
+check_base_url() {
+  local name=$1 url host
+  url=$(setting "$name")
+  case $url in
+    https://*) return 0 ;;
+    http://*)
+      host=${url#http://}
+      host=${host%%/*}
+      host=${host##*@}
+      case $host in
+        \[*) host=${host%%]*}] ;;
+        *) host=${host%%:*} ;;
+      esac
+      if [ "$host" = localhost ] || [ "$host" = '[::1]' ] || [[ $host =~ ^127(\.[0-9]{1,3}){3}$ ]]; then return 0; fi
+      # A name of one word is a service of the compose network
+      if [ -n "$host" ] && [[ $host != *.* ]] && [[ $host != *:* ]]; then return 0; fi
+      warn "$name is a plain http:// URL to $host, so the API key and every prompt cross the network unencrypted: use an https:// URL"
+      ;;
+    *) warn "$name is not an https:// URL, so the API key and every prompt may cross the network unencrypted" ;;
+  esac
+}
+
 # Refuses to start on a setting that would only fail later
 preflight() {
   local name kind
@@ -310,10 +346,11 @@ preflight() {
   if services_on; then
     for kind in LLM EMBEDDINGS; do
       for name in "Z402_${kind}_BASE_URL" "Z402_${kind}_MODEL"; do
-        [ -n "$(env_get "$name")" ] ||
+        [ -n "$(setting "$name")" ] ||
           die "$name is empty in $env_file: llm and embeddings call a hosted provider, which .env.vps.example shows"
       done
-      [ -n "$(env_get "Z402_${kind}_API_KEY")" ] || warn "Z402_${kind}_API_KEY is empty: the hosted provider is called without a key"
+      check_base_url "Z402_${kind}_BASE_URL"
+      [ -n "$(setting "Z402_${kind}_API_KEY")" ] || warn "Z402_${kind}_API_KEY is empty: the hosted provider is called without a key"
     done
   fi
 }
@@ -526,21 +563,26 @@ cmd_update() {
 ledger_name='facilitator-ledger.testnet.jsonl'
 providers_name='providers.testnet'
 
-# Writes a tar.gz of the facilitator's data volume to $1 and returns 0, or removes it and returns 1. The facilitator's
-# data volume holds the operator's ledger and the providers directory (the registry with every provider's viewing key,
-# their ledgers and the catalog). The archive goes through stdout, so that no host directory is mounted and the file
-# belongs to whoever runs this. A lock file is left out, since it belongs to a process
+# Writes a tar.gz of the facilitator's data volume to $1 and returns 0, or leaves nothing at $1 and returns 1. The
+# facilitator's data volume holds the operator's ledger and the providers directory (the registry with every provider's
+# viewing key, their ledgers and the catalog). The archive goes through stdout, so that no host directory is mounted and
+# the file belongs to whoever runs this. A lock file is left out, since it belongs to a process. It is written beside $1
+# and renamed, so that a backup that fails never replaces a good one
 archive_volume() {
-  local out=$1
-  if ! (umask 077 && compose run --rm -T --no-deps --entrypoint tar facilitator \
-    -czf - --exclude='*.lock' --exclude='*.lock.takeover' -C /data . >"$out"); then
-    rm -f "$out"
+  local out=$1 part="$1.part" status=0
+  (umask 077 && compose run --rm -T --no-deps --entrypoint tar facilitator \
+    -czf - --exclude='*.lock' --exclude='*.lock.takeover' -C /data . >"$part") || status=$?
+  # GNU tar exits 1 when a file changed while it was read, and the facilitator appends to its ledger as it runs: that is a
+  # warning, and the archive is kept if it reads back. 2 and above are fatal. Exit 1 is also what docker says when it
+  # fails, which leaves no readable archive and so is caught by the listing
+  if [ "$status" -ge 2 ] || [ ! -s "$part" ] || ! tar -tzf "$part" >/dev/null 2>&1; then
+    rm -f "$part"
     return 1
   fi
-  if ! tar -tzf "$out" >/dev/null 2>&1; then
-    rm -f "$out"
-    return 1
+  if [ "$status" -eq 1 ]; then
+    warn "tar says a file changed while it was read (the facilitator is running). The archive reads back whole and is kept; the ledger only grows, and the facilitator drops a torn last line when it replays it"
   fi
+  mv "$part" "$out"
 }
 
 cmd_backup() {
@@ -550,7 +592,7 @@ cmd_backup() {
   mkdir -p "$backup_dir"
   chmod 700 "$backup_dir"
   out="$backup_dir/z402-vps-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
-  archive_volume "$out" || die "the backup failed or is not a readable archive (the output above says why)"
+  archive_volume "$out" || die "the backup failed (the output above says why)"
   entries=$(tar -tzf "$out" | grep -c -v '/$' || true)
   [ "$entries" -gt 0 ] || warn "the archive holds no file yet: the facilitator has not written its ledger"
   printf 'Backup: %s (%s bytes, %s files)\n' "$out" "$(wc -c <"$out" | tr -d ' ')" "$entries"
@@ -592,7 +634,8 @@ EOF
 cmd_restore() {
   local file=${1:-} answer safety
   [ $# -eq 1 ] || die "usage: scripts/vps.sh restore <backup file>"
-  [ -f "$file" ] || die "no such file: $file"
+  [ -f "$(from_caller "$file")" ] || die "no such file: $file"
+  file=$(from_caller "$file")
   check_archive "$file"
   need_docker
   need_env
