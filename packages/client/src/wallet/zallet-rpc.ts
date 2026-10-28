@@ -5,6 +5,10 @@ import { DepositStatusUnknownError, ZalletRpcError } from "../errors.js";
 const ZAT_PER_ZEC = 100_000_000n;
 const INSUFFICIENT_RE = /insufficient/i;
 const CONNECT_FAILURES: ReadonlySet<unknown> = new Set(["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH"]);
+const DIVERSIFIER_REUSE_CODE = -4;
+const DIVERSIFIER_REUSE_RE = /already generated with different receiver types/;
+const FIRST_AGENT_DIVERSIFIER = 1;
+const LAST_AGENT_DIVERSIFIER = 16;
 
 export interface ZalletRpcWalletOptions {
   /** Zallet JSON-RPC endpoint, the regtest default is on port 50232 */
@@ -13,7 +17,7 @@ export interface ZalletRpcWalletOptions {
   password: string;
   /** Account uuid, defaults to the first entry of z_listaccounts */
   account?: string;
-  /** Sending unified address, defaults to the account's Orchard-only address at diversifier index 1 */
+  /** Sending unified address, defaults to the account's Orchard-only address at the lowest diversifier index >= 1 that accepts one */
   fromAddress?: string;
   clock?: Pick<Clock, "now" | "sleep">;
   /** Gap between z_getoperationresult polls, default 250 */
@@ -77,6 +81,11 @@ function isConnectFailure(e: unknown): boolean {
   if (!isRecord(cause)) return false;
   const codes = Array.isArray(cause.errors) && cause.errors.length > 0 ? cause.errors.map((x: unknown) => (isRecord(x) ? x.code : undefined)) : [cause.code];
   return codes.every((code) => CONNECT_FAILURES.has(code));
+}
+
+/** Zallet's DiversifierIndexReuse, JSON-RPC code -4 with a message that #call carries over into the error message */
+function isDiversifierReuse(e: unknown): boolean {
+  return e instanceof ZalletRpcError && e.code === DIVERSIFIER_REUSE_CODE && DIVERSIFIER_REUSE_RE.test(e.message);
 }
 
 function zatOf(v: unknown, what: string): bigint {
@@ -328,11 +337,22 @@ export class ZalletRpcWallet implements ZcashWallet {
 
   async #lookupFromAddress(): Promise<string> {
     const account = await this.#accountUuid();
-    // Index 0 is a mixed-receiver address on Z3 and refuses an Orchard-only request
-    const result = await this.#call("z_getaddressforaccount", [account, ["orchard"], 1]);
-    const address = isRecord(result) ? result.address : undefined;
-    if (typeof address !== "string" || address === "") throw new ZalletRpcError("z_getaddressforaccount returned no address");
-    return address;
+    // The default address takes the first Sapling-valid index, which varies by seed and refuses an Orchard-only request
+    for (let index = FIRST_AGENT_DIVERSIFIER; index <= LAST_AGENT_DIVERSIFIER; index++) {
+      let result: unknown;
+      try {
+        result = await this.#call("z_getaddressforaccount", [account, ["orchard"], index]);
+      } catch (e) {
+        if (isDiversifierReuse(e)) continue;
+        throw e;
+      }
+      const address = isRecord(result) ? result.address : undefined;
+      if (typeof address !== "string" || address === "") throw new ZalletRpcError("z_getaddressforaccount returned no address");
+      return address;
+    }
+    throw new ZalletRpcError(
+      `Zallet has no Orchard-only address at diversifier indices ${FIRST_AGENT_DIVERSIFIER} to ${LAST_AGENT_DIVERSIFIER}, pass fromAddress`,
+    );
   }
 
   async #call(method: string, params: unknown[]): Promise<unknown> {

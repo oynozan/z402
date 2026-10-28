@@ -67,7 +67,9 @@
    recipient is still unverified.
 7. Account 0's diversifier index 0 already holds a p2pkh+sapling+orchard UA, so an Orchard-only
    UA at index 0 is refused (`-4 Error: address at diversifier index 0 was already generated
-   with different receiver types.`). `AGENT_UA` uses index 1, which is stable across calls.
+   with different receiver types.`). `AGENT_UA` uses index 1, which is stable across calls. The
+   default address takes the first Sapling-valid index, which varies by seed, so the agent address
+   now uses the lowest index ≥ 1 that accepts an Orchard-only address.
 8. Shielded coinbase lands in the **ironwood** pool, as predicted. `z_shieldcoinbase` with
    `limit 10` took 10 UTXOs and left 1 mature one (`remainingUTXOs: 1`).
 9. Zebra 6.2.3 has `generatetoaddress`; 110 blocks took 11–17 s. `generate` pays the

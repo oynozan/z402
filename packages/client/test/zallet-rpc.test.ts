@@ -730,6 +730,84 @@ describe("ZalletRpcWallet", () => {
       expect(fake.calls("z_getbalanceforaccount")[0]!.params).toEqual([ACCOUNT, 1]);
     });
 
+    describe("agent address diversifier index", () => {
+      const reuse = (index: number): Reply => ({
+        error: { code: -4, message: `Error: address at diversifier index ${index} was already generated with different receiver types.` },
+      });
+      const UA_2 = "uregtest1" + "2".repeat(60);
+      const accepted = (index: number, address: string): Reply => ({
+        result: { account_uuid: ACCOUNT, diversifier_index: index, receiver_types: ["orchard"], address },
+      });
+      const indices = (): unknown[] => fake.calls("z_getaddressforaccount").map((c) => (c.params as unknown[])[2]);
+
+      it("uses index 1 with one call when it accepts an Orchard-only address", async () => {
+        fake.on("z_getoperationresult", { result: [opSuccess(txid(7))] });
+
+        await send(make({ account: undefined, fromAddress: undefined }));
+
+        expect(indices()).toEqual([1]);
+        expect((fake.calls("z_sendmany")[0]!.params as unknown[])[0]).toBe(AGENT_UA);
+      });
+
+      it("moves to index 2 when index 1 already holds an address with other receivers", async () => {
+        fake.on("z_getaddressforaccount", (params) => ((params as unknown[])[2] === 1 ? reuse(1) : accepted(2, UA_2)));
+        fake.on("z_getoperationresult", { result: [opSuccess(txid(7))] });
+        const wallet = make({ account: undefined, fromAddress: undefined });
+
+        await send(wallet);
+        await send(wallet);
+
+        expect(fake.calls("z_getaddressforaccount").map((c) => c.params)).toEqual([
+          [ACCOUNT, ["orchard"], 1],
+          [ACCOUNT, ["orchard"], 2],
+        ]);
+        expect((fake.calls("z_sendmany")[0]!.params as unknown[])[0]).toBe(UA_2);
+        expect((fake.calls("z_sendmany")[1]!.params as unknown[])[0]).toBe(UA_2);
+      });
+
+      it("stops at once on any other -4 error", async () => {
+        fake.on("z_getaddressforaccount", { error: { code: -4, message: "Error: cannot generate an address with a Sapling receiver" } });
+
+        const failure = send(make({ account: undefined, fromAddress: undefined }));
+
+        await expect(failure).rejects.toBeInstanceOf(ZalletRpcError);
+        await expect(failure).rejects.toMatchObject({ code: -4 });
+        expect(indices()).toEqual([1]);
+      });
+
+      it("stops at once on a non -4 code even when the message mentions reuse", async () => {
+        fake.on("z_getaddressforaccount", {
+          error: { code: -1, message: "Error: address at diversifier index 1 was already generated with different receiver types." },
+        });
+
+        await expect(send(make({ account: undefined, fromAddress: undefined }))).rejects.toMatchObject({ code: -1 });
+        expect(indices()).toEqual([1]);
+      });
+
+      it("fails with a clear ZalletRpcError after 16 indices that all hold other receivers", async () => {
+        fake.on("z_getaddressforaccount", (params) => reuse((params as unknown[])[2] as number));
+
+        const failure = send(make({ account: undefined, fromAddress: undefined }));
+
+        await expect(failure).rejects.toBeInstanceOf(ZalletRpcError);
+        await expect(failure).rejects.toThrow(/no Orchard-only address.*1.*16/);
+        expect(indices()).toEqual(Array.from({ length: 16 }, (_, i) => i + 1));
+      });
+
+      it("finds an address on the 16th index", async () => {
+        fake.on("z_getaddressforaccount", (params) => {
+          const index = (params as unknown[])[2] as number;
+          return index < 16 ? reuse(index) : accepted(16, UA_2);
+        });
+        fake.on("z_getoperationresult", { result: [opSuccess(txid(7))] });
+
+        await send(make({ account: undefined, fromAddress: undefined }));
+
+        expect(fake.calls("z_getaddressforaccount")).toHaveLength(16);
+        expect((fake.calls("z_sendmany")[0]!.params as unknown[])[0]).toBe(UA_2);
+      });
+    });
+
     it("reads the account from uuid when account_uuid is absent", async () => {
       fake.on("z_listaccounts", { result: [{ uuid: "11111111-2222-3333-4444-555555555555" }, { uuid: "other" }] });
       fake.on("z_getbalanceforaccount", { result: { pools: {} } });
