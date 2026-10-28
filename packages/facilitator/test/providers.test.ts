@@ -821,6 +821,77 @@ describe("POST /providers", () => {
     });
   });
 
+  describe("with registrationEnabled false", () => {
+    const closed = { registrationEnabled: false };
+
+    test("is a 403 registration_disabled for every request, and asks for no proof and stores nothing", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, closed);
+      const res = await register(url, A);
+
+      expect(res).toMatchObject({ status: 403, json: { error: "registration_disabled", message: expect.any(String) } });
+      expect(res.json.message).toMatch(/closed/);
+      expect(res.json.message).not.toMatch(/providers directory/);
+      expect(rig.owns).not.toHaveBeenCalled();
+      expect(existsSync(join(rig.providers, "registry.json"))).toBe(false);
+      expect(readdirSync(join(rig.providers, "ledgers"))).toEqual([]);
+    });
+
+    test("answers before it reads the body or the token, so a bad one is no 400 and no 401", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, { ...closed, registrationToken: REGISTRATION });
+      for (const init of [
+        { raw: "{ not json" },
+        { token: "wrong" },
+        { token: REGISTRATION },
+        { raw: "" },
+        { body: { payTo: "nope" } },
+      ] as Init[]) {
+        const res = await call(url, "/providers", { method: "POST", ...init });
+        expect(res).toMatchObject({ status: 403, json: { error: "registration_disabled" } });
+        expect(res.headers.get("www-authenticate")).toBeNull();
+      }
+      expect(rig.owns).not.toHaveBeenCalled();
+    });
+
+    test("leaves the operator serving", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, closed);
+      expect((await call(url, "/providers/me", { token: TOKEN })).json.providerId).toBe(ID_OPERATOR);
+      expect((await call(url, "/supported")).status).toBe(200);
+      expect((await call(url, "/discovery/resources")).status).toBe(200);
+    });
+
+    test("keeps serving the providers that registered before, and refuses their rotation like the rest", async () => {
+      const rig = newRig();
+      const first = await boot(rig);
+      const key = await enroll(first.url, A);
+      await first.close();
+
+      const again = await boot(rig, {}, closed);
+      expect(again.providerCount()).toBe(1);
+      expect((await call(again.url, "/providers/me", { token: key })).json.providerId).toBe(ID_A);
+      expect(await register(again.url, A)).toMatchObject({ status: 403, json: { error: "registration_disabled" } });
+      expect(await register(again.url, B)).toMatchObject({ status: 403, json: { error: "registration_disabled" } });
+      expect((await call(again.url, "/providers/me", { token: key })).status).toBe(200);
+      expect(again.providerCount()).toBe(1);
+    });
+
+    test("is the default of true: registration is open when the option is true or left out", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, { registrationEnabled: true });
+      expect((await register(url, A)).status).toBe(201);
+    });
+
+    test("does not change the 403 of a facilitator with no providers directory", async () => {
+      const rig = newRig();
+      const { url } = await boot(rig, {}, null);
+      const res = await register(url, A);
+      expect(res).toMatchObject({ status: 403, json: { error: "registration_disabled" } });
+      expect(res.json.message).toMatch(/providers directory/);
+    });
+  });
+
   describe("when it fails midway", () => {
     test("a registry that cannot be written leaves no provider, no lock and no key, and a retry succeeds", async () => {
       const rig = newRig();
@@ -1270,6 +1341,8 @@ describe("start-up", () => {
     ["providers.registrationToken", { registrationToken: "" }],
     ["providers.registrationToken", { registrationToken: "two words" }],
     ["providers.registrationToken", { registrationToken: "s3cret\n" }],
+    ["providers.registrationEnabled", { registrationEnabled: "no" }],
+    ["providers.registrationEnabled", { registrationEnabled: 0 }],
     ["providers.chainFor", { chainFor: undefined }],
     ["providers.owns", { owns: undefined }],
   ] as Array<[string, Record<string, unknown>]>)(

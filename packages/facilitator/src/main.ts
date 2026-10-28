@@ -70,6 +70,7 @@ async function main(): Promise<void> {
           }),
         max: config.maxProviders,
         registrationToken: config.registrationToken,
+        registrationEnabled: config.registrationEnabled,
       },
       host: config.host,
       port: config.port,

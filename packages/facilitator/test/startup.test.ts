@@ -454,7 +454,12 @@ process.stdin.on("end", () => {
     describe("with providers", () => {
       const PROVIDER = { payTo: `u1${"p".repeat(60)}`, uivk: `uivk1${"p".repeat(100)}` };
       const PROVIDER_KEY = `z402_${"K".repeat(43)}`;
-      const REGISTRATION = "main-registration-token";
+      const REGISTRATION = "main-registration-token-0123456789abcdef";
+      const OPEN_WARNING =
+        "facilitator: warning: POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token";
+      const CLOSED_WARNING =
+        "facilitator: warning: POST /providers answers 403 registration_disabled on mainnet: " +
+        "set Z402_REGISTRATION_TOKEN to require a token, or Z402_REGISTRATION_OPEN=1 to let anyone register";
 
       /** A providers directory that an earlier start left, holding PROVIDER under PROVIDER_KEY */
       function registered(): string {
@@ -527,7 +532,7 @@ process.stdin.on("end", () => {
         const refusal = { error: "not a mainnet unified full viewing key (malformed encoding)" };
         reply(KAGE_REPORT, OWNS, { [PROVIDER.uivk]: { $exit: 2, $stdout: refusal } });
         const dir = join(scratch, `providers-${Math.random().toString(36).slice(2)}`);
-        const { child, out, exited } = launch(configured({ Z402_PROVIDERS_DIR: dir }));
+        const { child, out, exited } = launch(configured({ Z402_PROVIDERS_DIR: dir, Z402_REGISTRATION_OPEN: "1" }));
         try {
           await until(() => out.stdout.split("\n").length > 2, "the ready line and the provider count");
           const url = /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(out.stdout)?.[1] ?? "";
@@ -545,6 +550,8 @@ process.stdin.on("end", () => {
         }
         expect(existsSync(join(dir, "registry.json"))).toBe(false);
         expect(out.stderr.includes("registration failed")).toBe(false);
+        // Opened on mainnet by the opt-in, registration still warns, once
+        expect(out.stderr.split("\n").filter((line) => line === OPEN_WARNING)).toHaveLength(1);
         for (const text of [out.stdout, out.stderr]) expect(text.includes(PROVIDER.uivk)).toBe(false);
       });
 
@@ -593,6 +600,79 @@ process.stdin.on("end", () => {
         expect(out.stderr).toContain(
           `facilitator: registered provider ${providerId("zcash:mainnet", PROVIDER.payTo)} payTo=${PROVIDER.payTo}`,
         );
+        expect(out.stderr).not.toContain(OPEN_WARNING);
+        expect(out.stderr).not.toContain(CLOSED_WARNING);
+      });
+
+      test(
+        "on mainnet with no token and no opt-in serves the operator and refuses registration, saying why",
+        { timeout: 30_000 },
+        async () => {
+          reply(KAGE_REPORT);
+          const dir = join(scratch, `providers-${Math.random().toString(36).slice(2)}`);
+          const { child, out, exited } = launch(configured({ Z402_PROVIDERS_DIR: dir }));
+          try {
+            await until(() => out.stdout.split("\n").length > 2, "the ready line and the provider count");
+            expect(out.stdout.split("\n")[1]).toBe("facilitator providers=0");
+            const url = /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(out.stdout)?.[1] ?? "";
+            const post = (headers: Record<string, string> = {}) =>
+              fetch(`${url}/providers`, {
+                method: "POST",
+                headers: { "content-type": "application/json", ...headers },
+                body: JSON.stringify({ payTo: PROVIDER.payTo, uivk: PROVIDER.uivk }),
+              });
+
+            for (const res of [await post(), await post({ authorization: `Bearer ${TOKEN}` })]) {
+              expect(res.status).toBe(403);
+              expect(await res.json()).toMatchObject({ error: "registration_disabled" });
+            }
+            const me = await fetch(`${url}/providers/me`, { headers: { authorization: `Bearer ${TOKEN}` } });
+            expect(me.status).toBe(200);
+            expect((await fetch(`${url}/supported`)).status).toBe(200);
+
+            child.kill("SIGINT");
+            expect(await exited).toBe(0);
+          } finally {
+            child.kill("SIGKILL");
+          }
+          expect(existsSync(join(dir, "registry.json"))).toBe(false);
+          expect(out.stderr.split("\n")).toContain(CLOSED_WARNING);
+          expect(out.stderr).not.toContain(OPEN_WARNING);
+          expect(out.stderr).not.toContain("registered provider");
+        },
+      );
+
+      test(
+        "on mainnet keeps serving a provider registered earlier while registration is off",
+        { timeout: 30_000 },
+        async () => {
+          reply(KAGE_REPORT);
+          const dir = registered();
+          const { child, out, exited } = launch(configured({ Z402_PROVIDERS_DIR: dir }));
+          try {
+            await until(() => out.stdout.split("\n").length > 2, "the ready line and the provider count");
+            expect(out.stdout.split("\n")[1]).toBe("facilitator providers=1");
+            const url = /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(out.stdout)?.[1] ?? "";
+            const me = await fetch(`${url}/providers/me`, { headers: { authorization: `Bearer ${PROVIDER_KEY}` } });
+            expect(me.status).toBe(200);
+            child.kill("SIGINT");
+            expect(await exited).toBe(0);
+          } finally {
+            child.kill("SIGKILL");
+          }
+          expect(out.stderr.split("\n")).toContain(CLOSED_WARNING);
+        },
+      );
+
+      test.each([
+        ["a registration token of 31 characters", { Z402_REGISTRATION_TOKEN: "r".repeat(31) }, "TOKEN"],
+        ["a registration opt-in that is not 1", { Z402_REGISTRATION_OPEN: "yes" }, "OPEN"],
+      ])("%s exits 1 naming the variable, before anything starts", { timeout: 30_000 }, async (_what, over, suffix) => {
+        const { out, exited } = launch(configured(over));
+        expect(await exited).toBe(1);
+        expect(out.stdout).toBe("");
+        expect(out.stderr).toMatch(new RegExp(`^facilitator: Z402_REGISTRATION_${suffix}: `));
+        expect(out.stderr).not.toContain("r".repeat(31));
       });
     });
   });

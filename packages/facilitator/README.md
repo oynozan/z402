@@ -47,7 +47,7 @@ facilitator listening on http://127.0.0.1:4022 network=zcash:regtest payTo=uregt
 facilitator providers=0
 ```
 
-Everything else the process prints goes to stderr: one line per request (`GET /supported 200`, or `POST /verify 200 <providerId>` for a request that carried a provider's key) and the diagnostics. Neither stream carries a key, the token or a viewing key, and a request line never has a query string. The keys file of this example holds no seed, so the facilitator prints no warning about it. Pointed at the full `.secrets/merchant-regtest.json` instead, it first prints a `facilitator: warning: Z402_MERCHANT_KEYS_FILE: ...` line on stderr that says the file holds the spending seed. On regtest that is tolerated, and mainnet refuses such a file. `scripts/demo.sh up` passes the full file for now, so the log of its facilitator has that warning.
+Everything else the process prints goes to stderr: one line per request (`GET /supported 200`, or `POST /verify 200 <providerId>` for a request that carried a provider's key) and the diagnostics. Neither stream carries a key, the token or a viewing key, and a request line never has a query string. The keys file of this example holds no seed, so the facilitator prints no warning about it. It does print `facilitator: warning: POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token`, since this run sets no registration token, which is fine on a regtest that only this machine reaches. Pointed at the full `.secrets/merchant-regtest.json` instead, it first prints a `facilitator: warning: Z402_MERCHANT_KEYS_FILE: ...` line on stderr that says the file holds the spending seed. On regtest that is tolerated, and mainnet refuses such a file. `scripts/demo.sh up` passes the full file for now, so the log of its facilitator has that warning.
 
 Terminal 3, the API (`apps/api/README.md`), which reads the same token from the same file.
 
@@ -79,7 +79,7 @@ pnpm --filter @z402/facilitator start
 
 ## Environment
 
-An empty variable counts as unset. A path that is not absolute is relative to the repository root, whatever directory `pnpm` runs the package from. A problem is printed as one `facilitator: ...` line on stderr, and the process exits 1. A setting that works but puts something at risk is printed as a `facilitator: warning: ...` line on stderr before the start-up checks, and the start goes on. Those are the four warnings of the configuration: a keys file that holds the seed or the full viewing key (off mainnet), a mainnet `Z402_LWD_URL` host that is not loopback, a `Z402_FACILITATOR_HOST` that is not loopback, and a `Z402_PRICE_ZAT` that is set. Two warnings print later, during the checks and with no `facilitator:` prefix: `warning: Z402_EXPECTED_BRANCH_ID is not set, so the consensus branch of lightwalletd is not checked` (mainnet, check 4), and `ledger <ledger>: dropped a truncated last line (line <n>)` (check 5). The line names the variable at fault, the start-up check that failed, or, for the ledger, the port and the host, the option (`ledgerPath:`, `port:` and `host:`) rather than the variable. No message quotes the keys file, the viewing key or the token.
+An empty variable counts as unset. A path that is not absolute is relative to the repository root, whatever directory `pnpm` runs the package from. A problem is printed as one `facilitator: ...` line on stderr, and the process exits 1. A setting that works but puts something at risk is printed as a `facilitator: warning: ...` line on stderr before the start-up checks, and the start goes on. Those are the five warnings of the configuration: a keys file that holds the seed or the full viewing key (off mainnet), a mainnet `Z402_LWD_URL` host that is not loopback, a `Z402_FACILITATOR_HOST` that is not loopback, a `Z402_PRICE_ZAT` that is set, and a `POST /providers` that anyone may call, or that mainnet has switched off (see `Z402_REGISTRATION_TOKEN` below). Two warnings print later, during the checks and with no `facilitator:` prefix: `warning: Z402_EXPECTED_BRANCH_ID is not set, so the consensus branch of lightwalletd is not checked` (mainnet, check 4), and `ledger <ledger>: dropped a truncated last line (line <n>)` (check 5). The line names the variable at fault, the start-up check that failed, or, for the ledger, the port and the host, the option (`ledgerPath:`, `port:` and `host:`) rather than the variable. No message quotes the keys file, the viewing key or the token.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -93,8 +93,9 @@ An empty variable counts as unset. A path that is not absolute is relative to th
 | `Z402_ZDECRYPT_BIN` | `crates/zdecrypt/target/release/zdecrypt` | The decryptor. `pnpm --filter @z402/facilitator build:native` builds the default. |
 | `Z402_LEDGER` | `.data/facilitator-ledger.<network>.jsonl` | The operator's append-only JSON Lines ledger, replayed at start. One facilitator at a time writes it, through `<ledger>.lock` (see [The ledger and its lock](#the-ledger-and-its-lock)). |
 | `Z402_PROVIDERS_DIR` | `.data/providers.<network>` | Where the registered providers live: their registry, their ledgers and the Bazaar's catalog (see [The providers directory](#the-providers-directory)). It is made with mode 0700 if it does not exist. A container needs it on a volume that the process can write. |
-| `Z402_MAX_PROVIDERS` | `32` | How many providers can register, the operator not counted. A whole number from 0 to 1000, else `Z402_MAX_PROVIDERS: expected a whole number from 0 to 1000`. With 0 no new provider can register (`provider_limit`), and a registered one can still rotate its key. |
-| `Z402_REGISTRATION_TOKEN` | none | The bearer token that `POST /providers` needs. An empty variable counts as unset, and then anyone who can reach the port may register. The same token rule as `Z402_FACILITATOR_TOKEN`, refused at start with `Z402_REGISTRATION_TOKEN: must be one token of letters, digits and -._~+/ (no spaces or control characters)`. The operator's token and a provider's key are not registration tokens. |
+| `Z402_MAX_PROVIDERS` | `32` | How many providers can register, the operator not counted. A whole number from 0 to 1000, else `Z402_MAX_PROVIDERS: expected a whole number from 0 to 1000`. With 0 no new provider can register (`provider_limit`), and a registered one can still rotate its key. Registration with 0 is not open, so the warnings about it below do not apply. |
+| `Z402_REGISTRATION_TOKEN` | none | The bearer token that `POST /providers` needs, at least 32 characters, for example `openssl rand -hex 32`. A shorter one is refused at start with `Z402_REGISTRATION_TOKEN: must be at least 32 characters, for example the output of openssl rand -hex 32`, and the same token rule as `Z402_FACILITATOR_TOKEN` applies first (`Z402_REGISTRATION_TOKEN: must be one token of letters, digits and -._~+/ (no spaces or control characters)`). An empty variable counts as unset, and then registration is open to anyone who can reach the port, unless this is mainnet (next row). Open registration prints `facilitator: warning: POST /providers is open to anyone: set Z402_REGISTRATION_TOKEN to require a token` at every start, since anyone can then take the provider slots and list resources on the site. The operator's token and a provider's key are not registration tokens. |
+| `Z402_REGISTRATION_OPEN` | unset | `1` or unset (an empty variable counts as unset), else `Z402_REGISTRATION_OPEN: expected 1, or leave it unset`. Only mainnet looks at it. On regtest and testnet registration with no token is open (with the warning above). On mainnet it is off unless this is `1`: with no token and no `Z402_REGISTRATION_OPEN=1` the facilitator still starts, serves the operator and the providers already registered, answers `POST /providers` with `403 registration_disabled`, and prints `facilitator: warning: POST /providers answers 403 registration_disabled on mainnet: set Z402_REGISTRATION_TOKEN to require a token, or Z402_REGISTRATION_OPEN=1 to let anyone register`. With `1` and no token mainnet is open like the other networks, with the warning about open registration. A token always gates registration, so `1` beside a token changes nothing. |
 | `Z402_FACILITATOR_HOST` | `127.0.0.1` | The address to listen on. Keep it on loopback, since the only protection is the keys and tokens. Any other address gives the warning `Z402_FACILITATOR_HOST: <host> is not a loopback host, so the facilitator and its bearer token are reachable over plain http`. The value is matched as written: only `localhost` (in any letter case), `::1` or `[::1]`, and `127.` followed by three dot-separated groups of one to three digits count as loopback. Other spellings of a loopback address, such as `127.1`, `localhost.`, `0:0:0:0:0:0:0:1` or `::ffff:127.0.0.1`, also get the warning. |
 | `Z402_FACILITATOR_PORT` | `4022` | 0 to 65535, where 0 picks a free port. |
 | `Z402_PRICE_ZAT` | none | Ignored since protocol v2.0, because each provider prices its own routes. Set to anything, it only prints the warning `facilitator: warning: Z402_PRICE_ZAT is ignored: each provider prices its own routes` once, and its value is never read or checked. An empty variable counts as unset. |
@@ -140,7 +141,7 @@ The `Z402_PAY_TO` and `Z402_UIVK` of the environment, or of the keys file, are a
 | Route | Key | Answer |
 | --- | --- | --- |
 | `GET /supported` | none. A key that is presented and names no provider is refused with 401 | The rail's terms and no `payTo`: `{ "kinds": [{ "x402Version": 2, "scheme": "prepaid-voucher", "network": "zcash:regtest", "extra": { "windowZat", "creditRatioBps", "creditCapZat", "zeroConfMinExpiryBlocks", "termsVersion" } }], "extensions": ["bazaar"], "signers": { "zcash:*": [] } }`. The operator's runtime answers, and every runtime advertises the same `extra`. |
-| `POST /providers` | none, or `Authorization: Bearer <Z402_REGISTRATION_TOKEN>` when that is set | Registers a provider, or rotates its key (next section) |
+| `POST /providers` | none, or `Authorization: Bearer <Z402_REGISTRATION_TOKEN>` when that is set. On mainnet with no token and no `Z402_REGISTRATION_OPEN=1` the route answers 403 `registration_disabled` to everyone | Registers a provider, or rotates its key (next section) |
 | `GET /providers/me` | a provider's API key | `{ "providerId", "network", "payTo" }`. A resource server calls it at start to prove that its key and its configured `payTo` belong together (`checkProvider` of `@z402/server`) |
 | `POST /verify`, `POST /settle` | a provider's API key | The answers of `docs/spec/protocol.md` section 7, with HTTP 200 whatever happens to the payment |
 | `POST /discovery/resources` | a provider's API key | The provider declares its resources to the Bazaar: `200 { "x402Version": 2, "items": [...] }`, or 400 `invalid_request` with the `index` of the item at fault |
@@ -194,12 +195,29 @@ Refusals all have the body `{ "error": "<code>", "message": "<text>" }`:
 | 401 | `unauthorized` | A registration token is set and was not presented |
 | 403 | `not_owner` | The viewing key does not own the `payTo`, or the `payTo` has a transparent receiver |
 | 403 | `provider_limit` | `Z402_MAX_PROVIDERS` is reached, and a new `payTo` is not taken |
-| 403 | `registration_disabled` | The facilitator has no providers directory, as in tests that embed it |
+| 403 | `registration_disabled` | The facilitator has no providers directory, as in tests that embed it, or it runs on mainnet with no registration token and no `Z402_REGISTRATION_OPEN=1` (`registration is closed on this facilitator`). Nothing else is checked, and the body is not read |
 | 409 | `operator` | The `payTo` is the operator's |
 
 A failure of the facilitator's own is `500 { "error": "internal_error" }` and nothing else, with the cause in the log.
 
-With `Z402_REGISTRATION_TOKEN` unset, anyone who can reach the port may register, take the provider slots (a runtime each) and list resources on the site. Before outside providers connect over the internet, put the facilitator behind TLS and set the token.
+With `Z402_REGISTRATION_TOKEN` unset, anyone who can reach the port may register, take the provider slots (a runtime each) and list resources on the site, and every start says so with a warning. That is the default on regtest and testnet. On mainnet registration is off until the operator sets the token or `Z402_REGISTRATION_OPEN=1`. Before outside providers connect over the internet, put the facilitator behind TLS and set the token.
+
+### Removing a provider
+
+Nothing removes a provider while the facilitator runs: there is no deregistration, and an idle provider keeps its slot (`Z402_MAX_PROVIDERS` counts it). To free the slot or to drop an abusive provider, edit the files by hand:
+
+1. Stop the facilitator, so that the registry is unlocked.
+2. Remove the entry from `registry.json` in the providers directory. Keep `ledgers/<providerId>.jsonl`, so that the deposits it consumed stay consumed if the same `payTo` ever registers again.
+3. Optionally delete `discovery.json`, which the heartbeats rebuild. The items of the removed provider otherwise stay in the catalog until a start finds them untouched for 7 days. Deleting the file also restarts every `paidCallsToday`, and a provider that declared can be listed from its payments again until its next declaration.
+4. Start the facilitator again.
+
+The removed provider's key stops working at that start, since the facilitator knows only the keys of the entries in `registry.json`. The `id` of an entry is its `providerId`, and its `payTo` tells whose it is. To remove one entry and keep the file private:
+
+```bash
+cd .data/providers.mainnet   # Z402_PROVIDERS_DIR
+(umask 077; jq --arg id <providerId> '.providers |= map(select(.id != $id))' registry.json > registry.json.new) \
+  && mv registry.json.new registry.json
+```
 
 ### The providers directory
 
@@ -253,7 +271,7 @@ The process builds its options from the variables above. The tests and `apps/e2e
 | `ledgerPath` | not blank, or left out for an in-memory ledger that takes no lock and writes no file | none |
 | `authToken` | one token of letters, digits and `-._~+/` that may end in any number of `=`, or left out to check no token | none |
 | `priceZat` | ignored since protocol v2.0, because each provider prices its own routes, and not checked either | none |
-| `providers` | `{ dir, chainFor, owns, max?, registrationToken? }`: `dir` not blank, `chainFor` and `owns` functions, `max` a whole number from 0 to 1000, `registrationToken` one token as `authToken`. A bad field is refused as `providers.<field>: ...` | none, and `POST /providers` answers 403 `registration_disabled` |
+| `providers` | `{ dir, chainFor, owns, max?, registrationToken?, registrationEnabled? }`: `dir` not blank, `chainFor` and `owns` functions, `max` a whole number from 0 to 1000, `registrationToken` one token as `authToken`, `registrationEnabled` true or false (false answers `POST /providers` with 403 `registration_disabled` and the registered providers keep serving). A bad field is refused as `providers.<field>: ...` | none, and `POST /providers` answers 403 `registration_disabled` |
 
 A host that the machine does not have fails when it listens, as `host: cannot listen on <host>:<port> (<code>)`. A port that is busy fails as `port: cannot listen on <host>:<port> (EADDRINUSE)`, and a port that you may not bind (a port below 1024 without root, for one) fails as `port: cannot listen on <host>:<port> (EACCES)`.
 
