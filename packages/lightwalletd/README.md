@@ -1,0 +1,24 @@
+# @z402/lightwalletd
+
+A gRPC client for lightwalletd-compatible nodes (lightwalletd, Zaino, Zebra's built-in gRPC). `createLightwalletdClient` reads the chain tip (`getTip`), a raw transaction with its location (`getTransaction`) and the node's info (`getLightdInfo`). The Zcash developers' MIT-licensed `.proto` files ship in `proto/` with their own LICENSE.
+
+```bash
+pnpm add @z402/lightwalletd
+```
+
+`@z402/client` does not depend on this package: its `LightwalletdTxStatus` accepts any object with `getTip()` and `getTransaction(txid)`, such as this client. A paying agent uses it as the deposit-status source:
+
+```ts
+import { LightwalletdTxStatus } from "@z402/client";
+import { createLightwalletdClient } from "@z402/lightwalletd";
+
+const lightwalletd = createLightwalletdClient({ url: "http://127.0.0.1:28137" }); // https:// uses TLS
+const chain = new LightwalletdTxStatus(lightwalletd); // pass it to PrepaidVoucherScheme as `chain`
+```
+
+Call `lightwalletd.close()` when you are done. The node learns your IP address and the txids you ask about, so use one you trust.
+
+- Documentation: https://z402.net/docs (guide: https://z402.net/docs/guides/pay-from-an-agent)
+- Source and issues: https://github.com/oynozan/z402
+
+MIT licensed.

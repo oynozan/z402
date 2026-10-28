@@ -1,12 +1,47 @@
 {
   "name": "@z402/lightwalletd",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "A gRPC client for lightwalletd-compatible nodes (lightwalletd, Zaino, Zebra): chain tip, raw transactions and node info, for the z402 client's deposit-status source",
+  "keywords": [
+    "x402",
+    "zcash",
+    "shielded",
+    "payments",
+    "agents",
+    "lightwalletd"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oynozan/z402.git",
+    "directory": "packages/lightwalletd"
+  },
+  "homepage": "https://z402.net",
+  "bugs": "https://github.com/oynozan/z402/issues",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "proto",
+    "LICENSE",
+    "README.md"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
