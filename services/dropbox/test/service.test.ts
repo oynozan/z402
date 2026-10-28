@@ -1,11 +1,20 @@
 import { randomBytes } from "node:crypto";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { brotliCompressSync, gzipSync } from "node:zlib";
+import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
+import type { DepositRequest, TxStatusSource, ZcashWallet } from "@z402/protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createDropboxService, DropStore, type DropboxConfig, type TipSource } from "../src/index.js";
+import {
+  createDropboxService,
+  DropStore,
+  type DropboxConfig,
+  type DropboxService,
+  type TipSource,
+} from "../src/index.js";
 import { EXAMPLE_AGE_FILE } from "../src/example.js";
 import { startTestStack, TEST_NETWORK, TEST_PAY_TO, TEST_PUBLIC_URL, type TestStack } from "@z402/service-kit/testing";
 import { ageFile, armor } from "./support.js";
@@ -33,9 +42,11 @@ const raw = (bytes: Uint8Array): Uint8Array<ArrayBuffer> => new Uint8Array(bytes
 const running: TestStack[] = [];
 const dirs: string[] = [];
 const servers: Server[] = [];
+const agents: Array<TestStack["scheme"]> = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  for (const scheme of agents.splice(0)) await scheme.close().catch(() => undefined);
   for (const stack of running.splice(0)) await stack.close();
   for (const server of servers.splice(0)) {
     server.closeAllConnections();
@@ -64,12 +75,21 @@ interface HarnessOptions {
   settleDelayMs?: number;
   /** Called when a settlement request arrives, which is after the handler has answered */
   onSettle?: () => void;
+  /** Awaited when a verification request arrives, which is after the paid attempt passed its checks */
+  onVerify?: () => void | Promise<void>;
+  /** Clock of the rate limit */
+  now?: () => number;
 }
 
-/** Forwards to the real facilitator except /settle, which it refuses the way the real one does or passes on late */
+/** Forwards to the real facilitator, refusing or delaying /settle and holding /verify as the test asks */
 async function faultyFacilitator(
   upstream: string,
-  o: { refuse: boolean; delayMs: number; onSettle: (() => void) | undefined },
+  o: {
+    refuse: boolean;
+    delayMs: number;
+    onSettle: (() => void) | undefined;
+    onVerify: (() => void | Promise<void>) | undefined;
+  },
 ): Promise<{ url: string }> {
   const relay = async (req: IncomingMessage, res: ServerResponse, body: Buffer, delayMs: number): Promise<void> => {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -105,9 +125,15 @@ async function faultyFacilitator(
       );
       return;
     }
+    const verifying = req.method === "POST" && req.url === "/verify";
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => void relay(req, res, Buffer.concat(chunks), settling ? o.delayMs : 0));
+    req.on("end", () => {
+      void (async () => {
+        if (verifying) await o.onVerify?.();
+        await relay(req, res, Buffer.concat(chunks), settling ? o.delayMs : 0);
+      })();
+    });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   servers.push(server);
@@ -125,25 +151,36 @@ async function dropbox(o: HarnessOptions = {}): Promise<Harness> {
     maxHoldBlocks: 30,
     lwdUrl: "http://127.0.0.1:1",
     tipPollMs: 10_000,
+    ratePerMin: 30,
     ...o.config,
   };
   const tips = o.tips ?? new FakeTips(100);
   const logs: string[] = [];
-  const store = new DropStore({ dir, maxTotalBytes: config.maxTotalBytes, log: quiet });
+  const store = new DropStore({
+    dir,
+    maxTotalBytes: config.maxTotalBytes,
+    maxHoldBlocks: config.maxHoldBlocks,
+    log: quiet,
+  });
   const stack = await startTestStack({
     build: async (env) => {
-      const faulty = o.refuseSettlement === true || o.settleDelayMs !== undefined || o.onSettle !== undefined;
+      const faulty =
+        o.refuseSettlement === true ||
+        o.settleDelayMs !== undefined ||
+        o.onSettle !== undefined ||
+        o.onVerify !== undefined;
       const facilitatorUrl = faulty
         ? (
             await faultyFacilitator(env.facilitatorUrl, {
               refuse: o.refuseSettlement === true,
               delayMs: o.settleDelayMs ?? 0,
               onSettle: o.onSettle,
+              onVerify: o.onVerify,
             })
           ).url
         : env.facilitatorUrl;
       const log = (line: string): void => void logs.push(line);
-      return createDropboxService({ env: { ...env, facilitatorUrl }, config, tips, store, log });
+      return createDropboxService({ env: { ...env, facilitatorUrl }, config, tips, store, log, now: o.now });
     },
   });
   running.push(stack);
@@ -151,6 +188,25 @@ async function dropbox(o: HarnessOptions = {}): Promise<Harness> {
 }
 
 const drops = (h: Harness): string => `${h.stack.url}/v1/drops`;
+
+/** Another agent with its own session on the same chain, since one client sends its paid calls one at a time */
+function otherAgent(h: Harness): typeof fetch {
+  const { chain } = h.stack;
+  const wallet: ZcashWallet = {
+    sendDeposit: async (req: DepositRequest) => ({
+      txid: chain.broadcast({ outputs: [{ to: req.to, valueZat: req.amountZat, memo: req.memo }] }),
+    }),
+  };
+  const Scheme = h.stack.scheme.constructor as new (o: {
+    wallet: ZcashWallet;
+    chain: TxStatusSource;
+    pollIntervalMs: number;
+    facilitatorLagMs: number;
+  }) => TestStack["scheme"];
+  const scheme = new Scheme({ wallet, chain: chain.statusSource(), pollIntervalMs: 20, facilitatorLagMs: 100 });
+  agents.push(scheme);
+  return wrapFetchWithPayment(fetch, new x402Client().register(TEST_NETWORK, scheme));
+}
 
 const upload = (h: Harness, body: Uint8Array | string): Promise<Response> =>
   h.stack.paidFetch(drops(h), {
@@ -269,6 +325,32 @@ describe("upload", () => {
     expect((await upload(h, Buffer.concat([limit, Buffer.from([0])]))).status).toBe(413);
   });
 
+  test("a compressed upload is refused before it is inflated, and before payment", async () => {
+    const h = await dropbox();
+    const file = ageFile({ payload: randomBytes(300) });
+    for (const [encoding, body] of [
+      ["gzip", gzipSync(file)],
+      ["br", brotliCompressSync(file)],
+      ["deflate, gzip", gzipSync(file)],
+    ] as const) {
+      const res = await h.stack.paidFetch(drops(h), {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream", "content-encoding": encoding },
+        body: raw(body),
+      });
+      expect(res.status, encoding).toBe(415);
+      expect(await res.json(), encoding).toEqual({ error: "unsupported_encoding" });
+    }
+    expect(h.spent()).toBeUndefined();
+    expect(h.store.count).toBe(0);
+    const identity = await h.stack.paidFetch(drops(h), {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream", "content-encoding": "identity" },
+      body: raw(file),
+    });
+    expect(identity.status).toBe(201);
+  });
+
   test("an empty upload is refused before payment", async () => {
     const h = await dropbox();
     const empty = await upload(h, new Uint8Array(0));
@@ -297,6 +379,33 @@ describe("upload", () => {
     expect((await upload(h, ageFile({ payload: randomBytes(100) }))).status).toBe(201);
   });
 
+  test("two paid uploads in flight at once never store more than the cap between them", async () => {
+    let verifying = 0;
+    let release: () => void = () => undefined;
+    const bothChecked = new Promise<void>((resolve) => (release = resolve));
+    const h = await dropbox({
+      config: { maxTotalBytes: 600 },
+      // Each paid attempt has passed its checks before either reaches the handler
+      onVerify: async () => {
+        verifying += 1;
+        if (verifying === 2) release();
+        await bothChecked;
+      },
+    });
+    const other = otherAgent(h);
+    const file = (): Buffer => ageFile({ payload: randomBytes(232) });
+    expect(file().length).toBe(400);
+
+    const [mine, theirs] = await Promise.all([
+      upload(h, file()),
+      other(drops(h), { method: "POST", headers: { "content-type": "application/octet-stream" }, body: raw(file()) }),
+    ]);
+    expect([mine.status, theirs.status].sort()).toEqual([201, 507]);
+    expect(h.store.count).toBe(1);
+    expect(h.store.usedBytes).toBe(400);
+    expect(readdirSync(h.dir)).toHaveLength(2);
+  });
+
   test("a tip that is not known refuses before payment", async () => {
     const h = await dropbox({ tips: new FakeTips(undefined) });
     const res = await upload(h, ageFile({ payload: randomBytes(100) }));
@@ -308,14 +417,29 @@ describe("upload", () => {
     expect(await health.json()).toMatchObject({ ready: false, service: "Encrypted drop box" });
   });
 
-  test("an upload is refused when the tip goes missing between the check and the handler", async () => {
+  test("a tip that went stale while readiness is still cached refuses before payment", async () => {
     const h = await dropbox();
-    const tip = vi.spyOn(h.tips, "tip");
-    // The readiness gate sees a tip and the handler, a call later, does not
-    tip.mockReturnValueOnce(100).mockReturnValueOnce(undefined);
-    const res = await upload(h, ageFile({ payload: randomBytes(100) }));
+    expect((await fetch(`${h.stack.url}/health`)).status).toBe(200);
+    h.tips.height = undefined;
+    const res = await upload(h, ageFile({ payload: randomBytes(300) }));
     expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "not_ready" });
+    expect(h.spent()).toBeUndefined();
     expect(h.store.count).toBe(0);
+  });
+
+  test("a tip that goes stale during verification stores the upload at the tip it was checked at", async () => {
+    const tips = new FakeTips(100);
+    const h = await dropbox({
+      tips,
+      onVerify: () => {
+        tips.height = undefined;
+      },
+    });
+    const res = await upload(h, ageFile({ payload: randomBytes(300) }));
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ tip: 100, expiresAtHeight: 110 });
+    expect(h.store.count).toBe(1);
   });
 });
 
@@ -333,7 +457,7 @@ describe("hold", () => {
     await vi.waitFor(async () => expect(await expiryOf(h, id)).toBe("120"));
 
     // The hold is on disk too
-    const reopened = new DropStore({ dir: h.dir, maxTotalBytes: 1, log: quiet });
+    const reopened = new DropStore({ dir: h.dir, maxTotalBytes: 1, maxHoldBlocks: 1000, log: quiet });
     expect(reopened.get(id)?.expiresAtHeight).toBe(120);
   });
 
@@ -376,6 +500,79 @@ describe("hold", () => {
       expect((await hold(h, id)).status, id).toBe(404);
     }
     expect(h.spent()).toBeUndefined();
+  });
+
+  test("a tip that goes stale while the payment is verified still applies the hold", async () => {
+    let stale = false;
+    const tips = new FakeTips(100);
+    const h = await dropbox({
+      tips,
+      onVerify: () => {
+        if (stale) tips.height = undefined;
+      },
+    });
+    const { id } = await uploaded(h);
+    stale = true;
+    const res = await hold(h, id);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id, tip: 100, expiresAtHeight: 120 });
+    expect(h.spent()).toBe(1000n);
+    await vi.waitFor(async () => expect(await expiryOf(h, id)).toBe("120"));
+  });
+
+  test("a drop whose last block lands while its paid hold settles is kept, and held", async () => {
+    let harness: Harness | undefined;
+    let watching = false;
+    const h = (harness = await dropbox({
+      // The tip source sweeps on every new tip, and here one arrives while the hold settles
+      onSettle: () => {
+        if (!watching || harness === undefined) return;
+        harness.tips.height = 110;
+        harness.store.sweep(110);
+      },
+    }));
+    const { id } = await uploaded(h);
+    h.tips.height = 109;
+    watching = true;
+
+    const res = await hold(h, id);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id, tip: 109, expiresAtHeight: 120 });
+    expect(h.spent()).toBe(1000n);
+    await vi.waitFor(async () => expect(await expiryOf(h, id)).toBe("120"));
+    expect(h.tips.height).toBe(110);
+  });
+
+  test("a hold delivered after the chain went back holds the drop no longer than new tip + maxHoldBlocks", async () => {
+    let harness: Harness | undefined;
+    let watching = false;
+    const h = (harness = await dropbox({
+      onSettle: () => {
+        if (watching && harness !== undefined) harness.tips.height = 50;
+      },
+    }));
+    const { id } = await uploaded(h);
+    watching = true;
+    const res = await hold(h, id);
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(h.store.get(id)?.expiresAtHeight).toBe(80));
+  });
+
+  test("a hold that fails to deliver leaves the drop to expire as it would have", async () => {
+    let harness: Harness | undefined;
+    const h = (harness = await dropbox({
+      refuseSettlement: true,
+      onSettle: () => {
+        if (harness === undefined) return;
+        harness.tips.height = 110;
+        harness.store.sweep(110);
+      },
+    }));
+    const { meta } = h.store.put({ bytes: ageFile({ payload: randomBytes(300) }), expiresAtHeight: 110 });
+    h.tips.height = 109;
+    expect((await hold(h, meta.id)).status).toBe(402);
+    await vi.waitFor(async () => expect((await fetch(`${drops(h)}/${meta.id}`)).status).toBe(404));
+    expect(h.store.count).toBe(0);
   });
 
   test("an expired drop cannot be held", async () => {
@@ -427,13 +624,63 @@ describe("hold", () => {
 });
 
 describe("fetch", () => {
+  test("serves a drop as a download that no browser renders or hands to another origin", async () => {
+    const h = await dropbox();
+    const { id } = await uploaded(h);
+    const origin = "https://elsewhere.example";
+    const got = await fetch(`${drops(h)}/${id}`, { headers: { origin } });
+    expect(got.status).toBe(200);
+    expect(got.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(got.headers.get("content-disposition")).toBe(`attachment; filename="${id}.age"`);
+    expect(got.headers.get("access-control-allow-origin")).toBeNull();
+
+    const preflight = await fetch(`${drops(h)}/${id}`, {
+      method: "OPTIONS",
+      headers: { origin, "access-control-request-method": "DELETE", "access-control-request-headers": "authorization" },
+    });
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+    expect(preflight.headers.get("access-control-allow-methods")).toBeNull();
+  });
+
   test("answers 404 as JSON for an unknown or malformed id", async () => {
     const h = await dropbox();
-    for (const id of [UNKNOWN, "short", "A".repeat(40), "a%2Fb", "%00", `${UNKNOWN.slice(1)}%20`]) {
+    const malformed = ["short", "A".repeat(40), "a%2Fb", "%00", `${UNKNOWN.slice(1)}%20`, `${UNKNOWN.slice(2)}%5C..`];
+    for (const id of [UNKNOWN, ...malformed, "..%5C..%5Cwindows", `..%2F${UNKNOWN}`]) {
       const res = await fetch(`${drops(h)}/${id}`);
       expect(res.status, id).toBe(404);
       expect(await res.json(), id).toEqual({ error: "unknown_drop" });
     }
+  });
+});
+
+/** A request whose path is sent as written, since fetch resolves dot segments before they leave the client */
+function verbatim(h: Harness, method: string, path: string): Promise<{ status: number; body: string }> {
+  const { hostname, port } = new URL(h.stack.url);
+  return new Promise((resolve, reject) => {
+    const req = request({ host: hostname, port, method, path }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+describe("dot segments in the id", () => {
+  test("reach the drop routes as ids, which are refused without touching the disk", async () => {
+    const h = await dropbox();
+    const { id } = await uploaded(h);
+    for (const segment of ["..", "%2E%2E", ".%2e", "%2e%2e%2f%2e%2e%2fetc", `..%5C${id}`]) {
+      for (const method of ["GET", "DELETE"]) {
+        const res = await verbatim(h, method, `/v1/drops/${segment}`);
+        expect(res.status, `${method} ${segment}`).toBe(404);
+        expect(JSON.parse(res.body), `${method} ${segment}`).toEqual({ error: "unknown_drop" });
+      }
+      expect((await verbatim(h, "POST", `/v1/drops/${segment}/hold`)).status, segment).toBe(404);
+    }
+    expect(h.spent()).toBe(500n);
+    expect(readdirSync(h.dir).sort()).toEqual([`${id}.age`, `${id}.json`]);
   });
 });
 
@@ -471,6 +718,43 @@ describe("expiry", () => {
     expect((await fetch(`${drops(h)}/${id}`)).status).toBe(200);
     h.tips.height = 500;
     expect((await fetch(`${drops(h)}/${id}`)).status).toBe(404);
+  });
+
+  test("a drop held past tip + maxHoldBlocks, as after a chain reset, is pulled back to it", async () => {
+    const h = await dropbox();
+    const { meta } = h.store.put({ bytes: ageFile({ payload: randomBytes(300) }), expiresAtHeight: 5000 });
+    expect(await expiryOf(h, meta.id)).toBe("130");
+    h.tips.height = 129;
+    expect(await expiryOf(h, meta.id)).toBe("130");
+    h.tips.height = 130;
+    expect((await fetch(`${drops(h)}/${meta.id}`)).status).toBe(404);
+  });
+
+  test("the first tip of a chain that restarted lower pulls the kept drops back, before any request", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dropbox-service-"));
+    dirs.push(dir);
+    const before = new DropStore({ dir, maxTotalBytes: 65_536, maxHoldBlocks: 1000, log: quiet });
+    const kept = before.put({ bytes: ageFile({ payload: randomBytes(300) }), expiresAtHeight: 5000 });
+    const config: DropboxConfig = {
+      dir,
+      maxBytes: 4096,
+      maxTotalBytes: 65_536,
+      blocksPerCall: 10,
+      maxHoldBlocks: 30,
+      lwdUrl: "http://127.0.0.1:1",
+      tipPollMs: 10_000,
+      ratePerMin: 30,
+    };
+    let service: DropboxService | undefined;
+    const stack = await startTestStack({
+      build: async (env) =>
+        (service = await createDropboxService({ env, config, tipClient: { getTip: async () => 100 }, log: quiet })),
+    });
+    running.push(stack);
+
+    await vi.waitFor(() => expect(service?.store.get(kept.meta.id)?.expiresAtHeight).toBe(130));
+    const onDisk = JSON.parse(readFileSync(join(dir, `${kept.meta.id}.json`), "utf8")) as { expiresAtHeight: number };
+    expect(onDisk.expiresAtHeight).toBe(130);
   });
 });
 
@@ -663,6 +947,54 @@ describe("what the service declares", () => {
   });
 });
 
+describe("the rate of upload attempts", () => {
+  const plaintext = (): Uint8Array<ArrayBuffer> => raw(Buffer.from("a note that was never encrypted"));
+
+  test("refuses an attempt past DROPBOX_RATE_PER_MIN with 429 and Retry-After, before its body is read", async () => {
+    let now = 1_000_000;
+    const h = await dropbox({ config: { ratePerMin: 2 }, now: () => now });
+    expect((await fetch(drops(h), { method: "POST", body: plaintext() })).status).toBe(415);
+    expect((await fetch(drops(h), { method: "POST", body: plaintext() })).status).toBe(415);
+
+    // Read, this body would be refused as too large
+    const refused = await fetch(drops(h), { method: "POST", body: raw(randomBytes(8192)) });
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe("30");
+    expect(await refused.json()).toEqual({ error: "rate_limited" });
+
+    now += 30_000;
+    expect((await fetch(drops(h), { method: "POST", body: plaintext() })).status).toBe(415);
+    expect((await fetch(drops(h), { method: "POST", body: plaintext() })).status).toBe(429);
+  });
+
+  test("lets the paid retry of an attempt that passed through without a token, so it is never refused", async () => {
+    const h = await dropbox({ config: { ratePerMin: 1 }, now: () => 0 });
+    await uploaded(h);
+    expect(h.spent()).toBe(500n);
+    const next = await upload(h, ageFile({ payload: randomBytes(300) }));
+    expect(next.status).toBe(429);
+    expect(h.spent()).toBe(500n);
+  });
+
+  test("makes a paid attempt that no passed attempt earned take a token", async () => {
+    const h = await dropbox({ config: { ratePerMin: 1 }, now: () => 0 });
+    const forged = { "payment-signature": Buffer.from("not a payment").toString("base64") };
+    const first = await fetch(drops(h), { method: "POST", headers: forged, body: plaintext() });
+    expect(first.status).toBe(415);
+    const second = await fetch(drops(h), { method: "POST", headers: forged, body: plaintext() });
+    expect(second.status).toBe(429);
+  });
+
+  test("counts neither discovery probes nor holds", async () => {
+    const h = await dropbox({ config: { ratePerMin: 1, maxHoldBlocks: 1000 }, now: () => 0 });
+    const { id } = await uploaded(h);
+    for (let i = 0; i < 3; i += 1) {
+      expect((await fetch(drops(h), { method: "POST", headers: { "x-z402-probe": "1" } })).status).toBe(402);
+      expect((await hold(h, id)).status).toBe(200);
+    }
+  });
+});
+
 describe("what cannot be had without paying", () => {
   test("another spelling of a paid path still asks for payment", async () => {
     const h = await dropbox();
@@ -686,6 +1018,21 @@ describe("what cannot be had without paying", () => {
     expect((await fetch(drops(h))).status).toBe(405);
     expect((await fetch(`${drops(h)}/${UNKNOWN}/hold`)).status).toBe(405);
     expect((await fetch(`${drops(h)}/${UNKNOWN}`, { method: "POST" })).status).toBe(404);
+  });
+
+  test("an id that is not valid percent-encoding is a client error, answered 400 and not logged", async () => {
+    const h = await dropbox();
+    for (const [method, path] of [
+      ["GET", "/v1/drops/%E0%A4%A"],
+      ["DELETE", "/v1/drops/%"],
+      ["POST", "/v1/drops/%C0%AF/hold"],
+    ] as const) {
+      const res = await fetch(`${h.stack.url}${path}`, { method });
+      expect(res.status, path).toBe(400);
+      expect(await res.json(), path).toEqual({ error: "bad_request" });
+    }
+    expect(h.logs).toEqual([]);
+    expect(h.spent()).toBeUndefined();
   });
 
   test("an unknown path answers JSON", async () => {
@@ -718,6 +1065,7 @@ describe("lifecycle", () => {
       maxHoldBlocks: 10,
       lwdUrl: "http://127.0.0.1:1",
       tipPollMs: 1000,
+      ratePerMin: 30,
     };
     const tips = new FakeTips(100);
     await expect(

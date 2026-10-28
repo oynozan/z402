@@ -33,6 +33,11 @@ function isSpace(byte: number): boolean {
   return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
 }
 
+/** A byte that String.prototype.trim removes from a line read as latin1 */
+function isTrimmed(byte: number): boolean {
+  return byte === 0x20 || (byte >= 0x09 && byte <= 0x0d) || byte === 0xa0;
+}
+
 /** Shannon entropy of the byte histogram in bits per byte, which is 8 for uniform bytes */
 function entropy(counts: Uint32Array, total: number): number {
   let bits = 0;
@@ -94,19 +99,39 @@ function binary(file: Buffer): AgeCheck {
   return { ok: true };
 }
 
-function armored(file: Buffer): AgeCheck {
-  const lines = file
-    .toString("latin1")
-    .split("\n")
-    .map((line) => line.trim());
-  while (lines[0] === "") lines.shift();
-  while (lines.at(-1) === "") lines.pop();
-  if (lines[0] !== ARMOR_BEGIN) return refuse(`the armor does not start with "${ARMOR_BEGIN}"`);
-  if (lines.length < 2 || lines.at(-1) !== ARMOR_END) return refuse(`the armor does not end with "${ARMOR_END}"`);
+/** Reads the armor from its begin line in one pass, so no line costs more than its own bytes */
+function armored(file: Buffer, begin: number): AgeCheck {
+  const body = Buffer.alloc(file.length);
+  let size = 0;
+  let lines = 0;
+  // The last line is the end line, so the base64 stops where it starts
+  let lastAt = 0;
+  let last = "";
+  for (let pos = begin; pos < file.length; ) {
+    const newline = file.indexOf(0x0a, pos);
+    const stop = newline < 0 ? file.length : newline;
+    let from = pos;
+    let to = stop;
+    pos = stop + 1;
+    while (from < to && isTrimmed(file[from] ?? 0)) from += 1;
+    while (to > from && isTrimmed(file[to - 1] ?? 0)) to -= 1;
+    if (from === to) continue;
+    lines += 1;
+    if (lines === 1) {
+      if (file.toString("latin1", from, to) !== ARMOR_BEGIN) {
+        return refuse(`the armor does not start with "${ARMOR_BEGIN}"`);
+      }
+      continue;
+    }
+    lastAt = size;
+    last = to - from === ARMOR_END.length ? file.toString("latin1", from, to) : "";
+    size += file.copy(body, size, from, to);
+  }
+  if (lines < 2 || last !== ARMOR_END) return refuse(`the armor does not end with "${ARMOR_END}"`);
 
-  const body = lines.slice(1, -1).join("");
-  if (!ARMOR_BODY.test(body) || body.length % 4 !== 0) return refuse("the armor body is not base64");
-  const inner = binary(Buffer.from(body, "base64"));
+  const text = body.toString("latin1", 0, lastAt);
+  if (!ARMOR_BODY.test(text) || text.length % 4 !== 0) return refuse("the armor body is not base64");
+  const inner = binary(Buffer.from(text, "base64"));
   return inner.ok ? inner : refuse(`armored file: ${inner.reason}`);
 }
 
@@ -115,5 +140,7 @@ export function isAgeEncrypted(bytes: Uint8Array): AgeCheck {
   let first = 0;
   while (first < file.length && isSpace(file[first] ?? 0)) first += 1;
   // Armor may be padded with whitespace, the binary form starts at byte 0
-  return file.toString("latin1", first, first + ARMOR_BEGIN.length) === ARMOR_BEGIN ? armored(file) : binary(file);
+  return file.toString("latin1", first, first + ARMOR_BEGIN.length) === ARMOR_BEGIN
+    ? armored(file, first)
+    : binary(file);
 }

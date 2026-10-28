@@ -16,6 +16,8 @@ export interface DropboxConfig {
   maxHoldBlocks: number;
   lwdUrl: string;
   tipPollMs: number;
+  /** Upload attempts per minute per client, the paid retry of an attempt that passed not counted */
+  ratePerMin: number;
 }
 
 const DEFAULT_DIR = ".data/dropbox";
@@ -52,5 +54,6 @@ export function loadDropboxConfig(env: Env): DropboxConfig {
     maxHoldBlocks,
     lwdUrl: readUrl(env, "DROPBOX_LWD_URL", DEFAULT_LWD_URL),
     tipPollMs: readInt(env, "DROPBOX_TIP_POLL_MS", 10_000, MIN_POLL_MS, MAX_POLL_MS),
+    ratePerMin: readInt(env, "DROPBOX_RATE_PER_MIN", 30, 1, 100_000),
   };
 }

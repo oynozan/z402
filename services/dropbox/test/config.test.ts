@@ -12,6 +12,7 @@ describe("loadDropboxConfig", () => {
       maxHoldBlocks: 1000,
       lwdUrl: "http://127.0.0.1:28137",
       tipPollMs: 10_000,
+      ratePerMin: 30,
     });
   });
 
@@ -25,6 +26,7 @@ describe("loadDropboxConfig", () => {
         DROPBOX_MAX_HOLD_BLOCKS: "50",
         DROPBOX_LWD_URL: "https://lwd.example:443/",
         DROPBOX_TIP_POLL_MS: "2500",
+        DROPBOX_RATE_PER_MIN: "12",
       }),
     ).toEqual({
       dir: "/var/lib/dropbox",
@@ -34,6 +36,7 @@ describe("loadDropboxConfig", () => {
       maxHoldBlocks: 50,
       lwdUrl: "https://lwd.example:443",
       tipPollMs: 2500,
+      ratePerMin: 12,
     });
     expect(loadDropboxConfig({ DROPBOX_DIR: "", DROPBOX_MAX_BYTES: "" }).maxBytes).toBe(1_048_576);
     expect(loadDropboxConfig({ DROPBOX_DIR: "drops" }).dir).toBe(resolve("drops"));
@@ -48,6 +51,7 @@ describe("loadDropboxConfig", () => {
       "DROPBOX_BLOCKS_PER_CALL",
       "DROPBOX_MAX_HOLD_BLOCKS",
       "DROPBOX_TIP_POLL_MS",
+      "DROPBOX_RATE_PER_MIN",
     ]) {
       expect(bad(name, "ten"), name).toThrow(new RegExp(`^${name}:`));
       expect(bad(name, "-1"), name).toThrow(new RegExp(`^${name}:`));

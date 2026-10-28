@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -26,8 +27,8 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const open = (maxTotalBytes = 10_000): DropStore =>
-  new DropStore({ dir, maxTotalBytes, log: (line) => logs.push(line) });
+const open = (maxTotalBytes = 10_000, maxHoldBlocks = 1000): DropStore =>
+  new DropStore({ dir, maxTotalBytes, maxHoldBlocks, log: (line) => logs.push(line) });
 const names = (): string[] => readdirSync(dir).sort();
 const metaOf = (id: string): DropMeta => JSON.parse(readFileSync(join(dir, `${id}.json`), "utf8")) as DropMeta;
 
@@ -69,7 +70,7 @@ describe("put", () => {
 
   test("creates the directory when it is missing", () => {
     const nested = join(dir, "a", "b");
-    const store = new DropStore({ dir: nested, maxTotalBytes: 100, log: () => undefined });
+    const store = new DropStore({ dir: nested, maxTotalBytes: 100, maxHoldBlocks: 1000, log: () => undefined });
     store.put({ bytes: randomBytes(5), expiresAtHeight: 1 });
     expect(readdirSync(nested)).toHaveLength(2);
   });
@@ -220,6 +221,80 @@ describe("sweep", () => {
     expect(store.get(b.meta.id)).toBeUndefined();
     expect(store.get(c.meta.id)).toBeUndefined();
     expect(logs).toEqual(["dropbox: swept 1 expired drop at tip 110", "dropbox: swept 2 expired drops at tip 500"]);
+  });
+
+  test("pulls every expiry back to at most tip + maxHoldBlocks, on disk too, as a chain reset needs", () => {
+    const store = open(10_000, 30);
+    const far = store.put({ bytes: randomBytes(10), expiresAtHeight: 5000 });
+    const near = store.put({ bytes: randomBytes(10), expiresAtHeight: 120 });
+
+    expect(store.sweep(100)).toBe(0);
+    expect(store.get(far.meta.id)?.expiresAtHeight).toBe(130);
+    expect(metaOf(far.meta.id).expiresAtHeight).toBe(130);
+    expect(store.get(near.meta.id)?.expiresAtHeight).toBe(120);
+    expect(open(10_000, 30).get(far.meta.id)?.expiresAtHeight).toBe(130);
+
+    // A tip that moves on again does not move the expiry with it
+    expect(store.sweep(125)).toBe(1);
+    expect(store.get(far.meta.id)?.expiresAtHeight).toBe(130);
+    expect(store.sweep(130)).toBe(1);
+    expect(store.count).toBe(0);
+  });
+});
+
+describe("live", () => {
+  test("answers a drop as the tip sees it: removed once expired, and never held past tip + maxHoldBlocks", () => {
+    const store = open(10_000, 30);
+    const { meta } = store.put({ bytes: randomBytes(10), expiresAtHeight: 5000 });
+
+    expect(store.live(meta.id, 100)?.expiresAtHeight).toBe(130);
+    expect(metaOf(meta.id).expiresAtHeight).toBe(130);
+    expect(store.live(meta.id, 129)?.expiresAtHeight).toBe(130);
+    expect(store.live(meta.id, 130)).toBeUndefined();
+    expect(store.count).toBe(0);
+    expect(store.usedBytes).toBe(0);
+    expect(names()).toEqual([]);
+    expect(store.live("AAAAAAAAAAAAAAAAAAAAAA", 100)).toBeUndefined();
+  });
+});
+
+describe("pin", () => {
+  test("keeps a drop past its expiry until its last pin is gone, after which it expires as usual", () => {
+    const store = open(10_000, 30);
+    const { meta } = store.put({ bytes: randomBytes(10), expiresAtHeight: 110 });
+    store.pin(meta.id);
+    store.pin(meta.id);
+    expect(store.sweep(110)).toBe(0);
+    store.unpin(meta.id);
+    expect(store.live(meta.id, 110)?.expiresAtHeight).toBe(110);
+    store.unpin(meta.id);
+    expect(store.live(meta.id, 110)).toBeUndefined();
+    expect(store.count).toBe(0);
+    expect(names()).toEqual([]);
+  });
+
+  test("still pulls a pinned drop back to tip + maxHoldBlocks", () => {
+    const store = open(10_000, 30);
+    const { meta } = store.put({ bytes: randomBytes(10), expiresAtHeight: 5000 });
+    store.pin(meta.id);
+    expect(store.live(meta.id, 100)?.expiresAtHeight).toBe(130);
+  });
+});
+
+describe("a disk that refuses the shorter hold", () => {
+  test.skipIf(process.getuid?.() === 0)("still gets it applied in memory, and says so", () => {
+    const store = open(10_000, 30);
+    const { meta } = store.put({ bytes: randomBytes(10), expiresAtHeight: 5000 });
+    chmodSync(dir, 0o500);
+    try {
+      expect(store.live(meta.id, 100)?.expiresAtHeight).toBe(130);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(store.get(meta.id)?.expiresAtHeight).toBe(130);
+    expect(metaOf(meta.id).expiresAtHeight).toBe(5000);
+    expect(logs).toEqual([`dropbox: cannot shorten the hold of ${meta.id} on disk (EACCES)`]);
+    expect(names()).toEqual([`${meta.id}.age`, `${meta.id}.json`]);
   });
 });
 

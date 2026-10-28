@@ -140,6 +140,13 @@ describe("armored files", () => {
     expect(refusal("- a markdown list\n- of private things\n")).toMatch(/header line/);
   });
 
+  test("judges armor behind a quarter megabyte of blank lines in linear time", () => {
+    const file = Buffer.from(`${"\r\n".repeat(128 * 1024)}${armor(ageFile({ payload: randomBytes(300) }))}`);
+    const started = performance.now();
+    expect(isAgeEncrypted(file)).toEqual({ ok: true });
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
   test("applies the binary rules to what the armor holds", () => {
     expect(refusal(armor(Buffer.from("not an age file, only text, wrapped in armor ".repeat(8))))).toMatch(
       /^armored file: missing the "age-encryption.org\/v1" header line$/,

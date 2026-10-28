@@ -1,7 +1,9 @@
 /**
  * The encrypted drop box (design §4.4). Two paid routes upload an age-encrypted blob and hold it longer, and two free
- * ones fetch and delete it. Every refusal that can come before payment does, so the body is read, checked and sized in
- * `prepare`. An upload is undone when its delivery fails and a hold is applied only once its delivery succeeded.
+ * ones fetch and delete it. Every refusal that can come before payment does, so the tip, the client's rate of attempts,
+ * the body, its shape and the room are all checked in `prepare`. The handler checks the room once more, since uploads
+ * checked at the same time may not all fit. An upload is undone when its delivery fails, and a hold is applied only
+ * once its delivery succeeded, with its drop kept through any expiry that lands while it settles.
  */
 import { createLightwalletdClient, type LightwalletdClient } from "@z402/lightwalletd";
 import { ConfigError, createPaidService, onDelivered, type PaidRoute, type ServiceEnv } from "@z402/service-kit";
@@ -9,18 +11,23 @@ import express, { type Express, type NextFunction, type Request, type RequestHan
 import { isAgeEncrypted } from "./age.js";
 import type { DropboxConfig } from "./config.js";
 import { EXAMPLE_AGE_FILE } from "./example.js";
+import { AttemptLimiter, clientKey } from "./limits.js";
 import { stderr, type Log } from "./log.js";
 import { DropStore, isDropId, type DropMeta } from "./store.js";
-import { createTipSource, type TipSource } from "./tip.js";
+import { createTipSource, type TipClient, type TipSource } from "./tip.js";
 
 export interface DropboxOptions {
   env: ServiceEnv;
   config: DropboxConfig;
-  /** Defaults to lightwalletd at config.lwdUrl, which also sweeps the store on every new tip */
+  /** Defaults to polling tipClient, which also sweeps the store on every new tip */
   tips?: TipSource;
+  /** Where the default tip source reads the tip, lightwalletd at config.lwdUrl unless given */
+  tipClient?: TipClient;
   /** Defaults to the directory config.dir */
   store?: DropStore;
   log?: Log;
+  /** Clock of the rate limit */
+  now?: () => number;
 }
 
 export interface DropboxService {
@@ -32,6 +39,8 @@ export interface DropboxService {
 }
 
 const BEARER = /^bearer +(\S+)$/i;
+/** res.locals key of the tip the checks before payment saw */
+const CHECKED_TIP = "dropboxCheckedTip";
 
 function idOf(req: Request): string | undefined {
   const id = req.params["id"];
@@ -40,6 +49,10 @@ function idOf(req: Request): string | undefined {
 
 function bearerOf(req: Request): string | undefined {
   return BEARER.exec(req.get("authorization") ?? "")?.[1];
+}
+
+function carriesPayment(req: Request): boolean {
+  return req.get("payment-signature") !== undefined || req.get("x-payment") !== undefined;
 }
 
 // Express 5 leaves req.body undefined for a request without one
@@ -59,7 +72,8 @@ function unknownDrop(res: Response): void {
 
 function openStore(config: DropboxConfig, log: Log): DropStore {
   try {
-    return new DropStore({ dir: config.dir, maxTotalBytes: config.maxTotalBytes, log });
+    const { dir, maxTotalBytes, maxHoldBlocks } = config;
+    return new DropStore({ dir, maxTotalBytes, maxHoldBlocks, log });
   } catch (e) {
     throw new ConfigError(`DROPBOX_DIR: cannot use ${config.dir} (${(e as NodeJS.ErrnoException).code ?? "error"})`);
   }
@@ -73,27 +87,28 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
   let client: LightwalletdClient | undefined;
   let tips = o.tips;
   if (tips === undefined) {
-    client = createLightwalletdClient({ url: config.lwdUrl });
-    tips = createTipSource({ client, pollMs: config.tipPollMs, onTip: (tip) => store.sweep(tip), log });
+    const source = o.tipClient ?? (client = createLightwalletdClient({ url: config.lwdUrl }));
+    tips = createTipSource({ client: source, pollMs: config.tipPollMs, onTip: (tip) => store.sweep(tip), log });
   }
   const clock = tips;
 
+  // A paid handler falls back to the tip its checks saw, so a tip that goes stale during verification fails nothing
   const tipOrRefuse = (res: Response): number | undefined => {
-    const tip = clock.tip();
+    const tip = clock.tip() ?? (res.locals[CHECKED_TIP] as number | undefined);
     if (tip === undefined) res.status(503).json({ error: "not_ready" });
+    else res.locals[CHECKED_TIP] = tip;
     return tip;
   };
 
-  // Removes the drop on the spot once the tip reaches its expiry, and a tip that is not known expires nothing
+  // The readiness gate caches its answer, so a tip that went stale since is refused here, before payment
+  const checkTip: RequestHandler = (_req, res, next) => {
+    if (tipOrRefuse(res) !== undefined) next();
+  };
+
+  // A tip that is not known expires nothing
   const liveDrop = (id: string | undefined, tip: number | undefined): Readonly<DropMeta> | undefined => {
     if (id === undefined || !isDropId(id)) return undefined;
-    const meta = store.get(id);
-    if (meta === undefined) return undefined;
-    if (tip !== undefined && tip >= meta.expiresAtHeight) {
-      store.remove(id);
-      return undefined;
-    }
-    return meta;
+    return tip === undefined ? store.get(id) : store.live(id, tip);
   };
 
   // A hold adds a whole call's blocks or none, so a drop one block short of the cap is already at it
@@ -104,7 +119,22 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
     res.status(409).json({ error: "hold_cap_reached", maxHoldBlocks: config.maxHoldBlocks });
   };
 
-  const parseBody = express.raw({ type: () => true, limit: config.maxBytes });
+  const limiter = new AttemptLimiter({ perMinute: config.ratePerMin, now: o.now });
+  const clientOf = (req: Request): string => clientKey(req.ip ?? req.socket.remoteAddress);
+
+  // Before the body is read, since reading and checking it is what an attempt costs
+  const limitAttempts: RequestHandler = (req, res, next) => {
+    const wait = limiter.admit(clientOf(req), carriesPayment(req));
+    if (wait === 0) {
+      next();
+      return;
+    }
+    res.set("Retry-After", String(Math.max(1, Math.ceil(wait / 1000))));
+    res.status(429).json({ error: "rate_limited" });
+  };
+
+  // Ciphertext does not compress, and a few compressed bytes would make the server inflate and scan a whole upload
+  const parseBody = express.raw({ type: () => true, limit: config.maxBytes, inflate: false });
   const readBody: RequestHandler = (req, res, next) => {
     parseBody(req, res, (e?: unknown) => {
       if (e === undefined) {
@@ -113,6 +143,7 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
       }
       const status = statusOf(e);
       if (status === 413) res.status(413).json({ error: "too_large" });
+      else if (status === 415) res.status(415).json({ error: "unsupported_encoding" });
       else if (status !== undefined && status < 500) res.status(400).json({ error: "bad_body" });
       else next(e);
     });
@@ -133,6 +164,7 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
       res.status(507).json({ error: "storage_full" });
       return;
     }
+    if (!carriesPayment(req)) limiter.passed(clientOf(req));
     next();
   };
 
@@ -174,7 +206,7 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
           },
         },
       },
-      prepare: [readBody, checkUpload],
+      prepare: [checkTip, limitAttempts, readBody, checkUpload],
     },
     {
       method: "POST",
@@ -213,6 +245,11 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
       res.status(400).json({ error: "empty_body" });
       return;
     }
+    // Uploads checked at the same time may not all fit, and nothing else runs between this check and the put
+    if (!store.hasRoom(bytes.length)) {
+      res.status(507).json({ error: "storage_full" });
+      return;
+    }
     const { meta, deleteToken } = store.put({ bytes, expiresAtHeight: tip + config.blocksPerCall });
     // A refused settlement or a lost client makes this a failed delivery, which must not leave a free drop
     onDelivered(res, {
@@ -236,13 +273,22 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
       capReached(res);
       return;
     }
+    // A block that lands while the hold settles must not sweep away the drop it pays for
+    store.pin(meta.id);
     onDelivered(res, {
       ok: () => {
-        // Against the drop and the tip as they are now, since a settlement can take a while
-        const current = store.get(meta.id);
-        if (current === undefined) return;
-        const now = clock.tip() ?? tip;
-        store.extend(meta.id, Math.min(current.expiresAtHeight + config.blocksPerCall, now + config.maxHoldBlocks));
+        try {
+          // Against the drop and the tip as they are now, since a settlement can take a while
+          const now = clock.tip() ?? tip;
+          const current = store.live(meta.id, now);
+          if (current === undefined) return;
+          store.extend(meta.id, Math.min(current.expiresAtHeight + config.blocksPerCall, now + config.maxHoldBlocks));
+        } finally {
+          store.unpin(meta.id);
+        }
+      },
+      failed: () => {
+        store.unpin(meta.id);
       },
     });
     res.json({ id: meta.id, tip, expiresAtHeight: meta.expiresAtHeight + config.blocksPerCall });
@@ -259,6 +305,9 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
     res
       .set({
         "Content-Type": "application/octet-stream",
+        // The bytes are whatever the uploader sent, so a browser must save them and never render them
+        "Content-Disposition": `attachment; filename="${meta.id}.age"`,
+        "X-Content-Type-Options": "nosniff",
         "Cache-Control": "no-store",
         "X-Expires-At-Height": String(meta.expiresAtHeight),
       })
@@ -290,6 +339,12 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
   app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) {
       next(err);
+      return;
+    }
+    // The router refuses a path it cannot decode, which is the caller's fault and not worth a log line
+    const status = statusOf(err);
+    if (status !== undefined && status >= 400 && status < 500) {
+      res.status(status).json({ error: "bad_request" });
       return;
     }
     log(`dropbox: request failed: ${err instanceof Error ? err.message : String(err)}`);

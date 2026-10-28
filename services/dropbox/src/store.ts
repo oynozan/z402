@@ -27,6 +27,8 @@ export interface StoreOptions {
   dir: string;
   /** The total `hasRoom` allows, which `put` itself does not enforce */
   maxTotalBytes: number;
+  /** No drop outlives the tip by more than this, whatever its metadata says, e.g. after a chain reset */
+  maxHoldBlocks: number;
   log?: Log;
 }
 
@@ -61,14 +63,18 @@ function parseMeta(raw: unknown): DropMeta | undefined {
 export class DropStore {
   readonly #dir: string;
   readonly #maxTotalBytes: number;
+  readonly #maxHoldBlocks: number;
   readonly #log: Log;
   readonly #drops = new Map<string, DropMeta>();
+  /** How many paid holds of a drop are being delivered, which keeps it through its expiry */
+  readonly #pins = new Map<string, number>();
   #usedBytes = 0;
 
   /** Creates the directory if it is missing, then adopts every whole drop in it */
   constructor(o: StoreOptions) {
     this.#dir = o.dir;
     this.#maxTotalBytes = o.maxTotalBytes;
+    this.#maxHoldBlocks = o.maxHoldBlocks;
     this.#log = o.log ?? stderr;
     mkdirSync(this.#dir, { recursive: true, mode: 0o700 });
     this.#load();
@@ -90,6 +96,18 @@ export class DropStore {
     return this.#drops.get(id);
   }
 
+  /** The drop as the tip sees it, removed once the tip reaches its expiry and never held past tip + maxHoldBlocks */
+  live(id: string, tip: number): Readonly<DropMeta> | undefined {
+    const meta = this.#drops.get(id);
+    if (meta === undefined) return undefined;
+    if (tip >= meta.expiresAtHeight && !this.#pins.has(id)) {
+      this.remove(id);
+      return undefined;
+    }
+    const latest = tip + this.#maxHoldBlocks;
+    return meta.expiresAtHeight > latest ? this.#pullBack(meta, latest) : meta;
+  }
+
   /** The stored bytes, undefined for an unknown drop or one whose file has vanished */
   read(id: string): Buffer | undefined {
     if (!this.#drops.has(id)) return undefined;
@@ -102,7 +120,7 @@ export class DropStore {
     }
   }
 
-  /** Never refuses for room, since hasRoom ran before payment and a paid put must not fail */
+  /** Does not check for room, so the caller checks hasRoom in the same turn of the event loop */
   put(o: { bytes: Uint8Array; expiresAtHeight: number }): { meta: Readonly<DropMeta>; deleteToken: string } {
     const id = randomBytes(16).toString("base64url");
     const deleteToken = randomBytes(32).toString("base64url");
@@ -123,6 +141,17 @@ export class DropStore {
     this.#drops.set(id, meta);
     this.#usedBytes += meta.size;
     return { meta, deleteToken };
+  }
+
+  /** Keeps the drop through its expiry until as many unpin calls, while a paid hold of it settles */
+  pin(id: string): void {
+    this.#pins.set(id, (this.#pins.get(id) ?? 0) + 1);
+  }
+
+  unpin(id: string): void {
+    const pins = this.#pins.get(id) ?? 0;
+    if (pins > 1) this.#pins.set(id, pins - 1);
+    else this.#pins.delete(id);
   }
 
   /** Moves the expiry later and never earlier, undefined for an unknown drop */
@@ -154,11 +183,11 @@ export class DropStore {
     return true;
   }
 
-  /** Removes every drop the tip has reached and returns how many that was */
+  /** Brings every drop in line with the tip as `live` does, and returns how many expired */
   sweep(tip: number): number {
     let removed = 0;
-    for (const meta of [...this.#drops.values()]) {
-      if (tip >= meta.expiresAtHeight && this.remove(meta.id)) removed += 1;
+    for (const id of [...this.#drops.keys()]) {
+      if (this.live(id, tip) === undefined) removed += 1;
     }
     if (removed > 0) this.#log(`dropbox: swept ${removed} expired ${removed === 1 ? "drop" : "drops"} at tip ${tip}`);
     return removed;
@@ -166,6 +195,19 @@ export class DropStore {
 
   #path(id: string, extension: string): string {
     return join(this.#dir, `${id}${extension}`);
+  }
+
+  // Memory first, so the shorter hold applies even when the disk refuses, and the next start pulls it back again
+  #pullBack(meta: DropMeta, expiresAtHeight: number): DropMeta {
+    const next = { ...meta, expiresAtHeight };
+    this.#drops.set(meta.id, next);
+    try {
+      this.#write(this.#path(meta.id, META), JSON.stringify(next));
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? "error";
+      this.#log(`dropbox: cannot shorten the hold of ${meta.id} on disk (${code})`);
+    }
+    return next;
   }
 
   #write(path: string, data: string | Uint8Array): void {

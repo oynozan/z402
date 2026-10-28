@@ -6,10 +6,10 @@ An encrypted drop box for agents, on port 4034. One agent uploads an [age](https
 | --- | --- | --- |
 | `POST /v1/drops` | one call (`Z402_PRICE_ZAT`) | `201 { id, deleteToken, size, tip, expiresAtHeight }`, held for 10 blocks |
 | `POST /v1/drops/:id/hold` | one call | `200 { id, tip, expiresAtHeight }`, 10 blocks more, at most 1000 past the tip |
-| `GET /v1/drops/:id` | free | the bytes, with an `X-Expires-At-Height` header |
+| `GET /v1/drops/:id` | free | the bytes as a download (`Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`), with an `X-Expires-At-Height` header |
 | `DELETE /v1/drops/:id` | free | `204`, with `Authorization: Bearer <deleteToken>` |
 
-A drop is gone once the chain tip reaches its `expiresAtHeight`, so time is counted in blocks. The id is all it takes to fetch a drop and the delete token, which only the upload's answer carries, is all it takes to delete it. The server keeps a SHA-256 of the token and never the token.
+A drop is gone once the chain tip reaches its `expiresAtHeight`, so time is counted in blocks. No drop is ever held more than `DROPBOX_MAX_HOLD_BLOCKS` past the current tip, also when the chain restarted lower and the directory was kept: the first tip pulls every expiry back to it. The id is all it takes to fetch a drop and the delete token, which only the upload's answer carries, is all it takes to delete it. The server keeps a SHA-256 of the token and never the token.
 
 ## Make the file
 
@@ -42,14 +42,19 @@ Everything that can be refused is refused on the unpaid first attempt, before a 
 | Status | `error` | When |
 | --- | --- | --- |
 | 400 | `empty_body` | The upload has no body |
+| 400 | `bad_request` | The path is not valid percent-encoding |
 | 413 | `too_large` | The body is over `DROPBOX_MAX_BYTES` |
 | 415 | `not_encrypted` | The body is not age-shaped, `reason` says why |
+| 415 | `unsupported_encoding` | The body has a `Content-Encoding`, which ciphertext never needs |
+| 429 | `rate_limited` | More than `DROPBOX_RATE_PER_MIN` upload attempts from one client in a minute, `Retry-After` says when to try again |
 | 507 | `storage_full` | The drops on disk would pass `DROPBOX_MAX_TOTAL_BYTES` |
 | 404 | `unknown_drop` | A hold for a drop that is unknown or expired |
 | 409 | `hold_cap_reached` | A hold would take the drop past `DROPBOX_MAX_HOLD_BLOCKS` beyond the tip, `maxHoldBlocks` says how many |
 | 503 | `not_ready` | The chain tip is not known |
 
-A drop is stored when the paid call reaches the handler and removed again if the call then fails to deliver, for example when the facilitator refuses to settle. A hold is applied only once its call was delivered.
+The rate counts attempts and not uploads: the paid retry of an attempt that passed its checks is not counted, so a client within its rate is never refused once it has paid, while a paid attempt that no checked attempt came before counts like any other. An IPv6 client counts per /64.
+
+A drop is stored when the paid call reaches the handler and removed again if the call then fails to deliver, for example when the facilitator refuses to settle. Two uploads that pass their checks at the same time may not both fit: the one that does not is refused `507` once its voucher is verified, and is not settled. A hold is applied only once its call was delivered, and a drop whose last block lands while one of its holds settles is kept for it.
 
 ## The age check is a plausibility check
 
@@ -81,6 +86,7 @@ dropbox listening on http://127.0.0.1:4034 network=zcash:regtest dir=/.../.data/
 | `DROPBOX_MAX_HOLD_BLOCKS` | `1000` | A drop is never held more than this many blocks past the tip |
 | `DROPBOX_LWD_URL` | `http://127.0.0.1:28137` | lightwalletd gRPC endpoint, plaintext for `http://` |
 | `DROPBOX_TIP_POLL_MS` | `10000` | How often the tip is read, at most 30000 |
+| `DROPBOX_RATE_PER_MIN` | `30` | Upload attempts per minute per client, refused before the body is read |
 
 The variables every paid service shares (`Z402_*`, `PUBLIC_URL`, `HOST`, `PORT`) are in `.env.example` and in section 3.1 of the design. Every problem exits 1 with a `dropbox: ...` line that names the variable at fault.
 
