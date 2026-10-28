@@ -365,16 +365,17 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     const txid = v.depositTxid;
     if (txid === undefined) return { kind: "none" };
     const record = this.#state.deposit(txid);
-    if (record !== undefined && record.sessionKey !== v.sessionKey) {
-      const refusal = { ...CANNOT_CREDIT, note: `the presented deposit ${txid} is credited to another session` };
-      // Read from the chain when an uncredited txid would be, so the answer time tells nothing either
-      return { kind: "refused", refusal, needsLookup: known?.kind !== "found" };
-    }
-    if (record !== undefined) {
+    // Credited elsewhere, it is answered from the same read an uncredited txid would be, so nothing tells them apart
+    const elsewhere = record !== undefined && record.sessionKey !== v.sessionKey;
+    if (record !== undefined && !elsewhere) {
       if (asOfTip(record, tip).status !== "dead") return { kind: "credited" };
       return { kind: "refused", refusal: DEAD, needsLookup: false };
     }
 
+    if (known?.kind === "found" && elsewhere) {
+      const refusal = { ...CANNOT_CREDIT, note: `the presented deposit ${txid} is credited to another session` };
+      return { kind: "refused", refusal, needsLookup: false };
+    }
     if (known?.kind === "found") {
       const e = evaluateDeposit(known.inspection, v.sessionKey, this.#config.terms, tip, known.tip);
       // Only a newer tip says it died, and it may have been mined since it was read, so it is read again first

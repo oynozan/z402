@@ -72,6 +72,9 @@ function pay(c: bigint, o: { txid?: string; seed?: Uint8Array } = {}): PaymentPa
   return paymentFor(requirements, voucherFor(requirements, c, { seed: o.seed, depositTxid: o.txid }));
 }
 
+/** A fresh session that has paid nothing, one per n */
+const throwaway = (n: number): Uint8Array => Uint8Array.from({ length: 32 }, (_, i) => (i * 11 + n * 3 + 40) % 256);
+
 /** Time that moves only when a test or a resolver sleep moves it */
 function fakeClock() {
   let ms = 0;
@@ -553,6 +556,67 @@ describe("deposits", () => {
     for (const txid of [elsewhere, otherMemo, otherAddress]) {
       expect(await probe(txid)).toEqual({ ...alike, settle: alike.verify, reads: 0 });
     }
+  });
+
+  test("with the lookups saturated, a credited-elsewhere txid and an uncredited one answer alike", async () => {
+    const gate = gated();
+    const r = rig(gate.wrap);
+    const elsewhere = await opened(r);
+    const otherMemo = send(r.chain, { memo: `${K}:2` });
+    // Twenty free verifies of txids that never answer hold the 4 slots and the 16 places in the queue
+    for (let n = 0; n < 20; n++) {
+      const txid = `f${n.toString(16).padStart(63, "0")}`;
+      gate.close(txid);
+      void r.s.verify(pay(500n, { txid, seed: throwaway(n) }), req());
+    }
+    await turn();
+
+    const seen = [];
+    for (const txid of [elsewhere, otherMemo]) {
+      const verdict = await r.s.verify(pay(500n, { txid, seed: OTHER_SEED }), req());
+      const settled = await r.s.settle(pay(500n, { txid, seed: OTHER_SEED }), req());
+      seen.push([verdict.invalidReason, verdict.invalidMessage, settled.errorReason, settled.errorMessage]);
+    }
+
+    expect(seen[0]).toEqual(seen[1]);
+    expect(seen[0]?.[0]).toBe(REASON.chainUnavailable);
+  });
+
+  test("with the chain unreadable, a credited-elsewhere txid and an uncredited one answer alike", async () => {
+    const r = rig();
+    const elsewhere = await opened(r);
+    const otherMemo = send(r.chain, { memo: `${K}:2` });
+    r.chain.setUnavailable(true);
+
+    const seen = [];
+    for (const txid of [elsewhere, otherMemo]) {
+      const verdict = await r.s.verify(pay(500n, { txid, seed: OTHER_SEED }), req());
+      const settled = await r.s.settle(pay(500n, { txid, seed: OTHER_SEED }), req());
+      seen.push([verdict.invalidReason, verdict.invalidMessage, settled.errorReason, settled.errorMessage]);
+    }
+
+    expect(seen[0]).toEqual(seen[1]);
+    expect(seen[0]?.[0]).toBe(REASON.chainUnavailable);
+  });
+
+  test("a credited deposit gone from the chain answers like a txid the chain never had", async () => {
+    const r = rig();
+    const gone = await opened(r);
+    r.chain.hold(gone);
+    r.chain.mine(41);
+    await r.watcher.pollNow();
+    expect(r.state.deposit(gone)?.status).toBe("dead");
+
+    const seen = [];
+    for (const txid of [gone, "ee".repeat(32)]) {
+      const verdict = await r.s.verify(pay(500n, { txid, seed: OTHER_SEED }), req());
+      seen.push([verdict.invalidReason, verdict.invalidMessage]);
+    }
+
+    expect(seen).toEqual([
+      [REASON.depositNotFound, "the chain has no such tx"],
+      [REASON.depositNotFound, "the chain has no such tx"],
+    ]);
   });
 
   test("re-presented credited txid is acked, not re-credited", async () => {
