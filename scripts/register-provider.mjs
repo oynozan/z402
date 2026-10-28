@@ -6,7 +6,7 @@
  *                                      [--registration-token-file <file>] [--force]
  *
  * The keys file is a merchant-keygen file, best the --view-only one: only its network, uivk and orchardOnlyAddress
- * are read, and only uivk and the address leave this process. Registering a payTo that is already registered
+ * are read, and only these three leave this process. Registering a payTo that is already registered
  * rotates its key, and the old key stops working at once.
  * The facilitator shows a key once, so the key file is opened (mode 0600, under umask 077) before the request is
  * sent: a key is never issued with nowhere to go. An existing key file is replaced only with --force. The new file

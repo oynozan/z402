@@ -156,7 +156,7 @@ What `/verify` and `/settle` ask of the requirements of a call (protocol v2.0):
 - `amount` must be a canonical zat from 1 to `windowZat`, without a sign, an exponent or a leading zero. It is the price of this call, which the provider sets for each route, and any such amount is taken. A session may pay 500 and then 800. A voucher is accepted when it is at least the amount of its own call above the last one (`c_new - c_last >= amount`) and within the session's limit, and a voucher short of its call's price is refused with `z402_cumulative_mismatch` and `cumulativeZat must be at least <c_last + amount>`.
 - `extra` must carry exactly the rail's terms. `termsVersion` is not checked.
 
-A requirements object that fails any of these, or names another scheme, network or asset than the rail's, is answered with `invalid_payment_requirements`.
+A requirements object that fails any of these, or names another asset than the rail's `ZEC`, is answered with `invalid_payment_requirements`. One that names a scheme or network this facilitator does not serve is answered with `unsupported_scheme`.
 
 ### Registering a provider
 

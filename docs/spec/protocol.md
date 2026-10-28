@@ -8,7 +8,7 @@
 - **Bazaar.** The facilitator serves `GET /discovery/resources` and `GET /discovery/search` (§17), and `apps/discovery` is retired (§14).
 
 Earlier versions. v1.1 clarified §7.3: only a successful settle acknowledges a deposit, and refusal snapshots are projected and informational. v1.2 does three things:
-- **One refusal code.** Every found but unusable txid answers `z402_deposit_memo_mismatch` (§5.2), so a refusal is no oracle on the merchant's viewing key.
+- **One refusal code.** A found txid that this session cannot use answers `z402_deposit_memo_mismatch` (§5.2), whether no output pays `payTo`, none carries this session's memo, or the txid is credited to another session, so a refusal is no oracle on the merchant's viewing key. A transparent or dead deposit keeps its own code, `z402_deposit_transparent` or `z402_deposit_dead`, which names only what anyone can see on chain.
 - **Corrections.** §2, §6, §8 and §10.
 - **New facilitator and API rules.** §15: the ledger lock, `onFatal`/`log`, `close()`, token and URL checks, and 405 on paid non-GET requests.
 
@@ -196,7 +196,7 @@ Reference values (W = 100,000, 2500 bps, cap 200,000):
   - `amount` is the charged delta `c_new − c_last` on success, and is **omitted** on failure.
 - `payer` and `extra.session` are present on every verify and settle response **after the voucher signature verifies**. They are **absent** on `invalid_payload`, `invalid_payment_requirements`, `invalid_network`, `invalid_scheme`, `unsupported_scheme`, `invalid_x402_version`, `z402_invalid_signature` and `unexpected_*`. Those answers are unauthenticated or pre-parse, and the client treats them as fatal or retryable without needing state.
 - Never `settlement_pending`: the SDK would call `/settle` again.
-- Never a non-200 status: a 500 leaks its body into the client-visible error, and a 200 missing `transaction` becomes a 502.
+- Never a non-200 status once the key check passes (a missing or unknown key is `401`, §16): a 500 leaks its body into the client-visible error, and a 200 missing `transaction` becomes a 502.
 
 ### 7.2 Session snapshot (`extra.session`)
 
@@ -243,7 +243,7 @@ Only `invalidReason` (verify) or `errorReason` (settle) reaches the client, so *
 | `unexpected_verify_error`, `unexpected_settle_error` | Facilitator bug | Back off 1 s, recover once. |
 | anything else | Unknown | Fatal. |
 
-**The list is closed: 8 standard and 11 scheme codes.** The facilitator emits nothing else. From v1.2 it emits `z402_deposit_memo_mismatch` for every found but unusable txid (§5.2). `z402_deposit_not_to_merchant` and `z402_deposit_other_session` stay in the list, and the client handles them the same way. The SDK and the API can still put their own strings in `PAYMENT-REQUIRED.error`. None of these are facilitator codes, and the client treats them as fatal:
+**The list is closed: 8 standard and 11 scheme codes.** The facilitator emits nothing else. From v1.2 it emits `z402_deposit_memo_mismatch` in all three cases of its §5.2 row, while `z402_deposit_transparent` and `z402_deposit_dead` keep their own codes. `z402_deposit_not_to_merchant` and `z402_deposit_other_session` stay in the list, and the client handles them the same way. The SDK and the API can still put their own strings in `PAYMENT-REQUIRED.error`. None of these are facilitator codes, and the client treats them as fatal:
 - `"Payment required"`: the `PAYMENT-SIGNATURE` was undecodable or absent;
 - `"No matching payment requirements"`: `accepted` was altered;
 - `"Facilitator … failed (<status>)"`: only after a 401 from a misconfigured token.
@@ -269,7 +269,7 @@ A facilitator timeout reaches the client as HTTP 502 with **neither** header, wh
 ## 10. Facilitator rules (summary; detail in the facilitator's own spec)
 
 - Bind to `127.0.0.1`. Start before the API (the API exits if `checkProvider` fails, §16, or if `/supported` lacks the route's scheme and network).
-- `/verify` is read-only; `/settle` re-checks and commits synchronously, with no `await` between check and write.
+- `/verify` writes no payment state: it commits no voucher and credits no deposit, though its refresh may record a deposit's chain status. `/settle` re-checks and commits synchronously, with no `await` between check and write.
 - Tip-driven poller: `GetLatestBlock` every 5 s, re-checking deposits on each tip change.
 - Refresh-before-refuse: before refusing a session that has a pending deposit, re-query it. Bounded by one RPC deadline (5 s), at most once per 5 s per session.
 - 5 s deadline per RPC. Transport errors map to `z402_chain_unavailable`. Only the three definitive not-found rows of the §15 `getTransaction` table (`isDefinitiveNotFound()`) mean not-found.
@@ -450,7 +450,7 @@ interface FacilitatorOptions {
   priceZat?: bigint /* ignored from v2.0: each provider prices its own routes */;
   providers?: {   /* registered providers (§16); without it, POST /providers answers 403 registration_disabled */
     dir: string; chainFor(p: { payTo: string; uivk: string }): ChainView; owns(p: { payTo: string; uivk: string }): Promise<boolean>;
-    max?: number /* 32, the operator not counted; 0 disables registration */; registrationToken?: string;
+    max?: number /* 32, the operator not counted; 0 turns away new providers only */; registrationToken?: string;
   };
   authToken?: string; ledgerPath?: string; host?: string /* 127.0.0.1 */; port?: number /* 0 */;
   pollIntervalMs?: number /* 5000 */; depositWaitMs?: number /* 30000: cross-backend first-sight skew reaches ~16 s */;
@@ -514,7 +514,7 @@ A provider is one `payTo` with its own view-only key (UIVK), API key, runtime an
   - Registrations run one at a time. A new provider's runtime (ledger lock, header, replay, first poll, watcher) opens before the registry is written, and only then is the key issued.
   - Answer: `201 {"providerId","network","payTo","apiKey"}`. The UIVK is never echoed.
   - **Rotation.** Registering a registered `payTo` again, with a key that owns it, answers `200` with the same shape and a new key. The old key stops working at once, on every route. This is also how a lost key is recovered.
-  - **Refusals**, with body `{"error": "<code>", "message": "<text>"}`: `400 invalid_request` (the message names the field), `401 unauthorized` (registration token missing), `403 not_owner` (the UIVK does not own `payTo`, or `payTo` has a transparent receiver), `403 provider_limit` (`Z402_MAX_PROVIDERS`, default 32, operator not counted, `0` disables registration), `403 registration_disabled` (no providers directory), and `409 operator` (`payTo` is the operator's).
+  - **Refusals**, with body `{"error": "<code>", "message": "<text>"}`: `400 invalid_request` (the message names the field), `401 unauthorized` (registration token missing), `403 not_owner` (the UIVK does not own `payTo`, or `payTo` has a transparent receiver), `403 provider_limit` (`Z402_MAX_PROVIDERS`, default 32, operator not counted; it applies to a new `payTo` only, so with `0` a registered provider can still rotate its key), `403 registration_disabled` (no providers directory), and `409 operator` (`payTo` is the operator's).
   - `scripts/register-provider.mjs --keys <view-only keys file> --facilitator <url> --out <key file>` does this from a merchant-keygen file and saves the key with mode 0600. It never prints the key, the UIVK or the registration token.
 - **`GET /providers/me`.** Authenticated with the API key. Answers `200 {"providerId","network","payTo"}`, or `401 {"error":"unauthorized"}` for an unknown key and for a rotated-out key from the moment it is rotated. `checkProvider` (§15) calls it.
 - **Isolation.** The key picks the provider's runtime, and a `paymentRequirements.payTo` other than that provider's answers `invalid_payment_requirements` (§10). Deposits decrypt only with that provider's UIVK, and credits live in that provider's ledger.
