@@ -17,6 +17,7 @@
 | Zallet `z_sendmany` for it | 5.1 s from the call to `success` (tip 114 at send) |
 | Chain visibility | First deposit: after the block, Zebra reported height 115 with 1 confirmation at once, while Zaino answered the old tip and height `"0"` for a few seconds. Later deposit `0fcb6eae...54df`, through `@z402/lightwalletd`: seen in the mempool 523 ms after broadcast, and mined 1359 ms after `mineNow(1)` |
 | Decrypting that transaction | `parseMicros` 61 to 91, `decryptMicros` 926 to 1707 over three runs, for 9,166 bytes and 2 Ironwood actions |
+| Two providers on one facilitator (§9, 2026-10-28) | Provider 2 registered through `POST /providers` (201, providerId `119de65c18324856`). One agent paid `:4021/chunk` at 500 and `:4023/chunk` at 800: 80 of 80 calls answered 200. Each provider's ledger holds only its own session (20,000 with 1 deposit; 32,000 with 2). The Bazaar lists both with `paidCallsToday` 40. Provider 2's key with provider 1's `payTo` got `invalid_payment_requirements` |
 
 ## 1. Environment
 
@@ -364,3 +365,100 @@ z402-08 repeated the honest, cheat, show and Ctrl-C runs on dev `7d171e2` from 0
 - `demo.sh down` removed the lock.
 - The ledger now has 905 lines (8 deposit, 62 status, 835 voucher), at tip 143.
 - The local tag `recording-2026-10-28` marks this commit.
+
+## 9. Two providers on one facilitator (multi-provider Task 6, z402-08)
+
+> z402-08 ran this, on the facilitator agent's runbook (`.superpowers/sdd/2026-10-28-z402-multi-provider/task-6-runbook.md`). The tree was `dev` at `5b7a59a`: the multi-provider merge `fa32236` (Tasks 1 to 4, the `apps/api` bazaar extension, protocol v2.0) plus the two-provider e2e test. The figures come from the run logs in `.data/demo/` (`facilitator.log`, `api.log`, `api2.log`, `agent-two-providers.log`, `clock.log`) and from both ledgers, all read after the run. The block clock mined one block every 25 s, heights 155 to 171, from 2026-10-28T16:25:24Z.
+
+**Result: pass on every check.** One facilitator served two providers with different `payTo` addresses and prices. One agent process paid both in one run, and each provider's ledger holds only its own session. The Bazaar lists both from their paid calls. Provider 2's key cannot reach provider 1's `payTo`.
+
+### 9.1 Setup (runbook steps 1 to 4)
+
+- **Step 1, the stack.** `scripts/demo.sh up`, then `scripts/demo.sh clock`.
+  - The facilitator printed its unchanged ready line, then `facilitator providers=0`. It created `.data/providers.regtest/` with mode 0700 (demo.sh passes it as `Z402_PROVIDERS_DIR`).
+  - It also warned once that the operator's keys file holds the spending seed. That is a regtest warning only; on mainnet the same file is refused.
+- **Step 2, provider 2's keys.** `merchant-keygen.mjs --network regtest`, then `--view-only`, both into `.secrets/` (mode 0600). Address `uregtest1wxc…kqv5tf`.
+- **Step 3, registration.** `node scripts/register-provider.mjs --keys .secrets/provider2-regtest.view.json --facilitator http://127.0.0.1:4022 --out "$PWD/.secrets/provider2-regtest.key"`.
+  - The answer was 201, and the script printed `providerId 119de65c18324856`, the payTo and the key file, nothing else.
+  - The facilitator checked ownership with the real UIVK (zdecrypt `owns`), logged `registered provider 119de65c18324856 payTo=…`, and opened `ledgers/119de65c18324856.jsonl` with its lock.
+- **Step 4, provider 2's API** on 4023 at 800 zat, detached in its own session (pid in `.data/demo/api2.pid`).
+  - Its startup `checkProvider` (`GET /providers/me` with the issued key) passed, and it printed `api listening on http://127.0.0.1:4023`.
+  - **Runbook correction.** `Z402_MERCHANT_KEYS_FILE` is resolved from the repo root, not the working directory. Run from `apps/api`, the runbook's `../../.secrets/…` pointed outside the repo (ENOENT). The `apps/api` README's `.secrets/provider2.view.json` form is right. The `$(cat ../../.secrets/…)` for the token is a shell path and was fine.
+
+### 9.2 Unpaid probe (step 5)
+
+| | Provider 1 (operator) `:4021/chunk` | Provider 2 `:4023/chunk` |
+|---|---|---|
+| status | 402 | 402 |
+| `amount` | 500 | 800 |
+| `payTo` | `uregtest1etw…35axkz` | `uregtest1wxc…kqv5tf` |
+| `extra` | `DEMO_TERMS`, `termsVersion` `cb7f148af0fda19a` | the same terms and the same `termsVersion` (v2 hashes the terms only) |
+| `extensions.bazaar` | `info.input` `{type: http, method: GET}`, a JSON output example, and a schema | the same, with its own example at 800 |
+
+### 9.3 The agent pays both (step 6)
+
+`cd apps/agent && ./node_modules/.bin/tsx src/main.ts --url http://127.0.0.1:4021/chunk --url http://127.0.0.1:4023/chunk --calls 40 --interval-ms 1000`, one process, one Zallet wallet, from 6,248,140,000 zat spendable.
+
+| When | What the agent saw |
+|---|---|
+| before #001 | Session `886f…84` for provider 1. Its D1 `9589…72` was broadcast inline in 5,643 ms and acknowledged. |
+| #001 `[1]` | 200 on the unconfirmed D1: c=500, limit 100,000 |
+| before #002 | Session `5ba1…7f` for provider 2. Its D1 `d8d8…67` was broadcast inline in 5,620 ms, after provider 1's send had settled (one send at a time per wallet), and acknowledged. |
+| #002 `[2]` | 200 on its unconfirmed D1: c=800, limit 100,000 |
+| #015 / #016 | Both D1s were mined at height 162 (16:28:19Z): limit 125,000, conf 100,000, credit 25,000 for each provider |
+| #064 `[2]` | Provider 2's 32nd call took its total to 25,600, so its headroom fell below the 100,000 window. D2 `d1db…6c` started in the background, was broadcast in 5,614 ms and acknowledged. Provider 1, at 500 zat, stayed above the window to the end and needed no D2. |
+| #080 `[2]` | c=32,000, limit 225,000 (conf 100,000, D2 pending 100,000, credit 25,000) |
+
+- All 80 calls answered 200, with no refusal and no error, and no call waited on the chain.
+- Every deposit was zero-conf: first seen at tips 161 and 164, with expiries 202 and 205, a margin of 41 blocks against the 20 needed.
+- D2 was mined at height 165 (16:29:34Z), four seconds after the last call.
+
+The agent's closing block:
+
+```
+per target:
+  [1] 40 paid  c=20,000  session 886f…84  payTo uregtest1etw…35axkz  deposits 1
+  [2] 40 paid  c=32,000  session 5ba1…7f  payTo uregtest1wxc…kqv5tf  deposits 2
+```
+
+### 9.4 Ledger cross-check (step 7)
+
+| | Operator ledger `.data/facilitator-ledger.regtest.jsonl` | Provider 2 ledger `.data/providers.regtest/ledgers/119de65c18324856.jsonl` |
+|---|---|---|
+| header | none: the file predates v1.2.1 and keeps replaying unrewritten, as §15 allows on regtest | `{"t":"ledger","network":"zcash:regtest","payTo":"uregtest1wxc…kqv5tf"}` |
+| this run's session | `886f8da6…5d84` | `5ba118cc…107f`, the only session in the file |
+| deposits | `9589…72` (100,000) | `d8d8…67` and `d1db…6c` (100,000 each) |
+| vouchers | 40, the last at cumulative 20,000 | 40, the last at cumulative 32,000 |
+| agent's own figures | `[1]` c=20,000, 1 deposit | `[2]` c=32,000, 2 deposits |
+
+- Provider 2's session key is not in the operator ledger, and provider 1's is not in provider 2's.
+- The two ledgers share no txid.
+- Every keyed line in provider 2's ledger is its own session.
+
+### 9.5 The Bazaar and the isolation probe (step 7)
+
+- **`GET /discovery/resources?type=http`** answered `pagination {limit 20, offset 0, total 2}`. Both items were created from paid calls alone, so neither has a `lastSeen`:
+  - `http://127.0.0.1:4021/chunk`: provider 1's `payTo`, amount 500, `paidCallsToday` 40;
+  - `http://127.0.0.1:4023/chunk`: provider 2's `payTo`, amount 800, `paidCallsToday` 40.
+- **`GET /discovery/search?query=chunk`** returned both, with `partialResults: false` and `cursor: null`.
+- **`pnpm --filter @z402/agent discover`**, on its new default of `http://127.0.0.1:4022`, printed `GET  http://127.0.0.1:4021/chunk  500 zat  40 paid today` and the same line for 4023 at 800.
+- **Isolation probe.** Two validly signed vouchers went to `/verify` with provider 2's API key.
+  - The control, with provider 2's own requirements, got `isValid: false, invalidReason: z402_deposit_required`: a fresh session with no deposit.
+  - The probe, with the same requirements but provider 1's `payTo`, got `invalidReason: invalid_payment_requirements`.
+  - The facilitator logged both lines with the providerId `119de65c18324856`, never the key.
+- **Secrets.** No log of the run contains an API key (the `z402_` pattern), a UIVK, provider 2's key, or the operator's token. The five `.data/demo` logs were checked by count only, with nothing printed.
+
+### 9.6 Reproduce
+
+```
+scripts/demo.sh up && scripts/demo.sh clock
+node scripts/merchant-keygen.mjs --network regtest --out "$PWD/.secrets/provider2-regtest.json"
+node scripts/merchant-keygen.mjs --view-only --from .secrets/provider2-regtest.json --out "$PWD/.secrets/provider2-regtest.view.json"
+node scripts/register-provider.mjs --keys .secrets/provider2-regtest.view.json --facilitator http://127.0.0.1:4022 --out "$PWD/.secrets/provider2-regtest.key"
+cd apps/api && Z402_NETWORK=regtest Z402_FACILITATOR_URL=http://127.0.0.1:4022 \
+  Z402_FACILITATOR_TOKEN="$(cat ../../.secrets/provider2-regtest.key)" \
+  Z402_MERCHANT_KEYS_FILE=.secrets/provider2-regtest.view.json Z402_PRICE_ZAT=800 Z402_API_PORT=4023 \
+  ../../node_modules/.bin/tsx src/main.ts &      # keys path from the repo root
+cd apps/agent && ./node_modules/.bin/tsx src/main.ts --url http://127.0.0.1:4021/chunk --url http://127.0.0.1:4023/chunk --calls 40
+curl -s 'http://127.0.0.1:4022/discovery/resources?type=http'
+```
