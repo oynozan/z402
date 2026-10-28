@@ -141,9 +141,9 @@ It pays from Zallet account 0. Each run first checks that the agent still holds 
 ## Stop, restart, wipe
 
 - `docker compose stop` / `docker compose start`, or `docker compose restart`. After a reboot every service comes
-  back by itself (`restart: unless-stopped`) and the one-shot jobs do not run again. A restart or a reboot starts
-  every container at once: the services wait up to 2 minutes for the facilitator, and the API exits and comes back
-  until it answers. Here all were healthy again after 30 s.
+  back by itself (`restart: unless-stopped`) and the one-shot jobs do not run again (`docker compose restart` runs
+  them, and they change nothing). A restart or a reboot starts every container at once: the services wait up to 2
+  minutes for the facilitator, and the API waits for it before it starts. Here all were healthy again after 20 to 27 s.
 - `docker compose down -v` deletes every volume: chain, wallet, Zaino's index, merchant keys, facilitator ledger,
   drops and models. The next `up -d` starts a new chain from height 0.
 - The chain and the facilitator ledger go together. The ledger records sessions and deposits by transaction id and

@@ -3,8 +3,9 @@
 // reach a daemon, and with an empty env file, so a local .env cannot change what they see. They are skipped where no
 // docker CLI with Compose is installed.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -148,6 +149,82 @@ test("compose: the facilitator's start period outlasts its wait for Zaino and it
     seconds(healthcheck.start_period) >= waitS + ownStartS,
     `start_period ${healthcheck.start_period} ends before wait-lightwalletd's ${waitS} s plus ${ownStartS} s`,
   );
+});
+
+test("compose: after a restart the API waits for the facilitator rather than exit and restart", { skip }, () => {
+  const { api, facilitator } = services();
+  const script = (api.command ?? []).join("\n");
+  const wait = script.indexOf("node docker/wait-facilitator.mjs");
+  assert.ok(wait !== -1, "the API's command does not run docker/wait-facilitator.mjs");
+  assert.ok(wait < script.indexOf("apps/api/src/main.ts"), "the API starts before it waits for the facilitator");
+  const deadline = /const TIMEOUT_MS = ([\d_]+);/.exec(read("docker/wait-facilitator.mjs"));
+  assert.ok(deadline !== null, "docker/wait-facilitator.mjs no longer sets TIMEOUT_MS");
+  const waitS = Number(deadline[1].replaceAll("_", "")) / 1000;
+  const startS = seconds(facilitator.healthcheck.start_period);
+  assert.ok(waitS >= startS, `wait-facilitator gives up after ${waitS} s, before the facilitator's start period ends`);
+  const apiStart = api.healthcheck.start_period;
+  assert.ok(seconds(apiStart) >= waitS, `the API's start_period ${apiStart} ends before its wait of ${waitS} s`);
+});
+
+test("compose: after a restart Zallet waits for Zebra's RPC, then runs its image's entrypoint", { skip }, () => {
+  const { zallet } = services();
+  const [shell, flag, script = "", zero] = zallet.entrypoint ?? [];
+  assert.deepEqual([shell, flag, zero], ["/bin/sh", "-c", "--"]);
+  const wait = script.indexOf("http://zebra:18232/");
+  assert.ok(wait !== -1 && wait < script.indexOf("exec "), "Zallet starts before it waits for Zebra's RPC");
+  // Compose prints a $ of the script as $$
+  const dockerfile = read("docker/zallet.Dockerfile");
+  const entrypoint = JSON.parse(/^ENTRYPOINT\s+(\[.*\])$/m.exec(dockerfile)?.[1] ?? "[]");
+  assert.ok(entrypoint.length > 0, "docker/zallet.Dockerfile has no ENTRYPOINT");
+  const exec = new RegExp(`exec ${entrypoint.join(" ").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} "\\$\\$?@"\\n?$`);
+  assert.match(script, exec);
+  assert.deepEqual(zallet.command, JSON.parse(/^CMD\s+(\[.*\])$/m.exec(dockerfile)?.[1] ?? "null"));
+});
+
+test("compose: Zallet's sync logs warnings only, which at info is thousands of lines a second", { skip }, () => {
+  const directives = (services().zallet.environment?.RUST_LOG ?? "").split(",");
+  assert.ok(directives.includes("zallet_core::components::sync=warn"), `RUST_LOG is ${directives.join(",")}`);
+});
+
+test("wait-facilitator: waits for a facilitator that is not up yet, sends its token, prints nothing", async () => {
+  const work = mkdtempSync(join(tmpdir(), "z402-wait-"));
+  const listen = (server, port) => new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+  try {
+    const tokenFile = join(work, "facilitator-token");
+    writeFileSync(tokenFile, "t-wait-facilitator\n");
+    const free = createServer();
+    await listen(free, 0);
+    const { port } = free.address();
+    await new Promise((resolve) => free.close(resolve));
+
+    const child = spawn(process.execPath, [join(ROOT, "docker/wait-facilitator.mjs"), tokenFile], {
+      env: { PATH: process.env.PATH, Z402_FACILITATOR_URL: `http://127.0.0.1:${port}` },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let printed = "";
+    child.stdout.on("data", (d) => (printed += d));
+    child.stderr.on("data", (d) => (printed += d));
+    const exited = new Promise((resolve) => child.on("exit", resolve));
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    assert.equal(child.exitCode, null, "it stopped waiting before the facilitator listened");
+
+    const seen = [];
+    // A facilitator refusing the probe has still started, which is all the API needs to know
+    const facilitator = createServer((req, res) => {
+      seen.push([req.method, req.url, req.headers.authorization]);
+      res.writeHead(401).end();
+    });
+    await listen(facilitator, port);
+    try {
+      assert.equal(await exited, 0);
+    } finally {
+      facilitator.close();
+    }
+    assert.deepEqual(seen, [["GET", "/supported", "Bearer t-wait-facilitator"]]);
+    assert.equal(printed, "");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });
 
 /** Qwen 2.5's training context, which caps a llama.cpp slot */

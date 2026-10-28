@@ -1,8 +1,9 @@
 // The wallet-fund job of compose.yaml, a port of infra/z3/fund-agent.sh. The agent is account 0 of the Zallet wallet,
 // paying from its Orchard-only address at the lowest diversifier index from 1 that accepts one, the rule packages/client
-// follows. When it holds less than 1 ZEC spendable, the job mines
-// 110 blocks of coinbase to the wallet's miner address, shields up to 10 mature coinbase outputs to the agent, and
-// mines the block that confirms them. Otherwise it changes nothing, so every `docker compose up` can run it again.
+// follows. When it holds less than 1 ZEC spendable, the job first mines one block if the mempool holds transactions,
+// which confirms the change of a payment made just before, and if that is not enough it mines 110 blocks of coinbase
+// to the wallet's miner address, shields up to 10 mature coinbase outputs to the agent, and mines the block that
+// confirms them. Otherwise it changes nothing, so every `docker compose up` can run it again.
 // RPC addresses come from Z3_ZEBRA_RPC and Z3_ZALLET_RPC (infra/z3/rpc.mjs).
 import { readFileSync } from "node:fs";
 import { mineNow, zalletRpc, zebraRpc } from "../../infra/z3/rpc.mjs";
@@ -88,6 +89,13 @@ runJob("wallet-fund", async () => {
 
   await waitFor("Zallet sync", 600_000, synced);
   let have = await spendableZat(account);
+  // Zallet counts no change of a payment still in the mempool, even at minconf 0, so one block may be enough
+  if (have < MIN_ZAT && (await zebraRpc("getrawmempool")).length > 0) {
+    log(`agent holds ${have} zat spendable and the mempool is not empty, mining one block first`);
+    await mineNow(1);
+    await waitFor("Zallet sync", 600_000, synced);
+    have = await spendableZat(account);
+  }
   if (have >= MIN_ZAT) {
     log(`agent ${agent} already holds ${have} zat spendable`);
     return;

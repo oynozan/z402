@@ -135,8 +135,25 @@ services:
     pull_policy: never
     restart: unless-stopped
     stop_grace_period: 15s
+    # Zallet exits when the name zebra does not resolve yet, as after a restart that starts every container at once
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        body='{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}'
+        i=0
+        until wget -q -O /dev/null -T 2 --header 'Content-Type: application/json' --post-data "$$body" \
+            http://zebra:18232/ 2>/dev/null; do
+          i=$$((i + 1))
+          [ "$$i" -lt 150 ] || break
+          sleep 2
+        done
+        exec /usr/local/bin/zallet-zaino --datadir /var/lib/zallet --config /etc/zallet/zallet.toml "$$@"
+      - --
+    command: ["start"]
     environment:
-      RUST_LOG: info,hyper_util=warn,reqwest=warn
+      # Zallet beta.1's sync logs "Reached chain tip" thousands of times a second while it services wallet requests
+      RUST_LOG: info,hyper_util=warn,reqwest=warn,zallet_core::components::sync=warn
     volumes:
       - zallet:/var/lib/zallet
     mem_limit: 1g
@@ -291,6 +308,7 @@ services:
       - -c
       - |
         set -eu
+        node docker/wait-facilitator.mjs /run/z402/facilitator-token
         Z402_FACILITATOR_TOKEN="$$(cat /run/z402/facilitator-token)"
         Z402_PAY_TO="$$(cat /run/z402/pay-to)"
         export Z402_FACILITATOR_TOKEN Z402_PAY_TO
@@ -314,7 +332,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 2m
+      # Covers wait-facilitator.mjs, which after a restart may wait as long as the facilitator's own start period
+      start_period: 15m
       start_interval: 3s
 
   llm:
