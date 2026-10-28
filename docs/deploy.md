@@ -162,3 +162,11 @@ Docker keeps container logs without limit unless the daemon sets a rotating defa
 
 `node --test docker/test/` checks this setup without a running Docker daemon: start order, restarts, the smoke
 service, image pins, file modes in the images and the limits that fit the local models.
+
+## Beyond regtest
+
+Compose runs a private regtest chain, so only the bundled agent holds coins that can pay. On testnet or mainnet the
+chain containers are not needed: point the facilitator at a public lightwalletd over `https://` (`Z402_LWD_URL`, for
+example `https://zec.rocks:443` on mainnet) and set `Z402_NETWORK`. Give the facilitator only `Z402_PAY_TO` and
+`Z402_UIVK` instead of the keygen file: the viewing key reads deposits and cannot spend, and a seed-bearing keys file
+is refused on mainnet. Set each service's `PUBLIC_URL` to the address agents reach it at.
