@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 use zcash_protocol::consensus::BlockHeight;
-use zdecrypt::{decode_key, decode_ua, inspect, inspect_expect, At, Expect, Net};
+use zdecrypt::{decode_key, decode_ua, inspect, inspect_expect, keygen, At, Expect, Net};
 
 const FX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
@@ -86,8 +86,9 @@ fn synthetic_v6_deposit_passes_the_z402_rule_only_for_its_session() {
         assert_eq!(r["verdict"]["paidZat"], 100_000);
     }
     let keys = decode_key(s(m, "uivk"), Net::Testnet).unwrap();
-    let other_session = Expect { memo: format!("{}1", s(d, "memo").trim_end_matches('0')), min_zat: 100_000 };
-    let r = inspect_expect(&raw, &keys, at, Some(&ua), Some(&other_session)).unwrap();
+    // The verdict wants the exact memo, so another index of the same session is a mismatch, though the facilitator credits it (protocol §5.1)
+    let another_index = Expect { memo: format!("{}1", s(d, "memo").trim_end_matches('0')), min_zat: 100_000 };
+    let r = inspect_expect(&raw, &keys, at, Some(&ua), Some(&another_index)).unwrap();
     assert_eq!(r["verdict"]["reasons"][0], "MEMO_MISMATCH");
     let agent = inspect(&raw, &decode_key(s(&f, "agentUfvk"), Net::Testnet).unwrap(), at, None).unwrap();
     assert_eq!((s(&agent["outputs"][0], "scope"), agent["outputs"][0]["valueZat"].as_u64()), ("internal", Some(40_000)));
@@ -105,4 +106,28 @@ fn synthetic_sapling_output_decrypts() {
     let r = inspect(&raw, &decode_key(s(m, "uivk"), Net::Testnet).unwrap(), At::Mempool { tip: BlockHeight::from_u32(4_547_329) }, Some(&ua)).unwrap();
     let o = &r["outputs"][0];
     assert_eq!((s(o, "pool"), o["valueZat"].as_u64(), s(o, "memoText"), o["toPayTo"].as_bool()), ("sapling", Some(20_000), "z402 sapling check", Some(true)));
+}
+
+#[test]
+fn synthetic_v6_deposit_decrypts_under_regtest() {
+    let f = fixture();
+    let d = &f["deposit"];
+    // Testnet and regtest share coin type 1, so the testnet merchant seed gives the same receivers on regtest
+    let seed: [u8; 32] = hex::decode(s(&f["merchant"], "seedHex")).unwrap().try_into().unwrap();
+    let merchant = keygen(&seed, Net::Regtest).unwrap();
+    let keys = decode_key(s(&merchant, "uivk"), Net::Regtest).unwrap();
+    // The deposit pays the Orchard receiver of the merchant's Orchard and Sapling address, not of its Orchard-only one
+    let ua = decode_ua(s(&merchant, "address"), Net::Regtest).unwrap();
+    let at = At::Mempool { tip: BlockHeight::from_u32(d["tip"].as_u64().unwrap() as u32) };
+
+    let r = inspect(&hex::decode(s(d, "hex")).unwrap(), &keys, at, Some(&ua)).unwrap();
+
+    assert_eq!(s(&r, "txid"), s(d, "txid"));
+    assert_eq!(r["outputs"].as_array().unwrap().len(), 1, "{r}");
+    let o = &r["outputs"][0];
+    assert_eq!(
+        (s(o, "pool"), s(o, "scope"), o["valueZat"].as_u64(), o["toPayTo"].as_bool(), s(o, "memoText")),
+        ("ironwood", "external", Some(100_000), Some(true), s(d, "memo"))
+    );
+    assert!(s(o, "recipient").starts_with("uregtest1"), "{}", s(o, "recipient"));
 }

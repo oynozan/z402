@@ -235,18 +235,18 @@ fn every_subcommand_reads_its_key_on_the_chosen_network() {
 }
 
 #[test]
-fn serve_decodes_pay_to_on_the_keys_network() {
+fn decrypt_takes_pay_to_on_the_keys_network() {
     let regtest = keygen(&seed(), Net::Regtest).unwrap();
     let testnet = keygen(&seed(), Net::Testnet).unwrap();
-    let request = |id: u32, pay_to: &str| json!({ "id": id, "height": 10, "txHex": "00", "payTo": pay_to });
-    let input = format!("{}\n{}\n", request(1, s(&regtest, "orchardOnlyAddress")), request(2, s(&testnet, "orchardOnlyAddress")));
-    let out = spawn(&["serve", "--network", "regtest"], &[("ZDECRYPT_KEY", s(&regtest, "uivk"))], &input);
-    let replies: Vec<Value> = String::from_utf8(out.stdout).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(replies.len(), 2, "{replies:?}");
+    let key = [("ZDECRYPT_KEY", s(&regtest, "uivk"))];
+    let decrypt = |pay_to: &str| run(&["decrypt", "--network", "regtest", "--height", "10", "--pay-to", pay_to, "--tx-hex", "00"], &key);
     // The regtest address is accepted, so it is the made-up tx that fails
-    assert_eq!((&replies[0]["id"], &replies[0]["ok"]), (&json!(1), &json!(false)));
-    assert!(s(&replies[0], "error").starts_with("transaction does not parse"), "{}", replies[0]);
-    assert!(s(&replies[1], "error").contains("not a regtest unified address"), "{}", replies[1]);
+    let (code, v) = decrypt(s(&regtest, "orchardOnlyAddress"));
+    assert_eq!(code, 2, "{v}");
+    assert!(s(&v, "error").starts_with("transaction does not parse"), "{v}");
+    let (code, v) = decrypt(s(&testnet, "orchardOnlyAddress"));
+    assert_eq!(code, 2, "{v}");
+    assert!(s(&v, "error").contains("not a regtest unified address"), "{v}");
 }
 
 #[cfg(feature = "testbuild")]

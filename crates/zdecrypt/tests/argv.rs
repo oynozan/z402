@@ -11,7 +11,7 @@ use zdecrypt::{keygen, Net};
 
 /// Bytes 00 01 02 .. 1f
 const SEED: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const UNKNOWN_COMMAND: &str = "unknown command (expected one of: keygen, derive-uivk, decrypt, owns, serve, build-test)";
+const UNKNOWN_COMMAND: &str = "unknown command (expected one of: keygen, derive-uivk, decrypt, owns, build-test)";
 const KEY_FROM_ENV_ONLY: &str = "the key is read from ZDECRYPT_KEY only";
 
 struct Ran {
@@ -181,7 +181,7 @@ fn the_key_flag_is_refused_whatever_follows_it() {
         &["derive-uivk", "--key=SECRET"],
         &["decrypt", "--tip", "9", "--key", "SECRET"],
         &["owns", "--address", "SECRET", "--key", "SECRET"],
-        &["serve", "--key=SECRET"],
+        &["decrypt", "--key=SECRET"],
         &["keygen", "--key"],
     ];
     for args in cases {
@@ -206,6 +206,13 @@ fn an_unknown_command_is_refused_without_echo() {
     }
 }
 
+#[test]
+fn serve_is_an_unknown_command() {
+    let (uivk, _) = account();
+    assert_refused(&["serve", "--key=SECRET"], &[], UNKNOWN_COMMAND);
+    assert_refused(&["serve", "--network", "regtest"], &[("ZDECRYPT_KEY", uivk.as_str())], UNKNOWN_COMMAND);
+}
+
 #[cfg(not(feature = "testbuild"))]
 #[test]
 fn build_test_is_an_unknown_command_without_the_testbuild_feature() {
@@ -217,8 +224,9 @@ fn no_command_prints_the_usage() {
     let ran = run::<&str>(&[], &[], "");
     assert_eq!(ran.code, 2, "{} {}", ran.stdout, ran.stderr);
     let usage = ran.error();
-    assert!(usage.starts_with("usage: zdecrypt <keygen|derive-uivk|decrypt|owns|serve|build-test>"), "{usage}");
+    assert!(usage.starts_with("usage: zdecrypt <keygen|derive-uivk|decrypt|owns|build-test>"), "{usage}");
     assert!(usage.contains("ZDECRYPT_KEY"), "{usage}");
+    assert!(usage.contains("seedHex") && usage.contains("real money"), "{usage}");
 }
 
 #[test]

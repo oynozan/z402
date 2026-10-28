@@ -377,7 +377,7 @@ fn receiver_matches(d: &Decrypted, ua: &UnifiedAddress) -> bool {
     }
 }
 
-/// What a z402 deposit must carry, the window amount and the exact session memo
+/// An exact-memo check in the style of Hanko's zpay-verify for operators, not the z402 crediting rule of protocol.md §5.2
 pub struct Expect {
     pub memo: String,
     pub min_zat: u64,
@@ -390,12 +390,18 @@ fn memo_text(memo: &[u8; 512]) -> Option<String> {
     }
 }
 
-// Reason codes match Hanko's zpay-verify where they overlap so either checker can back the facilitator
+/// The sum of the values, or None when it does not fit in a u64
+fn total(values: impl IntoIterator<Item = u64>) -> Option<u64> {
+    values.into_iter().try_fold(0u64, |sum, v| sum.checked_add(v))
+}
+
+// Reason codes match Hanko's zpay-verify where they overlap, and only an operator reads them
 fn verdict(found: &[Decrypted], pay_to: Option<&UnifiedAddress>, transparent: bool, expired: bool, e: &Expect) -> Value {
     let incoming: Vec<&Decrypted> = found.iter().filter(|d| d.scope == Scope::External).collect();
     let memo_ok: Vec<&Decrypted> = incoming.iter().copied().filter(|d| memo_text(&d.memo).as_deref() == Some(e.memo.as_str())).collect();
     let counted: Vec<&Decrypted> = memo_ok.iter().copied().filter(|d| pay_to.is_none_or(|ua| receiver_matches(d, ua))).collect();
-    let paid: u64 = counted.iter().map(|d| d.value_zat).sum();
+    // A crafted transaction can carry outputs whose values wrap a plain sum
+    let paid = total(counted.iter().map(|d| d.value_zat));
     let mut reasons = Vec::new();
     if incoming.is_empty() {
         reasons.push("NO_OUTPUT_TO_KEY");
@@ -404,8 +410,10 @@ fn verdict(found: &[Decrypted], pay_to: Option<&UnifiedAddress>, transparent: bo
     } else if counted.is_empty() {
         reasons.push("WRONG_RECIPIENT");
     }
-    if !incoming.is_empty() && paid < e.min_zat {
-        reasons.push("AMOUNT_TOO_LOW");
+    match paid {
+        None => reasons.push("VALUE_OVERFLOW"),
+        Some(paid) if !incoming.is_empty() && paid < e.min_zat => reasons.push("AMOUNT_TOO_LOW"),
+        Some(_) => {}
     }
     if transparent {
         reasons.push("TRANSPARENT_PART");
@@ -530,4 +538,17 @@ pub fn keygen(seed: &[u8; 32], net: Net) -> Result<Value, String> {
         "orchardOnlyAddress": orchard_ua.encode(&net),
         "orchardOnlyDiversifierIndex": u128::from(orchard_index).to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::total;
+
+    #[test]
+    fn a_total_past_u64_is_none() {
+        assert_eq!(total([u64::MAX, 1]), None);
+        assert_eq!(total([u64::MAX, 0]), Some(u64::MAX));
+        assert_eq!(total([40_000, 60_000]), Some(100_000));
+        assert_eq!(total([]), Some(0));
+    }
 }

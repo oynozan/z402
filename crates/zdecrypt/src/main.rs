@@ -5,16 +5,16 @@
 //! decrypt (--height H | --tip T) [--pay-to UA] [--expect-memo M --min-zat Z]
 //!         [--tx-hex HEX | --tx-file PATH | hex on stdin]
 //! owns --address UA                            which receivers of UA belong to the key
-//! serve                                        NDJSON requests on stdin, one JSON reply per line on stdout
 //! build-test ...                               testbuild feature only, see testbuild.rs
 //!
 //! Every subcommand takes --network regtest|testnet|mainnet, else env ZDECRYPT_NETWORK, else
 //! testnet. The key and every address must belong to that network. The key comes from env
 //! ZDECRYPT_KEY only, never from argv, which is visible in ps. A value flag is written as
 //! `--name value` or `--name=value`. --height is the mined height. --tip is the chain tip for a
-//! mempool tx, which is judged at tip + 1. With --expect-memo and --min-zat the report carries a
-//! verdict for the z402 deposit rule. Output is one JSON object on stdout. Exit 0 on success, 2 on
-//! any error with an error object on stdout.
+//! mempool tx, which is judged at tip + 1. With --expect-memo and --min-zat the report carries an
+//! exact-memo verdict in the style of Hanko's zpay-verify, for operators. It is not the z402
+//! crediting rule (protocol.md §5.2), which the facilitator applies. Output is one JSON object on
+//! stdout. Exit 0 on success, 2 on any error with an error object on stdout.
 //!
 //! An argument error is fixed text. It names a flag from the known list or the position of the
 //! argument, and never repeats what was typed, because a key or a seed may have landed in the wrong
@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{BufRead, Read, Write};
+use std::io::Read;
 
 use serde_json::{json, Value};
 use zcash_protocol::consensus::BlockHeight;
@@ -46,7 +46,7 @@ struct Args {
 }
 
 // Listed in every build, so the unknown-command message reads the same whatever features the binary has
-const COMMANDS: [&str; 6] = ["keygen", "derive-uivk", "decrypt", "owns", "serve", "build-test"];
+const COMMANDS: [&str; 5] = ["keygen", "derive-uivk", "decrypt", "owns", "build-test"];
 const SWITCHES: &[&str] = &["--pretty"];
 /// Flags that take a value, written as `--name value` or `--name=value`
 const VALUE_FLAGS: &[&str] = &[
@@ -72,7 +72,7 @@ const VALUE_FLAGS: &[&str] = &[
 
 fn usage() -> String {
     format!(
-        "usage: zdecrypt <{}> [flags] (the key is read from ZDECRYPT_KEY only; keygen prints a seedHex to stdout, so redirect it to a 0600 file)",
+        "usage: zdecrypt <{}> [flags] (the key is read from ZDECRYPT_KEY only; keygen prints a seedHex to stdout, which on mainnet controls real money, so redirect it to a 0600 file)",
         COMMANDS.join("|")
     )
 }
@@ -191,44 +191,6 @@ fn emit(v: &Value, pretty: bool) {
     }
 }
 
-fn serve(keys: &Keys) {
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let reply = match serde_json::from_str::<Value>(&line) {
-            Err(e) => json!({ "id": null, "ok": false, "error": format!("request is not JSON: {e}") }),
-            Ok(req) => {
-                let id = req.get("id").cloned().unwrap_or(Value::Null);
-                let result = (|| {
-                    let num = |k: &str| req.get(k).and_then(Value::as_u64).map(|n| n.to_string());
-                    let at = at_from(num("height").as_ref(), num("tip").as_ref())?;
-                    let raw = hex_bytes(req.get("txHex").and_then(Value::as_str).ok_or("txHex is missing")?)?;
-                    let pay_to = match req.get("payTo").and_then(Value::as_str) {
-                        Some(s) => Some(decode_ua(s, keys.network())?),
-                        None => None,
-                    };
-                    let expect = expect_from(
-                        req.get("expectMemo").and_then(Value::as_str).map(String::from),
-                        num("minZat"),
-                    )?;
-                    inspect_expect(&raw, keys, at, pay_to.as_ref(), expect.as_ref())
-                })();
-                match result {
-                    Ok(r) => json!({ "id": id, "ok": true, "result": r }),
-                    Err(e) => json!({ "id": id, "ok": false, "error": e }),
-                }
-            }
-        };
-        if writeln!(stdout, "{reply}").and_then(|_| stdout.flush()).is_err() {
-            break;
-        }
-    }
-}
-
 fn main() {
     let args = parse_args();
     let net = net_from(&args);
@@ -272,7 +234,6 @@ fn main() {
             let ua = decode_ua(args.flags.get("--address").unwrap_or_else(|| fail("--address is required")), net).unwrap_or_else(|e| fail(e));
             emit(&pay_to_info(&keys, &ua), pretty);
         }
-        "serve" => serve(&key_from(net)),
         #[cfg(feature = "testbuild")]
         "build-test" => emit(&zdecrypt::testbuild::run(&args.flags, net).unwrap_or_else(|e| fail(e)), pretty),
         _ => unknown_command(),
