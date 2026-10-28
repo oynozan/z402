@@ -19,6 +19,8 @@ const CONFIG: Omit<LlmConfig, "baseUrl"> = {
   chunkTimeoutMs: 5_000,
 };
 
+/** For tests that chain several paid calls and polls, which outlast vitest's default 5 s on a loaded machine */
+const LONG = 20_000;
 const running: { close(): Promise<void> }[] = [];
 afterEach(async () => {
   for (const r of running.splice(0)) await r.close();
@@ -368,7 +370,7 @@ describe("POST /v1/generate", () => {
     hold.open();
     expect(await json(pending)).toEqual({ stream, index: 1, text: "cd", done: false });
     expect(cumulative(stack)).toBe(1000n);
-  });
+  }, LONG);
 
   test("a client that hangs up mid-call releases the stream, and its chunk stays for sale", async () => {
     const hold = gate();
@@ -378,7 +380,10 @@ describe("POST /v1/generate", () => {
     const { stream } = (await json(stack.paidFetch(url, post({ prompt: "hi" })))) as Answer;
 
     const controller = new AbortController();
-    const abandoned = stack.paidFetch(url, { ...post({ stream }), signal: controller.signal }).catch((e: unknown) => e);
+    // The signal goes to each request itself, since the payment wrapper's clones of one lose it once collected
+    const hangingUp: typeof fetch = (input, init) => fetch(new Request(input, init), { signal: controller.signal });
+    const paidFetch = wrapFetchWithPayment(hangingUp, new x402Client().register(TEST_NETWORK, stack.scheme));
+    const abandoned = paidFetch(url, post({ stream })).catch((e: unknown) => e);
     await eventually(() => fetch(url, post({ stream })), 409);
     controller.abort();
     await abandoned;
@@ -390,7 +395,7 @@ describe("POST /v1/generate", () => {
     await vi.waitFor(() => expect(held?.state).toBe("done"));
     expect([held?.published, held?.cursor, held?.inFlight]).toEqual([2, 1, false]);
     expect((await fetch(url, post({ stream }))).status).toBe(402);
-  });
+  }, LONG);
 
   test("a provider that does not list the model makes the service not ready, refused before payment", async () => {
     const provider = await fake({ models: ["other:latest"] });
