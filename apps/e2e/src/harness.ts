@@ -2,6 +2,7 @@
  * The whole z402 stack in one process (protocol.md §15): a FakeChain, the facilitator reading it, the paid API in
  * front of the facilitator, and the stock x402 fetch paying through PrepaidVoucherScheme with a MockWallet.
  * Every stack gets its own chain and an in-memory facilitator ledger, since FakeChain txids repeat across instances.
+ * startMerchants puts several merchants, each with its own facilitator and API, on one chain and one paying client.
  */
 import {
   decodePaymentResponseHeader,
@@ -18,6 +19,7 @@ import { FakeChain, MockWallet } from "@z402/testkit";
 
 export const NETWORK = NETWORK_REGTEST;
 export const PAY_TO = `uregtest1${"q".repeat(60)}`;
+export const PAY_TO_2 = `uregtest1${"p".repeat(60)}`;
 /** Zallet's expiry delta under NU6.3 */
 export const EXPIRY_DELTA = 40;
 /** Covers a close that waits up to about 5 s for the API's keep-alive connection to the facilitator to idle out */
@@ -41,23 +43,48 @@ export interface Stack {
   close(): Promise<void>;
 }
 
+export interface Merchant {
+  payTo: string;
+  priceZat: bigint;
+  facilitator: FacilitatorHandle;
+  api: ApiHandle;
+}
+
+export interface MultiStackOptions {
+  merchants: readonly { payTo: string; priceZat: bigint }[];
+  onEvent?: (e: ClientEvent) => void;
+}
+
+export interface MultiStack {
+  chain: FakeChain;
+  wallet: MockWallet;
+  paidFetch: typeof fetch;
+  scheme: PrepaidVoucherScheme;
+  merchants: Merchant[];
+  /** Closes the scheme, then each merchant's API and facilitator, each even when one before it fails */
+  close(): Promise<void>;
+}
+
 /** Starts the facilitator, then the API on it, then the paying client, and closes what started if a later step fails */
 export async function startStack(o: StackOptions): Promise<Stack> {
-  const { priceZat } = o;
-  const chain = new FakeChain({ expiryDelta: EXPIRY_DELTA });
-  const facilitator = await startFacilitator({
-    network: NETWORK,
-    chain: chain.viewFor(PAY_TO),
-    payTo: PAY_TO,
-    priceZat,
-    terms: DEMO_TERMS,
-    pollIntervalMs: 50,
-    port: 0,
-  });
+  const { merchants, close, ...rest } = await startOn(new FakeChain({ expiryDelta: EXPIRY_DELTA }), [{ payTo: PAY_TO, priceZat: o.priceZat }], o);
+  const { facilitator, api } = merchants[0]!;
+  return { ...rest, facilitator, api, close };
+}
 
-  let api: ApiHandle | undefined;
+/** Every merchant on one chain, each with its own facilitator and API, and one client paying all of them */
+export function startMerchants(o: MultiStackOptions): Promise<MultiStack> {
+  return startOn(new FakeChain({ expiryDelta: EXPIRY_DELTA }), o.merchants, o);
+}
+
+async function startOn(
+  chain: FakeChain,
+  specs: MultiStackOptions["merchants"],
+  o: { maxDeposits?: number; onEvent?: (e: ClientEvent) => void },
+): Promise<MultiStack> {
+  const merchants: Merchant[] = [];
   try {
-    api = await startApi({ network: NETWORK, facilitatorUrl: facilitator.url, payTo: PAY_TO, priceZat, port: 0 });
+    for (const spec of specs) merchants.push(await startMerchant(chain, spec.payTo, spec.priceZat));
     const wallet = new MockWallet(chain);
     const scheme = new PrepaidVoucherScheme({
       wallet,
@@ -68,30 +95,40 @@ export async function startStack(o: StackOptions): Promise<Stack> {
       ...(o.onEvent !== undefined && { onEvent: o.onEvent }),
     });
     const paidFetch = wrapFetchWithPayment(fetch, new x402Client().register(NETWORK, scheme));
-    return stack({ chain, wallet, paidFetch, scheme, facilitator, api });
+    let closing: Promise<void> | undefined;
+    const close = (): Promise<void> => (closing ??= scheme.close().finally(() => closeAll(merchants)));
+    return { chain, wallet, paidFetch, scheme, merchants, close };
   } catch (e) {
     // The failure that stopped the start is the one worth reporting, not a close that fails after it
-    await api?.close().catch(() => undefined);
+    await closeAll(merchants).catch(() => undefined);
+    throw e;
+  }
+}
+
+async function startMerchant(chain: FakeChain, payTo: string, priceZat: bigint): Promise<Merchant> {
+  const facilitator = await startFacilitator({
+    network: NETWORK,
+    chain: chain.viewFor(payTo),
+    payTo,
+    priceZat,
+    terms: DEMO_TERMS,
+    pollIntervalMs: 50,
+    port: 0,
+  });
+  try {
+    const api = await startApi({ network: NETWORK, facilitatorUrl: facilitator.url, payTo, priceZat, port: 0 });
+    return { payTo, priceZat, facilitator, api };
+  } catch (e) {
     await facilitator.close().catch(() => undefined);
     throw e;
   }
 }
 
-function stack(parts: Omit<Stack, "close">): Stack {
-  const { scheme, api, facilitator } = parts;
-  let closing: Promise<void> | undefined;
-  const close = async (): Promise<void> => {
-    try {
-      await scheme.close();
-    } finally {
-      try {
-        await api.close();
-      } finally {
-        await facilitator.close();
-      }
-    }
-  };
-  return { ...parts, close: () => (closing ??= close()) };
+/** Each merchant's API then its facilitator, every one of them even when one fails, and the first failure after */
+async function closeAll(merchants: readonly Merchant[]): Promise<void> {
+  const results = await Promise.allSettled(merchants.map((m) => m.api.close().finally(() => m.facilitator.close())));
+  const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failed !== undefined) throw failed.reason;
 }
 
 /** The decoded PAYMENT-RESPONSE of a paid call */

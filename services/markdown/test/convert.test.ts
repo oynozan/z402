@@ -152,6 +152,7 @@ describe("convertPage fallbacks and limits", () => {
     expect(empty).toEqual({ title: "Only a title", byline: null, markdown: "", truncated: false });
   });
 
+  // 41,000 elements take seconds to parse and convert while the whole suite runs at once
   test("a document too large for Readability is converted whole, navigation included", () => {
     const filler = "<span>w</span>".repeat(41_000);
     const page = convertPage(
@@ -159,7 +160,7 @@ describe("convertPage fallbacks and limits", () => {
       LIMITS,
     );
     expect(page.markdown.startsWith("[Navigation](https://example.com/nav)")).toBe(true);
-  });
+  }, 30_000);
 
   test("a page with more than maxTags start tags is refused before it is parsed", () => {
     const started = Date.now();

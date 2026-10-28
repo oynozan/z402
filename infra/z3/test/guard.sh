@@ -78,7 +78,9 @@ expect_guard_death() {
 # A long list after the target, where a pipe into grep -q can die of SIGPIPE under pipefail
 if (
   HERE="$Z3"
+  # shellcheck source=../lib.sh
   source "$Z3/lib.sh"
+  # shellcheck disable=SC2329  # lib.sh calls it in place of the real docker
   docker() { cat "$WORK/volumes"; }
   set -o pipefail
   volume_present z3-regtest-zallet && ! volume_present z3-regtest-zall && ! volume_present filler-volume
@@ -99,6 +101,7 @@ expect_guard_death "docker volume ls failure stops up.sh before regtest-init" "d
 export SHIM_RUN=walletdb SHIM_VOLUME_LS_RC=0
 expect_guard_death "wallet.db without a marker stops up.sh before regtest-init" "refusing to run regtest-init.sh"
 
+# shellcheck disable=SC2031  # ambient values on purpose, to prove that compose() ignores them in its own subshell
 export SHIM_RUN=ready COMPOSE_PROJECT_NAME=evil COMPOSE_FILE=evil.yml Z3_CONFIG_DIR=/evil
 run_case up.sh
 first="$(grep '^compose' "$SHIM_LOG" | head -n1 || true)"
@@ -114,6 +117,7 @@ export SHIM_COMPOSE_RC=0 SHIM_VOLUMES="z3-regtest-zallet domture-data"
 run_case down.sh --wipe
 down_call="$(grep '^compose' "$SHIM_LOG" | head -n1 || true)"
 want="compose -p z3-regtest -f docker-compose.yml -f docker-compose.regtest.yml -f $Z3/compose.loopback.yml --env-file .env.regtest --profile * down --volumes --remove-orphans | COMPOSE_PROJECT_NAME=z3-regtest COMPOSE_FILE=unset Z3_CONFIG_DIR=unset"
+# shellcheck disable=SC2031  # rc is run_case's, set at top level; lib.sh's rc is a local of its own
 if [ "$rc" -eq 0 ] && [ "$down_call" = "$want" ] && grep -q '^volume rm z3-regtest-zallet ' "$SHIM_LOG" &&
   ! grep -q '^volume rm domture-data' "$SHIM_LOG"; then
   pass "down.sh --wipe is pinned to z3-regtest and removes only z3-regtest volumes"
@@ -224,7 +228,9 @@ if [ -z "$REAL_DOCKER" ] || ! "$REAL_DOCKER" compose version >/dev/null 2>&1 || 
 else
   ports="$(
     HERE="$Z3"
+    # shellcheck source=../lib.sh
     source "$Z3/lib.sh"
+    # shellcheck disable=SC2329  # lib.sh calls it in place of the real docker
     docker() { "$REAL_DOCKER" "$@"; }
     compose --profile indexer config --format json | jq -r '.services | to_entries[]
       | select(.key == "zebra" or .key == "zaino" or .key == "zallet") | .key as $s
@@ -241,4 +247,9 @@ else
   fi
 fi
 
-[ "$failures" -eq 0 ] && echo "all guard checks passed" || { echo "$failures check(s) failed"; exit 1; }
+if [ "$failures" -eq 0 ]; then
+  echo "all guard checks passed"
+else
+  echo "$failures check(s) failed"
+  exit 1
+fi

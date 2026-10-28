@@ -68,4 +68,12 @@ describe("readList", () => {
     expect(list?.pages).toBe(41);
     expect(asked).toHaveLength(41);
   });
+
+  test("keeps what the facilitator can hold from one page that holds far more than a page", async () => {
+    const { read } = bazaar(300_000, 300_000);
+    const list = await readList(read);
+    expect(list?.items).toHaveLength(MAX_ITEMS);
+    expect(list?.items.at(-1)).toBe(MAX_ITEMS - 1);
+    expect(list?.pages).toBe(1);
+  });
 });

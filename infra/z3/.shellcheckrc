@@ -1,0 +1,3 @@
+# lib.sh is sourced by the other scripts, so shellcheck follows it from here
+external-sources=true
+source-path=SCRIPTDIR

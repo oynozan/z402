@@ -277,8 +277,8 @@ const SERVICES = [
             bodyType: "json",
             input: {},
             inputSchema: { properties: {} },
-            // The declared example fills the parameter in, as the bazaar server extension does from the probe path
-            pathParams: { id: "example" },
+            // The drop box declares a placeholder, which the site shows in place of a value
+            pathParams: { id: "<drop id>" },
             pathParamsSchema: { properties: { id: { type: "string" } }, required: ["id"] },
             output: { id: "q3Zs0mYbT7cWpAxK1nGhUw", tip: 1046, expiresAtHeight: 1062 },
           }),

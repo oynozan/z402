@@ -60,6 +60,8 @@ async function settings(extra: Record<string, string> = {}): Promise<Record<stri
     // Nothing listens on port 1, so the service starts without a tip
     DROPBOX_LWD_URL: "http://127.0.0.1:1",
     DROPBOX_TIP_POLL_MS: "200",
+    // Set but empty, which counts as unset, so a price in a local .env cannot replace the service's own
+    Z402_PRICE_ZAT: "",
     ...extra,
   };
 }

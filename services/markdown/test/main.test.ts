@@ -69,6 +69,8 @@ test(
       Z402_FACILITATOR_URL: await facilitatorUrl(),
       Z402_FACILITATOR_TOKEN: TEST_TOKEN,
       Z402_PAY_TO: TEST_PAY_TO,
+      // Set but empty, which counts as unset, so a price in a local .env cannot replace the service's own
+      Z402_PRICE_ZAT: "",
       HOST: "127.0.0.1",
       PORT: "0",
     });

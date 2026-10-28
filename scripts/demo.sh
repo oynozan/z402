@@ -26,6 +26,8 @@ TOKEN_FILE="$DATA/token"
 KEYS="$ROOT/.secrets/merchant-regtest.json"
 ZDECRYPT="$ROOT/crates/zdecrypt/target/release/zdecrypt"
 LEDGER="$ROOT/.data/facilitator-ledger.$NETWORK.jsonl"
+# Registered providers: the registry, one ledger each and the Bazaar catalog
+PROVIDERS="$ROOT/.data/providers.$NETWORK"
 
 FAC_PORT=4022
 API_PORT=4021
@@ -40,6 +42,7 @@ CLOCK_EVERY=25
 FLOOR_ZAT=250000
 
 # Detaches into a new session, restores default SIGINT and SIGHUP, then execs the command
+# shellcheck disable=SC2016  # a perl program, single-quoted so that the shell leaves its $ alone
 DETACH='use POSIX; POSIX::setsid(); $SIG{INT} = "DEFAULT"; $SIG{HUP} = "DEFAULT"; exec { $ARGV[0] } @ARGV or die "cannot run $ARGV[0]: $!\n"'
 
 usage() {
@@ -53,7 +56,9 @@ usage: scripts/demo.sh <command>
   show [txid]           show a deposit's raw transaction, then decrypt it with the viewing key
                         (no txid means the newest deposit the agent wallet sent)
   status                process liveness, Zebra height, the agent wallet's spendable balance
-  down [--wipe-ledger]  stop the clock, the API and the facilitator that this script started
+  down [--wipe-ledger]  stop the clock, the API and the facilitator that this script started. --wipe-ledger
+                        also deletes the operator's ledger and the registered providers (registry, their
+                        ledgers, the catalog), for after a chain wipe
   --help                print this text
 
 State lives in .data/demo/ (pidfiles, logs, the facilitator token). Runbook: docs/demo.md
@@ -179,6 +184,7 @@ already_running() {
 }
 
 # bounded <seconds> <command...> kills the child at the deadline, since a Go binary such as docker ignores SIGALRM
+# shellcheck disable=SC2016  # a perl program, single-quoted so that the shell leaves its $ alone
 BOUND='my $t = shift; my $p = fork // exit 127; unless ($p) { exec @ARGV or exit 127 } $SIG{ALRM} = sub { kill "TERM", $p; sleep 1; kill "KILL", $p; waitpid $p, 0; exit 142 }; alarm $t; waitpid $p, 0; exit($? & 127 ? 1 : $? >> 8)'
 
 bounded() { perl -e "$BOUND" -- "$@"; }
@@ -269,7 +275,9 @@ start_facilitator() {
   (
     clear_z402_env
     # Absolute paths, since pnpm --filter runs the package from its own directory
+    # shellcheck disable=SC2030  # each child gets its own environment, set inside its own subshell
     export Z402_NETWORK="$NETWORK" Z402_FACILITATOR_TOKEN="$token" Z402_MERCHANT_KEYS_FILE="$KEYS" Z402_LEDGER="$LEDGER"
+    export Z402_PROVIDERS_DIR="$PROVIDERS"
     spawn facilitator pnpm --filter @z402/facilitator start
   )
 }
@@ -283,6 +291,7 @@ start_api() {
   info "starting pnpm --filter @z402/api start, log .data/demo/api.log"
   (
     clear_z402_env
+    # shellcheck disable=SC2031  # each child gets its own environment, set inside its own subshell
     export Z402_NETWORK="$NETWORK" Z402_FACILITATOR_TOKEN="$token" Z402_FACILITATOR_URL="$FAC_URL" Z402_PAY_TO="$pay_to"
     spawn api pnpm --filter @z402/api start
   )
@@ -425,6 +434,7 @@ cmd_show() {
   [ -x "$ZDECRYPT" ] || die "crates/zdecrypt/target/release/zdecrypt is not built (pnpm --filter @z402/facilitator build:native)"
   [ -f "$KEYS" ] || die ".secrets/merchant-regtest.json is missing"
   tmp="$(mktemp "${TMPDIR:-/tmp}/z402-tx.XXXXXX")"
+  # shellcheck disable=SC2064  # expanded now on purpose: $tmp is local and gone by the time EXIT runs
   trap "rm -f '$tmp'" EXIT
 
   step "Deposit $txid"
@@ -570,6 +580,7 @@ stop_proc() {
   elif is_orphaned "$name"; then
     pid="$(pid_of "$name")"
     for d in $(group_members "$pid"); do desc="$desc $(descendants_of "$d" | tr '\n' ' ')"; done
+    # shellcheck disable=SC2086  # split on purpose, one pid per line for sort
     desc="$(printf '%s\n' $desc | sort -un | tr '\n' ' ')"
     info "$name: its leader exited, signalling the members of its process group and their descendants"
   else
@@ -624,7 +635,14 @@ cmd_down() {
     else
       info "no ledger at .data/facilitator-ledger.$NETWORK.jsonl"
     fi
-    info "The ledger and the chain must be reset together. If the chain is not wiped yet, run"
+    # Their ledgers hold heights of the old chain too; a provider registers again and gets a new API key
+    if [ -e "$PROVIDERS" ] || [ -L "$PROVIDERS" ]; then
+      rm -rf -- "$PROVIDERS"
+      info "deleted .data/providers.$NETWORK/ (registered providers must register again, with new API keys)"
+    else
+      info "no registered providers at .data/providers.$NETWORK/"
+    fi
+    info "The ledgers and the chain must be reset together. If the chain is not wiped yet, run"
     info "bash infra/z3/down.sh --wipe yourself, then bash infra/z3/up.sh and bash infra/z3/fund-agent.sh"
     info "(this script never touches Docker)."
   fi

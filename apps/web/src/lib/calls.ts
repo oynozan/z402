@@ -62,7 +62,10 @@ export function exampleBlocks(input: RouteInput | null): ExampleBlock[] {
   return blocks.map((block) => ({ ...block, code: printable(block.code) }));
 }
 
-/** The route's URL with its example path and query parameters filled in */
+/**
+ * The route's URL with its example path and query parameters filled in. A path example that would need escaping, such
+ * as the drop box's "<drop id>", names the value rather than being one, so its parameter stays as the template has it.
+ */
 export function exampleUrl(route: CallRoute): string {
   let url: URL;
   try {
@@ -76,7 +79,7 @@ export function exampleUrl(route: CallRoute): string {
     .map((segment) => {
       const match = PARAM_RE.exec(segment);
       const value = match === null ? undefined : params[match[1] ?? match[2] ?? ""];
-      return value === undefined ? segment : encodeURIComponent(value);
+      return value === undefined || encodeURIComponent(value) !== value ? segment : value;
     })
     .join("/");
   for (const [name, value] of Object.entries(route.input?.queryParams ?? {})) url.searchParams.set(name, value);
