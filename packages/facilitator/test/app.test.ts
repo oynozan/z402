@@ -27,7 +27,15 @@ import {
 } from "@z402/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
-import { createFacilitatorApp, startFacilitator, type FacilitatorHandle, type FacilitatorOptions } from "../src/app.js";
+import {
+  createFacilitatorApp,
+  startFacilitator,
+  type AppOptions,
+  type FacilitatorHandle,
+  type FacilitatorOptions,
+  type Tenant,
+} from "../src/app.js";
+import { providerId } from "../src/providers/id.js";
 import { paymentFor, SESSION_KEY as K, voucherFor } from "./support/vouchers.js";
 
 const NETWORK = NETWORK_REGTEST;
@@ -107,8 +115,12 @@ const settle = (url: string, payload: PaymentPayload, r: PaymentRequirements) =>
   call(url, "/settle", { body: envelope(payload, r) });
 
 /** The requirements the API would send, built from /supported the way the server scheme copies the terms */
-async function requirementsOf(url: string, over: Partial<PaymentRequirements> = {}): Promise<PaymentRequirements> {
-  const supported = await call(url, "/supported");
+async function requirementsOf(
+  url: string,
+  over: Partial<PaymentRequirements> = {},
+  token: string | null = TOKEN,
+): Promise<PaymentRequirements> {
+  const supported = await call(url, "/supported", { token });
   const { windowZat, creditRatioBps, creditCapZat, zeroConfMinExpiryBlocks, termsVersion } =
     supported.json.kinds[0].extra;
   return {
@@ -219,6 +231,22 @@ async function serve(app: ReturnType<typeof createFacilitatorApp>) {
   return `http://127.0.0.1:${port}`;
 }
 
+/** createFacilitatorApp over one provider, the operator, who answers to TOKEN and to nobody else */
+function appOver(facilitator: x402Facilitator, over: Partial<AppOptions> = {}) {
+  const operator: Tenant = {
+    id: providerId(NETWORK, PAY_TO),
+    network: NETWORK,
+    payTo: PAY_TO,
+    facilitator,
+    extra: () => ({}),
+  };
+  return createFacilitatorApp({
+    operator,
+    tenantOf: (authorization) => (authorization === `Bearer ${TOKEN}` ? operator : undefined),
+    ...over,
+  });
+}
+
 describe("GET /supported", () => {
   test("lists the scheme with the terms, the terms version and payTo", async () => {
     const { url } = await boot();
@@ -240,7 +268,7 @@ describe("GET /supported", () => {
           },
         },
       ],
-      extensions: [],
+      extensions: ["bazaar"],
       signers: { "zcash:*": [] },
     });
   });
@@ -262,6 +290,25 @@ describe("GET /supported", () => {
       creditCapZat: "5",
       zeroConfMinExpiryBlocks: 3,
     });
+  });
+
+  test("is public: it needs no token, and a query string changes nothing", async () => {
+    const { url } = await boot();
+    const withToken = await call(url, "/supported");
+    expect(await call(url, "/supported", { token: null })).toMatchObject({ status: 200, json: withToken.json });
+    expect(await call(url, "/supported?token=wrong", { token: null })).toMatchObject({ status: 200 });
+    expect(withToken.json.kinds[0].extra.payTo).toBe(PAY_TO);
+  });
+
+  test("still refuses a key that names nobody, as it did before it needed none", async () => {
+    const { url } = await boot();
+    for (const init of [{ token: "" }, { token: "wrong" }, { token: `${TOKEN}x` }] as const) {
+      const res = await call(url, "/supported", init);
+      expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
+      expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    }
+    const basic = await call(url, "/supported", { token: null, headers: { authorization: "Basic abc" } });
+    expect(basic.status).toBe(401);
   });
 });
 
@@ -298,31 +345,49 @@ describe("GET /providers/me", () => {
     const { url } = await boot({ log: (line) => lines.push(line) });
     const res = await call(url, "/providers/me?apikey=hunter2");
     expect(JSON.stringify(res.json)).not.toContain(TOKEN);
-    expect(lines).toEqual(["GET /providers/me 200"]);
+    expect(lines).toEqual([`GET /providers/me 200 ${ME.providerId}`]);
   });
 
-  test("createFacilitatorApp answers from the `me` it is given", async () => {
-    const facilitator = new x402Facilitator();
+  test("createFacilitatorApp answers from the provider its lookup finds", async () => {
     const testnetPayTo = `utest1${"q".repeat(60)}`;
-    const url = await serve(
-      createFacilitatorApp({ facilitator, authToken: TOKEN, me: { network: "zcash:testnet", payTo: testnetPayTo } }),
-    );
+    const tenant: Tenant = {
+      id: providerId("zcash:testnet", testnetPayTo),
+      network: "zcash:testnet",
+      payTo: testnetPayTo,
+      facilitator: new x402Facilitator(),
+      extra: () => ({}),
+    };
+    const url = await serve(createFacilitatorApp({ operator: tenant, tenantOf: () => tenant }));
     const res = await call(url, "/providers/me");
     expect(res.status).toBe(200);
     expect(res.json).toEqual({ providerId: "ef37610a46f32076", network: "zcash:testnet", payTo: testnetPayTo });
   });
 
-  test("is a 404 where createFacilitatorApp is given no `me`, and still behind the token", async () => {
-    const facilitator = new x402Facilitator();
-    const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN }));
-    expect(await call(url, "/providers/me")).toMatchObject({ status: 404, json: { error: "not_found" } });
-    expect((await call(url, "/providers/me", { token: null })).status).toBe(401);
+  test("createFacilitatorApp is a 401 where its lookup finds nobody", async () => {
+    const url = await serve(appOver(new x402Facilitator(), { tenantOf: () => undefined }));
+    const res = await call(url, "/providers/me");
+    expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
+    expect(res.headers.get("www-authenticate")).toBe("Bearer");
+  });
+
+  test("createFacilitatorApp hands the lookup the header as it came, or nothing", async () => {
+    const seen: Array<string | undefined> = [];
+    const url = await serve(
+      appOver(new x402Facilitator(), {
+        tenantOf: (authorization) => {
+          seen.push(authorization);
+          return undefined;
+        },
+      }),
+    );
+    await call(url, "/providers/me", { token: "abc" });
+    await call(url, "/providers/me", { token: null });
+    expect(seen).toEqual(["Bearer abc", undefined]);
   });
 });
 
 describe("the bearer token", () => {
   const routes: Array<[string, string]> = [
-    ["GET", "/supported"],
     ["GET", "/providers/me"],
     ["POST", "/verify"],
     ["POST", "/settle"],
@@ -343,7 +408,7 @@ describe("the bearer token", () => {
 
   test("the right token is accepted", async () => {
     const { url } = await boot({ authToken: "right-token" });
-    expect((await call(url, "/supported", { token: "right-token" })).status).toBe(200);
+    expect((await call(url, "/providers/me", { token: "right-token" })).status).toBe(200);
   });
 
   test("a missing token is refused even when the body cannot be read", async () => {
@@ -352,9 +417,21 @@ describe("the bearer token", () => {
     expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
   });
 
-  test("without a configured token nothing is checked", async () => {
+  test("without a configured token a request with no header is the operator's", async () => {
     const { url } = await boot({ authToken: undefined });
-    expect((await call(url, "/supported", { token: null })).status).toBe(200);
+    expect((await call(url, "/providers/me", { token: null })).status).toBe(200);
+    const r = await requirementsOf(url, {}, null);
+    const res = await call(url, "/verify", { token: null, body: envelope(pay(r, 500n), r) });
+    expect(res.json).toMatchObject({ invalidReason: REASON.depositRequired });
+  });
+
+  test("without a configured token a header that names nobody is still refused", async () => {
+    const { url } = await boot({ authToken: undefined });
+    for (const authorization of ["Bearer anybody", "Basic YTpi", "anybody"]) {
+      const res = await call(url, "/providers/me", { token: null, headers: { authorization } });
+      expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
+      expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    }
   });
 
   test("an empty token is refused at start instead of switching the check off", async () => {
@@ -370,13 +447,14 @@ describe("the bearer token", () => {
 
   test("more than one space after Bearer is accepted", async () => {
     const { url } = await boot();
-    const res = await call(url, "/supported", { token: null, headers: { authorization: `Bearer   ${TOKEN}` } });
+    const res = await call(url, "/providers/me", { token: null, headers: { authorization: `Bearer   ${TOKEN}` } });
     expect(res.status).toBe(200);
   });
 
-  test("createFacilitatorApp refuses a token no header could carry", () => {
+  test("createFacilitatorApp refuses a registration token no header could carry", () => {
     const facilitator = new x402Facilitator();
-    expect(() => createFacilitatorApp({ facilitator, authToken: "s3cret " })).toThrow(/^authToken:/);
+    expect(() => appOver(facilitator, { registrationToken: "s3cret " })).toThrow(/^providers\.registrationToken:/);
+    expect(() => appOver(facilitator, { registrationToken: "" })).toThrow(/^providers\.registrationToken:/);
   });
 });
 
@@ -800,7 +878,7 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
     test("a scheme that throws is answered with unexpected_* and the network of the requirements", async () => {
       const facilitator = new x402Facilitator().register(NETWORK, throwing);
       const log = vi.fn<(msg: string, err?: unknown) => void>();
-      const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN, log }));
+      const url = await serve(appOver(facilitator, { log }));
 
       const v = await verify(url, paymentFor(r, {}), r);
       expect(v.status).toBe(200);
@@ -825,7 +903,7 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
 
     test("serves /supported from the facilitator it is given", async () => {
       const facilitator = new x402Facilitator().register(NETWORK, throwing);
-      const url = await serve(createFacilitatorApp({ facilitator }));
+      const url = await serve(appOver(facilitator));
       const res = await call(url, "/supported", { token: null });
       expect(res.json).toMatchObject({ kinds: [{ x402Version: 2, scheme: SCHEME, network: NETWORK }] });
     });
@@ -852,7 +930,7 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
       ])("an unexpected %s error goes to console.error without the token or the payload", async (path, reason) => {
         const stderr = quietStderr();
         const facilitator = new x402Facilitator().register(NETWORK, throwing);
-        const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN }));
+        const url = await serve(appOver(facilitator));
 
         const res = await call(url, path, { body: envelope(payload, r) });
         expect(res.json.invalidReason ?? res.json.errorReason).toBe(reason);
@@ -865,7 +943,7 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
       test("a failure no route caught goes to console.error, and the client sees only internal_error", async () => {
         const stderr = quietStderr();
         const facilitator = new x402Facilitator().register(NETWORK, unsendable);
-        const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN }));
+        const url = await serve(appOver(facilitator));
 
         const res = await verify(url, payload, r);
         expect(res).toMatchObject({ status: 500, json: { error: "internal_error" } });
@@ -878,7 +956,7 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
       test("request lines stay off", async () => {
         const stderr = quietStderr();
         const facilitator = new x402Facilitator().register(NETWORK, throwing);
-        const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN }));
+        const url = await serve(appOver(facilitator));
 
         await call(url, "/supported");
         await call(url, "/supported", { token: "nope" });
@@ -892,10 +970,11 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
 });
 
 describe("what the HTTP layer exposes", () => {
-  test("an unknown route is a JSON 404, behind the token", async () => {
+  test("an unknown route is a JSON 404 whether or not a token is sent", async () => {
     const { url } = await boot();
     expect(await call(url, "/nope")).toMatchObject({ status: 404, json: { error: "not_found" } });
-    expect((await call(url, "/nope", { token: null })).status).toBe(401);
+    expect(await call(url, "/nope", { token: null })).toMatchObject({ status: 404, json: { error: "not_found" } });
+    expect(await call(url, "/nope", { token: "wrong", method: "POST", body: {} })).toMatchObject({ status: 404 });
   });
 
   test("the server does not announce what it is", async () => {
@@ -923,14 +1002,16 @@ describe("what the HTTP layer exposes", () => {
     await settle(url, pay(r, 500n, d1), r);
     await settle(url, pay(r, 500n), r);
 
+    // A request on a route that needs a key names the provider whose key it carried, and any other names nobody
+    const me = providerId(NETWORK, PAY_TO);
     expect(lines).toEqual([
       "GET /supported 200",
       "GET /supported 200",
       "GET /supported 401",
-      "POST /verify 200 invalid_payload",
-      "POST /verify 200",
-      "POST /settle 200",
-      "POST /settle 200 z402_cumulative_mismatch",
+      `POST /verify 200 invalid_payload ${me}`,
+      `POST /verify 200 ${me}`,
+      `POST /settle 200 ${me}`,
+      `POST /settle 200 z402_cumulative_mismatch ${me}`,
     ]);
     for (const line of lines) {
       for (const leak of [TOKEN, signature, "hunter2", K, d1]) expect(line).not.toContain(leak);

@@ -39,6 +39,12 @@ export interface FacilitatorEnv {
   expectedBranchId: string | undefined;
   zdecryptBin: string;
   ledgerPath: string;
+  /** Where the registry and the ledgers of the registered providers live */
+  providersDir: string;
+  /** The most providers that can register, the operator not counted */
+  maxProviders: number;
+  /** Bearer token that POST /providers requires, and undefined leaves registration open to anyone */
+  registrationToken: string | undefined;
   host: string;
   port: number;
   priceZat: bigint;
@@ -87,6 +93,10 @@ const PROFILES: Readonly<Record<string, Profile>> = {
   },
 };
 
+/** The most characters a viewing key may have, which is what the provider registry holds */
+const MAX_UIVK_LENGTH = 1024;
+const DEFAULT_MAX_PROVIDERS = 32;
+const MAX_PROVIDERS_LIMIT = 1000;
 const DEFAULT_ZDECRYPT_BIN = "crates/zdecrypt/target/release/zdecrypt";
 const BRANCH_ID_RE = /^[0-9a-f]{8}$/i;
 const PORT_RE = /^(0|[1-9][0-9]{0,4})$/;
@@ -100,6 +110,12 @@ const TERM_VARIABLES = [
   { variable: "Z402_CREDIT_CAP_ZAT", key: "creditCapZat", whole: false },
   { variable: "Z402_ZERO_CONF_MIN_EXPIRY_BLOCKS", key: "zeroConfMinExpiryBlocks", whole: true },
 ] as const;
+
+/** True when `uivk` has the shape of a viewing key of `network`, which is all that is known without zdecrypt */
+export function isValidUivk(uivk: string, network: string): boolean {
+  const profile = Object.values(PROFILES).find((p) => p.network === network);
+  return profile !== undefined && uivk.length <= MAX_UIVK_LENGTH && profile.ivk.test(uivk);
+}
 
 /** An empty variable counts as unset, the way `VAR= cmd` unsets it in a shell */
 function read(env: Env, name: string): string | undefined {
@@ -190,6 +206,26 @@ function priceOf(env: Env): bigint {
   // A price of 0 would let a replayed voucher pass the increment check
   if (price < 1n) throw new ConfigError("Z402_PRICE_ZAT: must be at least 1 zat");
   return price;
+}
+
+function maxProvidersOf(env: Env): number {
+  const raw = read(env, "Z402_MAX_PROVIDERS");
+  if (raw === undefined) return DEFAULT_MAX_PROVIDERS;
+  const count = COUNT_RE.test(raw) ? Number(raw) : Number.NaN;
+  if (!(count <= MAX_PROVIDERS_LIMIT)) {
+    throw new ConfigError(`Z402_MAX_PROVIDERS: expected a whole number from 0 to ${MAX_PROVIDERS_LIMIT}`);
+  }
+  return count;
+}
+
+function registrationTokenOf(env: Env): string | undefined {
+  const token = read(env, "Z402_REGISTRATION_TOKEN");
+  if (token !== undefined && !B64TOKEN.test(token)) {
+    throw new ConfigError(
+      "Z402_REGISTRATION_TOKEN: must be one token of letters, digits and -._~+/ (no spaces or control characters)",
+    );
+  }
+  return token;
 }
 
 function portOf(env: Env): number {
@@ -295,6 +331,9 @@ export function loadConfig(env: Env): FacilitatorEnv {
   const expectedBranchId = branchIdOf(env, profile);
   const zdecryptBin = pathOf(read(env, "Z402_ZDECRYPT_BIN") ?? DEFAULT_ZDECRYPT_BIN);
   const ledgerPath = pathOf(read(env, "Z402_LEDGER") ?? `.data/facilitator-ledger.${name}.jsonl`);
+  const providersDir = pathOf(read(env, "Z402_PROVIDERS_DIR") ?? `.data/providers.${name}`);
+  const maxProviders = maxProvidersOf(env);
+  const registrationToken = registrationTokenOf(env);
   const host = read(env, "Z402_FACILITATOR_HOST") ?? "127.0.0.1";
   if (host.trim() === "") throw new ConfigError("Z402_FACILITATOR_HOST: must not be blank");
   if (!isLoopback(host)) {
@@ -316,6 +355,9 @@ export function loadConfig(env: Env): FacilitatorEnv {
     expectedBranchId,
     zdecryptBin,
     ledgerPath,
+    providersDir,
+    maxProviders,
+    registrationToken,
     host,
     port,
     priceZat,
