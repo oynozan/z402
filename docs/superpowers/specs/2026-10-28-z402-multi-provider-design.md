@@ -147,6 +147,7 @@ The catalog is keyed by (`providerId`, canonical resource, HTTP method). The can
 2. **Settled payments.** On every successful settle, the item of that provider whose canonical resource and method match the payment gets `lastUpdated` = now and `paidCallsToday` + 1.
    - The resource comes from `paymentPayload.resource.url` and `extensions.bazaar.routeTemplate`. The method comes from `extensions.bazaar.info.input.method`.
    - A provider that has never declared anything is listed from its payments, as standard Bazaar facilitators do. A matching item is created from `paymentRequirements` (the server's, not the client's `accepted`), the sanitized `resource` metadata, and the `bazaar` extension.
+   - **Once a provider has declared anything, its settled payments only update matching declared items, and never create one.** In a payment, `resource.url` and `extensions.bazaar` are echoed by the client. Without this rule, any payer could add a listing with any URL and description under a declaring provider's `payTo`, for the price of one call.
    - Client-echoed data never overwrites a declared item.
 
 **Item validation** (declarations; payment-sourced items get the same sanitizers):
@@ -204,12 +205,17 @@ Any failure releases everything and refuses startup, as today.
 ### 4.6 Server scheme and API (`@z402/server`, `apps/api`)
 
 - `validateFacilitatorSupport` no longer requires or compares `extra.payTo`. It still checks the terms and the `termsVersion` format. `enhancePaymentRequirements` already copies only the terms and `termsVersion`, so per-route prices already work through it.
-- New `checkProvider({facilitatorUrl, token, payTo, network, fetch?}): Promise<void>` in `@z402/server`. It calls `GET /providers/me` and throws an error that names the variable:
-  - `facilitatorToken:` on 401 or 403;
-  - `payTo:` when the key belongs to another `payTo` or network;
-  - `facilitatorUrl:` when the route is absent or unreadable.
+- New `checkProvider({facilitatorUrl, token, payTo, network, fetch?, timeoutMs?}): Promise<void>` in `@z402/server`, with `timeoutMs` defaulting to 5000. It calls `GET /providers/me`. On failure it throws `ProviderCheckError`, with `field: "facilitatorToken" | "payTo" | "facilitatorUrl"` and `retryable: boolean`, so callers branch without parsing the message. `apps/api` calls it at startup, before `initialize()`, and fails on any error. The kit retries while `retryable` (§6).
 
-  `apps/api` calls it at startup, before `initialize()`; so does the kit (§6).
+  | Outcome | `field` | `retryable` |
+  |---|---|---|
+  | connection error, timeout, or 5xx | `facilitatorUrl` | true |
+  | 404 (a facilitator without the route) or an unreadable 200 | `facilitatorUrl` | false |
+  | 401 or 403 | `facilitatorToken` | false |
+  | 200, but another `payTo` or network | `payTo` | false |
+
+  The message never echoes the token.
+- `/providers/me` answers 401 for an unknown key, and for a rotated-out key from the moment it is rotated. The kit's registration job relies on that, and registers only on a 401.
 - `apps/api` keeps its one route (`GET /chunk`) and its one price.
 
 ## 5. Protocol v2.0 (ACKed by the client agent with no changes, 2026-10-28)
@@ -242,7 +248,18 @@ Kept byte-for-byte: §3 payload, §4 voucher (its message already binds `payTo`,
 | Services agent (`z402-f9`) | `service-kit`: `priceZat?` per route; `checkProvider` at startup; a declaration heartbeat (`POST /discovery/resources` every 30 s, built from the same `accepts` and `extensions` as its 402). Starter services get prices that fit their cost. compose: provider 2, with its own view-only keys, a one-shot registration job writing its API key to a volume, and its own `Z402_PAY_TO`/token. `apps/web`: proxy `/discovery/*` to the facilitator and derive status from `lastSeen`. Retire `apps/discovery`. Update the smoke test that relied on a 600 vs 500 price refusal |
 | Client agent (`z402-08`) | Co-signed v2.0 (ACK, no changes). The agent's `--discovery` default becomes the facilitator (`http://127.0.0.1:4022`), committed once the routes are on `dev`. `--url` becomes repeatable: targets are called round-robin, with a summary per target; `--api` stays as shorthand, and `--cheat` stays single-target |
 
-The facilitator lands first behind an unchanged operator path, so the other two can integrate against it at any time. Until then they build against this section's shapes.
+**Provider 2 in compose** is the services agent's call; it proposes `services/markdown` (plain paid GET, no model) as an independent provider with its own keys. The host live check (§8) uses the second `apps/api` instance, which needs no outside network.
+
+**Landing order on `dev`**, so the root suite is never red:
+1. Additive:
+   - `GET /providers/me` and `checkProvider`;
+   - the registry, auth, `/providers` and the Bazaar routes, all behind an unchanged operator path.
+2. The kit switches to `checkProvider` and moves its `payTo` case off `validateFacilitatorSupport`. The smoke test's 600-vs-500 refusal moves to a case refused under both price rules.
+3. The amount rule lands, pinged to the services agent first.
+4. `payTo` leaves `/supported` and `validateFacilitatorSupport`, and `termsVersion` v2 lands.
+5. The agent's `--discovery` default switches to the facilitator.
+
+Until each step lands, the others build against this section's shapes.
 
 ## 7. Security
 
@@ -255,8 +272,10 @@ The facilitator lands first behind an unchanged operator path, so the other two 
 - **Catalog poisoning.**
   - Only an authenticated provider writes its own items. Every `accepts` entry must name that provider's `payTo` and the rail's terms.
   - Sizes and counts are capped, and the facilitator never fetches a provider URL (no SSRF).
-  - Client-echoed metadata never overwrites a declared item.
+  - Client-echoed metadata never overwrites a declared item, and never creates an item for a provider that declares.
   - The 402 a resource returns stays authoritative: clients pay what it says, not what the catalog says.
+- **What agents search for stays private.** The access log records the path only, never a query string. That covers `/discovery/search` and `/discovery/resources` in particular, as today's log does (app.ts `accessLog` uses `req.path`).
+- **Exposure.** Compose keeps the facilitator port unpublished; the website proxies only the public Bazaar reads. Before outside providers connect over the internet, put the facilitator behind TLS and set `Z402_REGISTRATION_TOKEN`. With open registration, anyone can take the provider slots (a runtime each) and list resources on our site.
 - **Resource limits.**
   - Up to 32 providers by default, plus the optional registration token.
   - The 64 KB body limit stays.
