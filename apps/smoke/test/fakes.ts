@@ -56,6 +56,8 @@ export class FakeServices {
   /** "METHOD /path" of every request, in order, whatever answered it */
   readonly requests: string[] = [];
   readonly prompts: string[] = [];
+  /** The maxTokens of each start, undefined where none was sent */
+  readonly maxTokens: unknown[] = [];
   readonly inputs: unknown[] = [];
   readonly markdownUrls: string[] = [];
   readonly uploads: Buffer[] = [];
@@ -142,16 +144,23 @@ export class FakeServices {
       return next();
     }
     if (typeof fields["prompt"] !== "string" || fields["prompt"].trim() === "") return refuse(res, 400, "invalid_request");
+    const maxTokens = fields["maxTokens"];
+    // The bounds of services/llm with its default LLM_MAX_TOKENS
+    const whole = Number.isInteger(maxTokens) && Number(maxTokens) >= 1 && Number(maxTokens) <= 1024;
+    if (maxTokens !== undefined && !whole) {
+      return refuse(res, 400, "invalid_request", "maxTokens must be a whole number from 1 to 1024");
+    }
     next();
   };
 
   private generate: RequestHandler = (req, res) => {
-    const body = req.body as { prompt?: string; stream?: string };
+    const body = req.body as { prompt?: string; stream?: string; maxTokens?: unknown };
     let id = body.stream;
     if (id === undefined) {
       id = randomBytes(9).toString("base64url");
       this.streams.set(id, { next: 0 });
       this.prompts.push(String(body.prompt));
+      this.maxTokens.push(body.maxTokens);
     }
     const stream = this.streams.get(id) ?? { next: 0 };
     const index = stream.next++;

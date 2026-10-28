@@ -24,9 +24,12 @@ import {
 import { SERVICE_NAMES, type Flags, type ServiceName } from "./flags.js";
 import { abortable, BodyTooLarge, clean, describeError, drain, excerpt, Failure, readBody } from "./http.js";
 
-const PROMPT = "Say hello in five words.";
+/** An answer far longer than three chunks, so the script pays for a start and two continues */
+const PROMPT = "Tell a short story about a lighthouse keeper.";
 /** The start call returns the first chunk, so this is also the most paid calls the llm script makes */
 const MAX_CHUNKS = 3;
+/** Three chunks of the default LLM_CHUNK_TOKENS, so the generation ends where the script stops paying */
+const MAX_TOKENS = 96;
 const EMBEDDING_INPUT = ["hello world", "zcash"];
 /** Far more than any real answer (a page is at most 1 MiB of markdown), so only a stream that never ends reaches it */
 const MAX_ANSWER_BYTES = 16 * 1024 * 1024;
@@ -264,7 +267,7 @@ async function llm(ctx: Context, base: string): Promise<void> {
       step: index === 0 ? "start" : "continue",
       paid: true,
       expect: 200,
-      send: () => ctx.o.paidFetch(url, json(ctx, index === 0 ? { prompt: PROMPT } : { stream })),
+      send: () => ctx.o.paidFetch(url, json(ctx, index === 0 ? { prompt: PROMPT, maxTokens: MAX_TOKENS } : { stream })),
       read: async (res) => parseChunk(await readJson(res), index, stream),
       detail: chunkDetail,
     });

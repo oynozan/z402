@@ -125,7 +125,8 @@ describe("a run against all four services", () => {
     expect(find(lines, "dropbox", "delete").detail).toBe("deleted, then 404");
 
     // What the services received
-    expect(fake.prompts).toEqual(["Say hello in five words."]);
+    expect(fake.prompts).toEqual(["Tell a short story about a lighthouse keeper."]);
+    expect(fake.maxTokens).toEqual([96]);
     expect(fake.inputs).toEqual([["hello world", "zcash"]]);
     expect(fake.markdownUrls).toEqual(["https://example.com"]);
     expect(fake.uploads).toHaveLength(1);

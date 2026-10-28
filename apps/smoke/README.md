@@ -33,7 +33,7 @@ A service without its flag is skipped, and a run with no service at all is a fla
 
 | Service | Step | Call | Passes when |
 | --- | --- | --- | --- |
-| llm | `start`, `continue` | `POST /v1/generate` `{"prompt":"Say hello in five words."}`, then `{"stream"}` until `done` or 3 chunks in all | each answer is the next chunk of the same stream, with text |
+| llm | `start`, `continue` | `POST /v1/generate` `{"prompt":"Tell a short story about a lighthouse keeper.","maxTokens":96}`, then `{"stream"}` until `done` or 3 chunks in all | each answer is the next chunk of the same stream, with text |
 | markdown | `get` | `GET /v1/markdown?url=<page>` | the answer has markdown and a length; the line shows the title |
 | embeddings | `embed` | `POST /v1/embeddings` `{"input":["hello world","zcash"]}` | two vectors of `dimensions` finite numbers each |
 | dropbox | `upload`, `hold` | `POST /v1/drops` with a synthetic age v1 file, then `POST /v1/drops/<id>/hold` | `201` with a safe id and a delete token, then an expiry that moved out |
@@ -47,8 +47,8 @@ The synthetic file is the header of one X25519 recipient (`age-encryption.org/v1
 A failing run, shortened:
 
 ```
-llm start 200 31842 ms chunk 0 "Hello there, friend. How are" (500 zat)
-llm continue 200 1910 ms chunk 1 " you today? I hope that" (500 zat)
+llm start 200 31842 ms chunk 0 "Once upon a time, there lived a lighthouse keeper named Elias." (500 zat)
+llm continue 200 1910 ms chunk 1 " Every night he climbed the stairs to light the lamp" (500 zat)
 markdown get 200 412 ms "Example Domain" 1256 chars (500 zat)
 embeddings embed 413 12 ms FAIL expected 200, got 413: too_many_tokens (not charged)
 dropbox upload 201 40 ms id q3Zs0mYbT7cWpAxK1nGhUw, 1192 bytes, held until block 1052 (500 zat)
