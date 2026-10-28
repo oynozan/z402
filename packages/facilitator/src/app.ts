@@ -36,6 +36,7 @@ import { lockLedger } from "./core/ledgerLock.js";
 import { DepositResolver } from "./core/resolver.js";
 import { commit, FacilitatorState } from "./core/state.js";
 import { ChainWatcher } from "./core/watcher.js";
+import { providerId } from "./providers/id.js";
 import { PrepaidVoucherFacilitatorScheme } from "./scheme.js";
 
 type Log = (msg: string, err?: unknown) => void;
@@ -211,8 +212,14 @@ function jsonBody(): RequestHandler {
   };
 }
 
-export function createFacilitatorApp(o: { facilitator: x402Facilitator; authToken?: string; log?: Log }): Express {
-  const { facilitator, authToken, log } = o;
+export function createFacilitatorApp(o: {
+  facilitator: x402Facilitator;
+  authToken?: string;
+  log?: Log;
+  /** The provider the token belongs to, which GET /providers/me names, and the route is a 404 without it */
+  me?: { network: string; payTo: string };
+}): Express {
+  const { facilitator, authToken, log, me } = o;
   checkToken(authToken);
   const diagnose = log ?? stderr;
 
@@ -262,6 +269,14 @@ export function createFacilitatorApp(o: { facilitator: x402Facilitator; authToke
   app.get("/supported", (_req: Request, res: Response) => {
     res.json(facilitator.getSupported());
   });
+
+  // A resource server reads this at start to prove that its key and its payTo belong together (design §4.1)
+  if (me !== undefined) {
+    const answer = { providerId: providerId(me.network, me.payTo), network: me.network, payTo: me.payTo };
+    app.get("/providers/me", (_req: Request, res: Response) => {
+      res.json(answer);
+    });
+  }
 
   app.post("/verify", async (req: Request, res: Response) => {
     const result = await verify(readRequest(req.body, res.locals.unreadable));
@@ -471,7 +486,12 @@ async function serve(
 
   await watcher.pollNow();
   const server = await listen(
-    createFacilitatorApp({ facilitator, authToken: o.authToken, log: o.log }),
+    createFacilitatorApp({
+      facilitator,
+      authToken: o.authToken,
+      log: o.log,
+      me: { network: o.network, payTo: o.payTo },
+    }),
     host,
     o.port ?? 0,
     o.log ?? stderr,

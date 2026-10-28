@@ -265,9 +265,65 @@ describe("GET /supported", () => {
   });
 });
 
+describe("GET /providers/me", () => {
+  // Taken with shasum over the domain tag, the network and PAY_TO, as id.test.ts does
+  const ME = { providerId: "f93eeecbf393ea04", network: "zcash:regtest", payTo: PAY_TO };
+
+  test("answers the operator's providerId, network and payTo to the token", async () => {
+    const { url } = await boot();
+    const res = await call(url, "/providers/me");
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual(ME);
+  });
+
+  test("answers without a token when none is configured", async () => {
+    const { url } = await boot({ authToken: undefined });
+    const res = await call(url, "/providers/me", { token: null });
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual(ME);
+  });
+
+  test("is refused with 401 and a Bearer challenge on a wrong token or none", async () => {
+    const { url } = await boot();
+    for (const token of [null, "", "wrong", `${TOKEN}x`]) {
+      const res = await call(url, "/providers/me", { token });
+      expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
+      expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    }
+    expect((await call(url, `/providers/me?token=${TOKEN}`, { token: null })).status).toBe(401);
+  });
+
+  test("the answer and the request line carry no token and no query string", async () => {
+    const lines: string[] = [];
+    const { url } = await boot({ log: (line) => lines.push(line) });
+    const res = await call(url, "/providers/me?apikey=hunter2");
+    expect(JSON.stringify(res.json)).not.toContain(TOKEN);
+    expect(lines).toEqual(["GET /providers/me 200"]);
+  });
+
+  test("createFacilitatorApp answers from the `me` it is given", async () => {
+    const facilitator = new x402Facilitator();
+    const testnetPayTo = `utest1${"q".repeat(60)}`;
+    const url = await serve(
+      createFacilitatorApp({ facilitator, authToken: TOKEN, me: { network: "zcash:testnet", payTo: testnetPayTo } }),
+    );
+    const res = await call(url, "/providers/me");
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({ providerId: "ef37610a46f32076", network: "zcash:testnet", payTo: testnetPayTo });
+  });
+
+  test("is a 404 where createFacilitatorApp is given no `me`, and still behind the token", async () => {
+    const facilitator = new x402Facilitator();
+    const url = await serve(createFacilitatorApp({ facilitator, authToken: TOKEN }));
+    expect(await call(url, "/providers/me")).toMatchObject({ status: 404, json: { error: "not_found" } });
+    expect((await call(url, "/providers/me", { token: null })).status).toBe(401);
+  });
+});
+
 describe("the bearer token", () => {
   const routes: Array<[string, string]> = [
     ["GET", "/supported"],
+    ["GET", "/providers/me"],
     ["POST", "/verify"],
     ["POST", "/settle"],
   ];

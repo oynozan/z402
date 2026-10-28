@@ -495,6 +495,63 @@ describe("paid /chunk through the whole stack", () => {
   );
 });
 
+/** The facilitator's answer at /providers/me to the operator's key, with the providerId its app.test.ts pins */
+const ME = { providerId: "f93eeecbf393ea04", network: NETWORK, payTo: PAY_TO };
+
+/** The terms and payTo of an `accepts` entry, as /supported advertises them */
+const ADVERTISED = {
+  windowZat: "100000",
+  creditRatioBps: 2500,
+  creditCapZat: "200000",
+  zeroConfMinExpiryBlocks: 20,
+  termsVersion: TERMS_VERSION,
+  payTo: PAY_TO,
+};
+
+/** A /supported body that offers prepaid-voucher on `network` with `extra` */
+const supportedOn = (network: string, extra: Record<string, unknown>) => ({
+  kinds: [{ x402Version: 2, scheme: SCHEME, network, extra }],
+  extensions: [],
+  signers: {},
+});
+
+/** A facilitator stand-in that answers /providers/me with `me`, /supported with `supported` and the rest with a 404 */
+async function stubFacilitator(me: { status?: number; body?: string }, supported?: unknown) {
+  // Every path asked of it and the Authorization header that came with each, in order
+  const paths: string[] = [];
+  const authorizations: Array<string | undefined> = [];
+  const stub = createServer((req, res) => {
+    paths.push(req.url ?? "");
+    authorizations.push(req.headers.authorization);
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/providers/me") {
+      res.statusCode = me.status ?? 200;
+      res.end(me.body ?? JSON.stringify(ME));
+    } else if (req.url === "/supported" && supported !== undefined) {
+      res.end(JSON.stringify(supported));
+    } else {
+      res.statusCode = 404;
+      res.end('{"error":"not_found"}');
+    }
+  });
+  await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
+  running.push({
+    close: () =>
+      new Promise<void>((resolve) => {
+        stub.close(() => resolve());
+        stub.closeAllConnections();
+      }),
+  });
+  return { url: `http://127.0.0.1:${(stub.address() as { port: number }).port}`, paths, authorizations };
+}
+
+/** What startApi rejects with, or an error that says it did not */
+const startFailure = (url: string, over: Partial<ApiOptions> = {}): Promise<Error> =>
+  startApi(apiOptions(url, over)).then(
+    () => new Error("expected startApi to reject"),
+    (e: unknown) => e as Error,
+  );
+
 describe("startApi", () => {
   test.each([
     ["facilitatorUrl", { facilitatorUrl: "" }],
@@ -537,7 +594,7 @@ describe("startApi", () => {
     ["http://[::1]:9", { network: NETWORK_MAINNET, payTo: MAINNET_PAY_TO }],
     ["https://f.example:8443", { network: NETWORK_MAINNET, payTo: MAINNET_PAY_TO }],
     ["http://facilitator:4022", {}],
-  ])("%s passes the option check and is asked for /supported", async (url, over) => {
+  ])("%s passes the option check and is asked for /providers/me", async (url, over) => {
     const requests = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
     await expect(startApi(apiOptions(url, over))).rejects.toThrow(/^facilitatorUrl: /);
     expect(requests).toHaveBeenCalled();
@@ -560,51 +617,86 @@ describe("startApi", () => {
 
   test("a facilitator that pays another address fails naming payTo", async () => {
     const facilitator = await facilitatorOn(new FakeChain());
-    const err = await startApi(apiOptions(facilitator.url, { payTo: OTHER_PAY_TO })).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(/^payTo:/);
-    expect((err as Error).cause).toBeInstanceOf(FacilitatorCapabilityError);
+    const err = await startFailure(facilitator.url, { payTo: OTHER_PAY_TO });
+    expect(err.message).toMatch(/^payTo:/);
+    expect(err.cause).toMatchObject({ name: "ProviderCheckError", field: "payTo", retryable: false });
   });
 
   test("a facilitator whose terms the API cannot use fails naming facilitatorUrl", async () => {
     // A /supported with the right payTo and no terms at all
-    const supported = {
-      kinds: [{ x402Version: 2, scheme: SCHEME, network: NETWORK, extra: { payTo: PAY_TO } }],
-      extensions: [],
-      signers: {},
-    };
-    const stub = createServer((_req, res) => {
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify(supported));
-    });
-    await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
-    running.push({
-      close: () =>
-        new Promise<void>((resolve) => {
-          stub.close(() => resolve());
-          stub.closeAllConnections();
-        }),
-    });
-    const { port } = stub.address() as { port: number };
-
-    const err = await startApi(apiOptions(`http://127.0.0.1:${port}`)).catch((e: unknown) => e);
-    expect((err as Error).message).toMatch(/^facilitatorUrl:/);
-    expect((err as Error).cause).toBeInstanceOf(FacilitatorCapabilityError);
+    const stub = await stubFacilitator({}, supportedOn(NETWORK, { payTo: PAY_TO }));
+    const err = await startFailure(stub.url);
+    expect(err.message).toMatch(/^facilitatorUrl:/);
+    expect(err.cause).toBeInstanceOf(FacilitatorCapabilityError);
   });
 
-  test("a facilitator on another network fails naming network", async () => {
+  test("a /supported that advertises another payTo still fails naming payTo, once /providers/me agrees", async () => {
+    const stub = await stubFacilitator({}, supportedOn(NETWORK, { ...ADVERTISED, payTo: OTHER_PAY_TO }));
+    const err = await startFailure(stub.url);
+    expect(err.message).toMatch(/^payTo:/);
+    expect(err.cause).toBeInstanceOf(FacilitatorCapabilityError);
+    expect(stub.paths).toEqual(["/providers/me", "/supported"]);
+  });
+
+  test("a /supported that offers another network still fails naming network, once /providers/me agrees", async () => {
+    const stub = await stubFacilitator({}, supportedOn(NETWORK_TESTNET, { ...ADVERTISED, payTo: TESTNET_PAY_TO }));
+    const err = await startFailure(stub.url);
+    expect(err.message).toMatch(/^network:/);
+    expect(stub.paths).toEqual(["/providers/me", "/supported"]);
+  });
+
+  test("a facilitator on another network fails naming payTo, as the provider check puts it", async () => {
     const chain = new FakeChain();
     const facilitator = await facilitatorOn(chain, {
       network: NETWORK_TESTNET,
       payTo: TESTNET_PAY_TO,
       chain: chain.viewFor(TESTNET_PAY_TO),
     });
-    await expect(startApi(apiOptions(facilitator.url))).rejects.toThrow(/^network:/);
+    const err = await startFailure(facilitator.url);
+    expect(err.message).toMatch(/^payTo:/);
+    expect(err.cause).toMatchObject({ name: "ProviderCheckError", field: "payTo", retryable: false });
+  });
+
+  // The check runs before the first /supported, so each of these is refused on /providers/me alone
+  test.each([
+    { what: "a 401", me: { status: 401, body: '{"error":"unauthorized"}' }, field: "facilitatorToken" },
+    { what: "a 403", me: { status: 403, body: '{"error":"forbidden"}' }, field: "facilitatorToken" },
+    {
+      what: "a 404 from a facilitator without the route",
+      me: { status: 404, body: '{"error":"not_found"}' },
+      field: "facilitatorUrl",
+    },
+    { what: "a 200 that is no provider", me: { body: '{"kinds":[]}' }, field: "facilitatorUrl" },
+    { what: "a 200 that is not JSON", me: { body: "<html>hello</html>" }, field: "facilitatorUrl" },
+    {
+      what: "a provider with another payTo",
+      me: { body: JSON.stringify({ ...ME, payTo: OTHER_PAY_TO }) },
+      field: "payTo",
+    },
+    {
+      what: "a provider on another network",
+      me: { body: JSON.stringify({ ...ME, network: NETWORK_TESTNET }) },
+      field: "payTo",
+    },
+    // The API does not wait out a facilitator that is down, since whatever starts it holds it back
+    { what: "a 503", me: { status: 503, body: "{}" }, field: "facilitatorUrl" },
+  ])("$what from /providers/me fails naming $field before /supported is asked", async ({ me, field }) => {
+    const stub = await stubFacilitator(me);
+    const err = await startFailure(stub.url);
+    expect(err.message).toMatch(new RegExp(`^${field}: `));
+    expect(err.message).not.toContain(TOKEN);
+    expect(err.cause).toMatchObject({ name: "ProviderCheckError", field });
+    expect(stub.paths).toEqual(["/providers/me"]);
+  });
+
+  test("the key goes to /providers/me as a bearer token, and no header is sent without one", async () => {
+    const stub = await stubFacilitator({ status: 401 });
+    await startFailure(stub.url);
+    await startFailure(stub.url, { facilitatorToken: undefined });
+    expect(stub.authorizations).toEqual([`Bearer ${TOKEN}`, undefined]);
   });
 
   test("a facilitator that refuses the token fails naming facilitatorToken", async () => {
-    // The SDK warns about every /supported it cannot load
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const facilitator = await facilitatorOn(new FakeChain());
     await expect(startApi(apiOptions(facilitator.url, { facilitatorToken: "wrong" }))).rejects.toThrow(
       /^facilitatorToken:/,
@@ -615,7 +707,6 @@ describe("startApi", () => {
   });
 
   test("a facilitator that does not answer fails naming facilitatorUrl", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const gone = await startFacilitator(facilitatorOptions(new FakeChain()));
     await gone.close();
     await expect(startApi(apiOptions(gone.url))).rejects.toThrow(/^facilitatorUrl:/);
