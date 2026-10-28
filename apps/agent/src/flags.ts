@@ -173,7 +173,8 @@ export function parseDiscoverFlags(argv: readonly string[]): DiscoverFlags {
   }
   const discovery = httpUrl("--discovery", values.discovery ?? d.discovery);
   const { username, password, search, hash } = new URL(discovery);
-  if (username !== "" || password !== "" || search !== "" || hash !== "") {
+  // A bare "?" or "#" parses to an empty search or hash, so the raw text is checked too
+  if (username !== "" || password !== "" || search !== "" || hash !== "" || /[?#]/.test(discovery)) {
     throw new FlagError("--discovery: expected a URL without credentials, a query or a fragment");
   }
   return {

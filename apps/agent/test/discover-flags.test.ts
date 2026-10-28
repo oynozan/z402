@@ -58,6 +58,8 @@ describe("parseDiscoverFlags", () => {
     [["--discovery", "http://z402:hunter2@127.0.0.1:4030"], /--discovery.*credentials/],
     [["--discovery", "http://127.0.0.1:4030/?token=abc"], /--discovery.*query/],
     [["--discovery", "http://127.0.0.1:4030/#top"], /--discovery.*fragment/],
+    [["--discovery", "http://127.0.0.1:4030/?"], /--discovery.*query/],
+    [["--discovery", "http://127.0.0.1:4030/#"], /--discovery.*fragment/],
     [["--intent"], /--intent/],
     [["--intent", ""], /--intent.*some text/],
     [["--intent", "   "], /--intent.*some text/],

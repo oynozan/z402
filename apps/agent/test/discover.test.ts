@@ -650,6 +650,409 @@ describe("discoverMain", () => {
   });
 });
 
+describe("an endpoint that is hostile or broken", () => {
+  const entry = (i: number, extra: object = {}): Listed => ({ resource: `http://127.0.0.1:4040/v1/r${i}`, ...extra });
+  const offsetOf = (req: IncomingMessage): number => Number(new URL(req.url ?? "/", "http://fake").searchParams.get("offset") ?? 0);
+  const page = (items: unknown[], total: number, offset = 0): string =>
+    JSON.stringify({ x402Version: 2, items, pagination: { limit: items.length, offset, total } });
+
+  describe("in how much it sends", () => {
+    it("is cut at 1,000 entries when one page holds 150,000, instead of dying on the argument limit", async () => {
+      const server = await fake(serving(Array.from({ length: 150_000 }, (_, i) => entry(i)), 150_000));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(out).toHaveLength(1000);
+      expect(err).toEqual(["showing the first 1000 of 150000 resources"]);
+    }, 30_000);
+
+    it("is cut at exactly 1,000 entries whatever the size of the pages", async () => {
+      const server = await fake(serving(Array.from({ length: 1500 }, (_, i) => entry(i)), 300));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(out).toHaveLength(1000);
+      expect(out[999]).toContain("/v1/r999");
+      expect(err).toEqual(["showing the first 1000 of 1500 resources"]);
+    });
+
+    it("warns that the list is short when the service repeats its first page below its total", async () => {
+      const first = Array.from({ length: 100 }, (_, i) => entry(i));
+      const server = await fake((_req, res) => reply(res, 200, page(first, 250, 0)));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(out).toHaveLength(100);
+      expect(err).toEqual(["showing the first 100 of 250 resources: the service sent no further page"]);
+    });
+
+    it("warns that the list is short when a later page comes back empty below the total", async () => {
+      const first = Array.from({ length: 100 }, (_, i) => entry(i));
+      const server = await fake((req, res) => reply(res, 200, page(offsetOf(req) === 0 ? first : [], 250, offsetOf(req))));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(out).toHaveLength(100);
+      expect(err).toEqual(["showing the first 100 of 250 resources: the service sent no further page"]);
+    });
+
+    it("says so when the service gives no total and sends more than 1,000 entries", async () => {
+      const items = Array.from({ length: 1200 }, (_, i) => entry(i));
+      const server = await fake((_req, res) => reply(res, 200, JSON.stringify({ x402Version: 2, items })));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(out).toHaveLength(1000);
+      expect(err).toEqual(["showing the first 1000 resources"]);
+    });
+
+    it("is left alone after 100 pages, however slowly the service hands out entries it has not sent before", async () => {
+      const server = await fake((req, res) => reply(res, 200, page([entry(offsetOf(req))], 1_000_000, offsetOf(req))));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(server.requests).toHaveLength(100);
+      expect(out).toHaveLength(100);
+      expect(err).toEqual(["showing the first 100 of 1000000 resources"]);
+    });
+
+    it("does not let one long text widen the line of every entry", async () => {
+      const items = [
+        entry(0, { serviceName: "N".repeat(100_000), description: "D".repeat(100_000) }),
+        ...Array.from({ length: 99 }, (_, i) => entry(i + 1, { serviceName: "ok" })),
+      ];
+      const server = await fake(serving(items));
+      const { io, out } = capture();
+
+      await runDiscover(flags({ discovery: server.url }), io);
+
+      expect(out).toHaveLength(100);
+      expect(Math.max(...out.map((line) => line.length))).toBeLessThan(800);
+      expect(out[0]).toContain("…");
+      expect(out[1]).toMatch(/^ok {2,}-/);
+    });
+
+    it("shows an amount of 100,000 digits as a dash, and does not stall on it", async () => {
+      const huge = resource({ ...MARKDOWN_SPEC, path: "/v1/huge", amount: "9".repeat(100_000) });
+      const server = await fake(serving([huge, MARKDOWN]));
+      const { io, out } = capture();
+
+      const started = performance.now();
+      await runDiscover(flags({ discovery: server.url }), io);
+
+      expect(performance.now() - started).toBeLessThan(2000);
+      expect(out[0]).toMatch(/ {2}- +Fetch a web page/);
+      expect(out[1]).toContain("  500 zat per page  ");
+    }, 30_000);
+
+    it("refuses an entry nested deeper than 64 levels, which --json could not print", async () => {
+      const deep = `{"resource":"http://127.0.0.1:1/a","extensions":{"z":${"[".repeat(20_000)}${"]".repeat(20_000)}}}`;
+      const server = await fake((_req, res) => reply(res, 200, `{"x402Version":2,"items":[${deep}]}`));
+
+      for (const extra of [["--json"], []]) {
+        const { io, out, err } = capture();
+        expect(await discoverMain(["--discovery", server.url, ...extra], io)).toBe(1);
+        expect(out).toEqual([]);
+        expect(err).toEqual([`${server.url}/discovery/resources returned a list with entry 1 nested deeper than 64 levels`]);
+      }
+    });
+
+    it("takes an entry that nests as deeply as the declarations of the starter services do", async () => {
+      const server = await fake(serving(ALL));
+      const { io, out } = capture();
+
+      expect(await discoverMain(["--discovery", server.url, "--json"], io)).toBe(0);
+
+      expect(JSON.parse(out[0] ?? "")).toEqual(ALL);
+    });
+  });
+
+  describe("in the shape of the list", () => {
+    it.each([
+      ["a total written as text", '"5"'],
+      ["a total too big for a double", "1e999"],
+      ["a total past the safe integers", "9007199254740993"],
+      ["a fraction", "2.5"],
+      ["a negative total", "-1"],
+      ["null", "null"],
+      ["true", "true"],
+      ["an array", "[1]"],
+    ])("reads %s as a list that is all on the page, and asks no further", async (_name, total) => {
+      const body = `{"x402Version":2,"items":${JSON.stringify(ALL)},"pagination":{"limit":5,"offset":0,"total":${total}}}`;
+      const server = await fake((_req, res) => reply(res, 200, body));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(server.requests).toHaveLength(1);
+      expect(out).toEqual(listLines(ALL));
+      expect(err).toEqual([]);
+    });
+
+    it.each([
+      ["a null entry", "[null]", 1],
+      ["an entry that is an array", "[[1,2]]", 1],
+      ["an entry that is a string", '["http://127.0.0.1:1/a"]', 1],
+      ["a resource that is a number", '[{"resource":7}]', 1],
+      ["a resource that is an object", '[{"resource":{"url":"http://127.0.0.1:1/a"}}]', 1],
+      ["a resource that is null", '[{"resource":null}]', 1],
+      ["a bad entry after good ones", '[{"resource":"http://127.0.0.1:1/a"},{"resource":"http://127.0.0.1:1/b"},{}]', 3],
+    ])("refuses a list with %s, and says which entry", async (_name, items, entry) => {
+      const server = await fake((_req, res) => reply(res, 200, `{"x402Version":2,"items":${items}}`));
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(1);
+
+      expect(out).toEqual([]);
+      expect(err).toEqual([`${server.url}/discovery/resources returned a list with no resource URL in entry ${entry}`]);
+    });
+
+    it("lists an entry that carries a URL and nothing else, whatever else is wrong with it", async () => {
+      const odd = [
+        { resource: "http://127.0.0.1:1/a", accepts: "none", tags: "x", extensions: [], serviceName: 7, description: { text: "d" } },
+        { resource: "http://127.0.0.1:1/b", accepts: [null, 3], tags: [1, null, {}], extensions: { bazaar: "yes", z402: null } },
+        { resource: "http://127.0.0.1:1/c", accepts: [{ amount: 500, asset: ["ZEC"] }], extensions: { bazaar: { info: { input: { method: 5 } } } } },
+      ];
+      const server = await fake(serving(odd));
+      const { io, out } = capture();
+
+      expect(await discoverMain(["--discovery", server.url, "--intent", "anything at all"], io)).toBe(0);
+
+      expect(out).toHaveLength(5);
+      expect(out[4]).toBe("pick: none, no word of the intent matches a resource");
+    });
+  });
+
+  describe("in how it pages", () => {
+    it("lists an entry once when pages overlap, and pages on by the number of entries the service sent", async () => {
+      const all = Array.from({ length: 8 }, (_, i) => entry(i));
+      // Every page starts one entry early, as the list does when an entry is added while the command pages through it
+      const server = await fake((req, res) => {
+        const from = Math.max(0, offsetOf(req) - 1);
+        reply(res, 200, page(all.slice(from, from + 3), all.length, offsetOf(req)));
+      });
+      const { io, out } = capture();
+
+      await runDiscover(flags({ discovery: server.url }), io);
+
+      expect(out.map((line) => line.split(/\s+/)[2])).toEqual(all.map((e) => e.resource));
+      expect(queries(server)).toEqual([{ type: "http" }, { type: "http", offset: "3" }, { type: "http", offset: "6" }]);
+    });
+
+    it("lists an entry once that one page repeats", async () => {
+      const server = await fake((_req, res) => reply(res, 200, page([entry(1), entry(1), entry(2), entry(1)], 4)));
+      const { io, out } = capture();
+
+      await runDiscover(flags({ discovery: server.url }), io);
+
+      expect(out.map((line) => line.split(/\s+/)[2])).toEqual([entry(1).resource, entry(2).resource]);
+    });
+  });
+
+  describe("in how long it takes", () => {
+    it("is given up on when it never answers", async () => {
+      const server = await fake(() => undefined);
+      const { io, out, err } = capture();
+
+      const started = performance.now();
+      expect(await discoverMain(["--discovery", server.url], io, { timeoutMs: 300 })).toBe(1);
+
+      expect(performance.now() - started).toBeLessThan(3000);
+      expect(out).toEqual([]);
+      expect(err).toEqual([`${server.url}/discovery/resources did not finish answering within 0.3 s`]);
+    });
+
+    it("is given up on when it sends headers and then trickles", async () => {
+      const server = await fake((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        const timer = setInterval(() => res.write(" "), 20);
+        res.on("close", () => clearInterval(timer));
+      });
+      const { io, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io, { timeoutMs: 400 })).toBe(1);
+
+      expect(err).toEqual([`${server.url}/discovery/resources did not finish answering within 0.4 s`]);
+    });
+
+    it("has one deadline for all the pages, not one for each", async () => {
+      const server = await fake((req, res) => {
+        const offset = offsetOf(req);
+        setTimeout(() => reply(res, 200, page([entry(offset)], 50, offset)), 120);
+      });
+      const { io, err } = capture();
+
+      const started = performance.now();
+      expect(await discoverMain(["--discovery", server.url], io, { timeoutMs: 500 })).toBe(1);
+
+      expect(performance.now() - started).toBeLessThan(2500);
+      expect(err[0]).toContain("did not finish answering within 0.5 s");
+    });
+  });
+
+  describe("in how many bytes it sends", () => {
+    it("is refused as soon as the answer is past the byte budget, without reading the rest of an enormous one", async () => {
+      const total = 128 * 1024 * 1024;
+      let written = 0;
+      const server = await fake((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        const chunk = " ".repeat(64 * 1024);
+        const pump = (): void => {
+          while (!res.destroyed && written < total) {
+            written += chunk.length;
+            if (!res.write(chunk)) {
+              res.once("drain", pump);
+              return;
+            }
+          }
+          if (!res.destroyed) res.end();
+        };
+        pump();
+      });
+      const { io, out, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io, { maxBytes: 256 * 1024 })).toBe(1);
+
+      expect(out).toEqual([]);
+      expect(err).toEqual([`${server.url}/discovery/resources sent more than 256 KiB`]);
+      expect(written).toBeLessThan(total / 4);
+    }, 30_000);
+
+    it("is refused at once when the header already declares more than the budget", async () => {
+      const server = await fake((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json", "content-length": String(50 * 1024 * 1024) });
+        res.write("{");
+      });
+      const { io, err } = capture();
+
+      const started = performance.now();
+      expect(await discoverMain(["--discovery", server.url], io, { maxBytes: 1024 * 1024 })).toBe(1);
+
+      expect(performance.now() - started).toBeLessThan(3000);
+      expect(err).toEqual([`${server.url}/discovery/resources sent more than 1 MiB`]);
+    });
+
+    it("counts all the pages against one budget", async () => {
+      const filler = "x".repeat(40_000);
+      const server = await fake((req, res) => reply(res, 200, page([entry(offsetOf(req), { description: filler })], 10, offsetOf(req))));
+      const { io, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io, { maxBytes: 100_000 })).toBe(1);
+
+      expect(server.requests.length).toBeLessThan(5);
+      expect(err).toEqual([`${server.url}/discovery/resources sent more than 98 KiB`]);
+    });
+
+    it("limits its own requests only, and not the other fetches of the process before, during and after", async () => {
+      const listing = await fake(serving(ALL));
+      const big = await fake((_req, res) => reply(res, 200, "x".repeat(2_000_000), "text/plain"));
+      const { io } = capture();
+
+      const [code, during] = await Promise.all([
+        discoverMain(["--discovery", listing.url], io, { maxBytes: 1024 }),
+        fetch(big.url).then((r) => r.text()),
+      ]);
+
+      expect(code).toBe(1);
+      expect(during).toHaveLength(2_000_000);
+      expect((await (await fetch(big.url)).text()).length).toBe(2_000_000);
+    });
+
+    it("keeps the budget out of the way of a list of the size a real catalog has", async () => {
+      const server = await fake(serving(Array.from({ length: 400 }, (_, i) => entry(i, { description: "d".repeat(4000) })), 100));
+      const { io, out } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(0);
+
+      expect(out).toHaveLength(400);
+    });
+  });
+
+  describe("in the text it sends", () => {
+    const FORMAT_RE = /[\p{Cf}\p{Cc}]/u;
+
+    it("cannot put a control, escape or format character on the list, whichever field it hides in", async () => {
+      const nasty = "a\u001b[2Jb\u009b31mc\u007fd\u202ee\u2066f\u200bg\u{e0041}h\u2028i\u0000j";
+      const rude = resource({ ...MARKDOWN_SPEC, name: `markdown ${nasty}`, description: nasty, unit: nasty, asset: nasty });
+      const item: Listed = { ...rude, resource: `http://127.0.0.1:4032/v1/${nasty}` };
+      const server = await fake(serving([item]));
+      const { io, out } = capture();
+
+      await runDiscover(flags({ discovery: server.url }), io);
+
+      expect(out).toHaveLength(1);
+      expect(out[0]).not.toMatch(FORMAT_RE);
+      expect(out[0]).toContain("[2Jb");
+
+      const ranked = capture();
+      await runDiscover(flags({ discovery: server.url, intent: "markdown" }), ranked.io);
+      expect(ranked.out).toHaveLength(3);
+      expect(ranked.out[2]).toMatch(/^pick: markdown /);
+      for (const line of ranked.out.slice(1)) expect(line).not.toMatch(FORMAT_RE);
+    });
+
+    it("keeps the joiners that emoji and some scripts need", async () => {
+      const family = "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}";
+      const item: Listed = { ...MARKDOWN, description: `family ${family} and \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645` };
+      const server = await fake(serving([item]));
+      const { io, out } = capture();
+
+      await runDiscover(flags({ discovery: server.url }), io);
+
+      expect(out[0]).toContain(family);
+      expect(out[0]).toContain("\u06cc\u200c\u062e");
+    });
+
+    it("--json prints no character a terminal acts on, and the list parses to what the service sent", async () => {
+      const rude: Listed = {
+        resource: "http://127.0.0.1:4040/a",
+        serviceName: "a\u009b31mb\u007fc\u202ed\u200be\u2028f\u{e0041}",
+        description: "x\u001b[0my",
+      };
+      const server = await fake(serving([rude]));
+      const { io, out } = capture();
+
+      expect(await discoverMain(["--discovery", server.url, "--json"], io)).toBe(0);
+
+      expect(out).toHaveLength(1);
+      expect(out[0]?.replace(/\n/g, "")).not.toMatch(FORMAT_RE);
+      expect(out[0]).not.toMatch(/[\u2028\u2029]/);
+      expect(JSON.parse(out[0] ?? "")).toEqual([rude]);
+    });
+
+    it("quotes the intent without a raw terminal character, which a model that calls the command may put in it", async () => {
+      const server = await fake(serving(ALL));
+      const { io, out } = capture();
+      const intent = "store a file \u009b31m\u007f\u202e\u200b\u001b[2J";
+
+      await runDiscover(flags({ discovery: server.url, intent }), io);
+
+      expect(out).toHaveLength(7);
+      expect(out[0]).not.toMatch(FORMAT_RE);
+      expect(out[0]).toBe(
+        'ranked locally by word overlap with "store a file \\u009b31m\\u007f\\u202e\\u200b\\u001b[2J", only the list request left this process',
+      );
+    });
+
+    it("cannot put a control character in the line that says why the endpoint failed", async () => {
+      const server = await fake((_req, res) => reply(res, 502, "bad\u001b[31m gateway\u202e\r\nsecond line\u009b", "text/plain"));
+      const { io, err } = capture();
+
+      expect(await discoverMain(["--discovery", server.url], io)).toBe(1);
+
+      expect(err).toHaveLength(1);
+      expect(err[0]).not.toMatch(FORMAT_RE);
+      expect(err[0]).toContain("answered 502: bad [31m gateway second line");
+    });
+  });
+});
+
 /* The real process, to prove the wiring in main.ts and package.json */
 
 const AGENT_DIR = fileURLToPath(new URL("..", import.meta.url));

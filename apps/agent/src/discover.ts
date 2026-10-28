@@ -2,7 +2,11 @@
  * The discover subcommand. It lists what a Bazaar endpoint knows with the stock client, withBazaar over an
  * HTTPFacilitatorClient, the way any agent would without z402 code. With --intent the list is ranked here by word
  * overlap, so the service never learns what an agent wants.
+ *
+ * The endpoint is not trusted. A run has one deadline and one byte budget for all its requests, reads at most 1,000
+ * entries in at most 100 pages, refuses an entry that nests too deeply to print, and shows no character a terminal acts on.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { withBazaar, type DiscoveryResource } from "@x402/extensions/bazaar";
 import { ASSET } from "@z402/protocol";
@@ -22,14 +26,36 @@ export interface DiscoverIo {
   warn: (line: string) => void;
 }
 
+export interface DiscoverLimits {
+  /** How long the whole run may take, every page included, default 60000 */
+  timeoutMs?: number;
+  /** How many bytes all the answers together may hold, default 32 MiB */
+  maxBytes?: number;
+}
+
 /** One entry of the list, of which only the URL is certain */
 export type Listed = Partial<DiscoveryResource> & { resource: string };
 
 const LIST_PATH = "/discovery/resources";
 /** Where a longer list is cut, the same 1000 the discovery service allows in one page */
 const MAX_RESOURCES = 1000;
+/** So that a service that sends one new entry per page cannot keep the command asking */
+const MAX_PAGES = 100;
+/** Far more than any declaration needs, and far less than the depth at which JSON.stringify gives up on an indent */
+const MAX_DEPTH = 64;
+const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
 const EXCERPT_CHARS = 120;
 const MIN_WORD_CHARS = 3;
+/** The most characters a cell of the list shows, so that one long text cannot widen the column of every row */
+const CELL_CHARS = { name: 48, method: 16, url: 300, price: 64, description: 240 } as const;
+/** Digits only, and short: formatZat takes time that grows with the square of a run of digits */
+const AMOUNT_RE = /^[0-9]{1,40}$/;
+/** Format characters (bidi overrides, zero-width spaces, tags) except the joiners that emoji and some scripts need */
+const INVISIBLE_RE = /(?![\u200c\u200d])\p{Cf}/gu;
+const CONTROL_RUN_RE = /[\p{Cc}\s]+/gu;
+/** What JSON.stringify leaves as it is and a terminal can act on: DEL, C1 controls, format characters, line separators */
+const UNSAFE_JSON_RE = /[\u007f-\u009f\p{Cf}\u2028\u2029]/gu;
 
 /* Reading what the service sent */
 
@@ -51,14 +77,40 @@ function keysOf(value: unknown): string[] {
 
 const methodOf = (item: Listed): unknown => at(item, "extensions", "bazaar", "info", "input", "method");
 
-/** One line, so that a newline or a terminal escape in the service's text cannot break the list */
+/** One line, so that a newline, a terminal escape or a text-direction override in the service's text cannot bend the list */
 function oneLine(text: string): string {
-  return text.replace(/[\p{Cc}\s]+/gu, " ").trim();
+  return text.replace(INVISIBLE_RE, "").replace(CONTROL_RUN_RE, " ").trim();
+}
+
+/** At most `max` characters, counted in code points, ending in an ellipsis when it was cut */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const kept: string[] = [];
+  let count = 0;
+  for (const point of text) {
+    if (++count > max) return `${kept.slice(0, max - 1).join("")}…`;
+    kept.push(point);
+  }
+  return text;
 }
 
 function excerpt(text: string): string {
-  const line = oneLine(text);
-  return line.length > EXCERPT_CHARS ? `${line.slice(0, EXCERPT_CHARS)}…` : line;
+  return clip(oneLine(text), EXCERPT_CHARS);
+}
+
+/** Whether `value` nests objects or arrays deeper than `max`, found level by level so that a hostile one cannot overflow us */
+function nestsDeeperThan(value: unknown, max: number): boolean {
+  let level: unknown[] = [value];
+  for (let depth = 1; level.length > 0; depth++) {
+    const next: unknown[] = [];
+    for (const node of level) {
+      if (typeof node !== "object" || node === null) continue;
+      if (depth > max) return true;
+      for (const child of Array.isArray(node) ? node : Object.values(node)) next.push(child);
+    }
+    level = next;
+  }
+  return false;
 }
 
 /* The list lines */
@@ -73,7 +125,7 @@ interface Row {
 
 function priceOf(item: Listed): string {
   const amount = at(item, "accepts", "0", "amount");
-  if (typeof amount !== "string" || !/^[0-9]+$/.test(amount)) return "-";
+  if (typeof amount !== "string" || !AMOUNT_RE.test(amount)) return "-";
   const asset = str(at(item, "accepts", "0", "asset"));
   const price = asset === ASSET ? `${formatZat(amount)} zat` : `${amount} ${asset ?? ""}`;
   const unit = oneLine(str(at(item, "extensions", "z402", "unit")) ?? "");
@@ -81,20 +133,20 @@ function priceOf(item: Listed): string {
 }
 
 function rowOf(item: Listed): Row {
-  const cell = (value: unknown): string => oneLine(str(value) ?? "") || "-";
+  const cell = (value: unknown, max: number): string => clip(oneLine(str(value) ?? ""), max) || "-";
   return {
-    name: cell(item.serviceName),
-    method: cell(methodOf(item)),
-    url: cell(item.resource),
-    price: oneLine(priceOf(item)),
-    description: oneLine(str(item.description) ?? ""),
+    name: cell(item.serviceName, CELL_CHARS.name),
+    method: cell(methodOf(item), CELL_CHARS.method),
+    url: cell(item.resource, CELL_CHARS.url),
+    price: clip(oneLine(priceOf(item)), CELL_CHARS.price),
+    description: clip(oneLine(str(item.description) ?? ""), CELL_CHARS.description),
   };
 }
 
 /** One aligned line per resource with its service, method, URL, price and unit, then the description */
 export function listLines(items: readonly Listed[]): string[] {
   const rows = items.map(rowOf);
-  const widest = (cell: (row: Row) => string): number => Math.max(...rows.map((row) => cell(row).length));
+  const widest = (cell: (row: Row) => string): number => rows.reduce((n, row) => Math.max(n, cell(row).length), 0);
   const width = {
     name: widest((r) => r.name),
     method: widest((r) => r.method),
@@ -112,6 +164,13 @@ export function listLines(items: readonly Listed[]): string[] {
       .join("  ")
       .trimEnd(),
   );
+}
+
+/** JSON text that parses to the same thing, with no raw character that a terminal acts on */
+function printableJson(json: string): string {
+  const escape = (chars: string): string =>
+    Array.from({ length: chars.length }, (_, i) => `\\u${chars.charCodeAt(i).toString(16).padStart(4, "0")}`).join("");
+  return json.replace(UNSAFE_JSON_RE, escape);
 }
 
 /* Ranking by intent */
@@ -189,11 +248,76 @@ function readPage(endpoint: string, body: unknown): Page {
   if (!Array.isArray(items)) throw new DiscoverError(`${endpoint} did not return a list of resources (no items array)`);
   const bad = items.findIndex((item: unknown) => !isListed(item));
   if (bad >= 0) throw new DiscoverError(`${endpoint} returned a list with no resource URL in entry ${bad + 1}`);
+  const deep = items.findIndex((item: unknown) => nestsDeeperThan(item, MAX_DEPTH));
+  if (deep >= 0) {
+    throw new DiscoverError(`${endpoint} returned a list with entry ${deep + 1} nested deeper than ${MAX_DEPTH} levels`);
+  }
   const total = at(body, "pagination", "total");
   return {
     items: items.filter(isListed),
     total: typeof total === "number" && Number.isSafeInteger(total) ? total : undefined,
   };
+}
+
+/* The deadline and the byte budget */
+
+interface Run {
+  endpoint: string;
+  timeoutMs: number;
+  maxBytes: number;
+  signal: AbortSignal;
+  /** Bytes of the budget not yet read */
+  left: number;
+}
+
+const runs = new AsyncLocalStorage<Run>();
+let guarded = false;
+
+function size(bytes: number): string {
+  const kib = Math.round(bytes / 1024);
+  return kib >= 1024 ? `${Math.round((kib / 1024) * 10) / 10} MiB` : `${kib} KiB`;
+}
+
+/** The answer as bytes, read until the budget of the run is spent, and never past it */
+async function readBytes(res: Response, run: Run): Promise<Uint8Array<ArrayBuffer>> {
+  const tooBig = (): DiscoverError => new DiscoverError(`${run.endpoint} sent more than ${size(run.maxBytes)}`);
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > run.left) {
+    res.body?.cancel().catch(() => undefined);
+    throw tooBig();
+  }
+  if (res.body === null) return new Uint8Array();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    run.left -= value.byteLength;
+    if (run.left < 0) {
+      reader.cancel().catch(() => undefined);
+      throw tooBig();
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * The stock client calls the global fetch and has no way to give it a deadline or a size limit, so a fetch that acts
+ * inside a run only is installed once. Other requests of the process pass through it untouched.
+ */
+function guardFetch(): void {
+  if (guarded) return;
+  guarded = true;
+  const stock = globalThis.fetch;
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const run = runs.getStore();
+    if (run === undefined) return stock(input, init);
+    const res = await stock(input, { ...init, signal: run.signal });
+    const bytes = await readBytes(res, run);
+    const empty = res.status === 204 || res.status === 205 || res.status === 304;
+    return new Response(empty ? null : bytes, { status: res.status, statusText: res.statusText, headers: res.headers });
+  }) as typeof fetch;
 }
 
 /** The message, or the cause that fetch hides behind its own "fetch failed" */
@@ -206,8 +330,12 @@ function reasonOf(e: unknown): string {
 }
 
 /** One line for whichever way the stock client failed */
-function failure(endpoint: string, e: unknown): DiscoverError {
+function failure(run: Run, e: unknown): DiscoverError {
+  const { endpoint } = run;
   if (e instanceof DiscoverError) return e;
+  if (e instanceof Error && e.name === "TimeoutError") {
+    return new DiscoverError(`${endpoint} did not finish answering within ${run.timeoutMs / 1000} s`, { cause: e });
+  }
   const message = e instanceof Error ? e.message : String(e);
   if (e instanceof Error && e.name === "SyntaxError") {
     return new DiscoverError(`${endpoint} did not return JSON: ${excerpt(message)}`, { cause: e });
@@ -220,38 +348,70 @@ function failure(endpoint: string, e: unknown): DiscoverError {
   return new DiscoverError(`cannot reach ${endpoint}: ${excerpt(reasonOf(e))}`, { cause: e });
 }
 
+const shown = (count: number, total: number | undefined): string =>
+  `showing the first ${count}${total === undefined ? "" : ` of ${total}`} resources`;
+
 /** The stock call, repeated with an offset while the service says there is more */
-async function listAll(base: string, io: DiscoverIo): Promise<Listed[]> {
+async function listAll(base: string, io: DiscoverIo, limits: DiscoverLimits): Promise<Listed[]> {
   const endpoint = `${base}${LIST_PATH}`;
   const bazaar = withBazaar(new HTTPFacilitatorClient({ url: base })).extensions.bazaar;
-  const items: Listed[] = [];
-  for (;;) {
-    let page: Page;
-    try {
-      const offset = items.length > 0 ? { offset: items.length } : {};
-      page = readPage(endpoint, await bazaar.listResources({ type: "http", ...offset }));
-    } catch (e) {
-      throw failure(endpoint, e);
+  const timeoutMs = limits.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxBytes = limits.maxBytes ?? DEFAULT_MAX_BYTES;
+  const run: Run = { endpoint, timeoutMs, maxBytes, signal: AbortSignal.timeout(timeoutMs), left: maxBytes };
+  guardFetch();
+
+  return runs.run(run, async () => {
+    const items: Listed[] = [];
+    const known = new Set<string>();
+    let offset = 0;
+    let total: number | undefined;
+    for (let pages = 0; pages < MAX_PAGES; pages++) {
+      let page: Page;
+      try {
+        page = readPage(endpoint, await bazaar.listResources({ type: "http", ...(offset > 0 && { offset }) }));
+      } catch (e) {
+        throw failure(run, e);
+      }
+      total = page.total;
+      // The service counts what it sent, repeats included, so the next offset follows that and not the list kept here
+      offset += page.items.length;
+      let added = 0;
+      for (const item of page.items) {
+        // One entry past the limit is enough to know that the list goes on
+        if (items.length > MAX_RESOURCES) break;
+        const key = keyOf(item);
+        if (known.has(key)) continue;
+        known.add(key);
+        items.push(item);
+        added++;
+      }
+      // A page with nothing new is a service that ignores offset and sends the first page again
+      if (added === 0) {
+        if (total !== undefined && items.length < total) {
+          io.warn(`${shown(items.length, total)}: the service sent no further page`);
+        }
+        return items;
+      }
+
+      if (items.length > MAX_RESOURCES) {
+        items.length = MAX_RESOURCES;
+        io.warn(shown(items.length, total));
+        return items;
+      }
+      if (total === undefined || items.length >= total) return items;
+      if (items.length >= MAX_RESOURCES) break;
     }
-    // A service that ignores offset sends the first page again
-    const known = new Set(items.map(keyOf));
-    if (page.items.length === 0 || page.items.every((item) => known.has(keyOf(item)))) break;
-    items.push(...page.items);
-    if (page.total === undefined || items.length >= page.total) break;
-    if (items.length >= MAX_RESOURCES) {
-      io.warn(`showing the first ${items.length} of ${page.total} resources`);
-      break;
-    }
-  }
-  return items;
+    io.warn(shown(items.length, total));
+    return items;
+  });
 }
 
 /* The command */
 
-export async function runDiscover(flags: DiscoverFlags, io: DiscoverIo): Promise<void> {
-  const items = await listAll(flags.discovery, io);
+export async function runDiscover(flags: DiscoverFlags, io: DiscoverIo, limits: DiscoverLimits = {}): Promise<void> {
+  const items = await listAll(flags.discovery, io, limits);
   if (flags.json) {
-    io.print(JSON.stringify(items, null, 2));
+    io.print(printableJson(JSON.stringify(items, null, 2)));
     return;
   }
   if (items.length === 0) {
@@ -263,7 +423,8 @@ export async function runDiscover(flags: DiscoverFlags, io: DiscoverIo): Promise
     return;
   }
   const ranked = rankByIntent(items, flags.intent);
-  const heading = `ranked locally by word overlap with ${JSON.stringify(flags.intent)}`;
+  // The intent can come from a model's own text, so it is shown quoted and with no raw terminal character either
+  const heading = `ranked locally by word overlap with ${printableJson(JSON.stringify(flags.intent))}`;
   io.print(`${heading}, only the list request left this process`);
   for (const line of listLines(ranked.map((r) => r.item))) io.print(line);
   io.print(pickLine(ranked));
@@ -273,6 +434,7 @@ export async function runDiscover(flags: DiscoverFlags, io: DiscoverIo): Promise
 export async function discoverMain(
   args: readonly string[],
   io: DiscoverIo = { print: console.log, warn: console.error },
+  limits: DiscoverLimits = {},
 ): Promise<number> {
   if (args.includes("--help") || args.includes("-h")) {
     io.print(DISCOVER_USAGE);
@@ -287,7 +449,7 @@ export async function discoverMain(
     return 2;
   }
   try {
-    await runDiscover(flags, io);
+    await runDiscover(flags, io, limits);
     return 0;
   } catch (e) {
     if (!(e instanceof DiscoverError)) throw e;
