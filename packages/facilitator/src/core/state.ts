@@ -12,6 +12,8 @@ export class FacilitatorState {
   /** Throws when the event breaks an invariant, before changing anything */
   apply(e: LedgerEvent): void {
     switch (e.t) {
+      case "ledger":
+        throw new Error("a ledger header can only be the first line");
       case "deposit":
         return this.#credit(e);
       case "voucher":
@@ -59,6 +61,7 @@ export class FacilitatorState {
 
   // Lends the live objects apply reads, which is safe as records are frozen and sessions are replaced, never changed
   #lend(scratch: FacilitatorState, e: LedgerEvent): void {
+    if (e.t === "ledger") return;
     if (e.t === "voucher") {
       const session = this.#sessions.get(e.sessionKey);
       if (session !== undefined && !scratch.#sessions.has(e.sessionKey)) scratch.#sessions.set(e.sessionKey, session);

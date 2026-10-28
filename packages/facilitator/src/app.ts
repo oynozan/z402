@@ -24,7 +24,14 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
-import { Ledger, LedgerRefusal, type LedgerEvent } from "./core/ledger.js";
+import {
+  checkLedgerHeader,
+  Ledger,
+  LedgerMismatch,
+  LedgerRefusal,
+  type LedgerEvent,
+  type LedgerOwner,
+} from "./core/ledger.js";
 import { lockLedger } from "./core/ledgerLock.js";
 import { DepositResolver } from "./core/resolver.js";
 import { commit, FacilitatorState } from "./core/state.js";
@@ -330,12 +337,12 @@ interface OpenLedger {
 }
 
 /** Locks the file, proves it can be written, then replays it, so a facilitator that says ready can record a settle */
-async function openLedger(path: string | undefined): Promise<OpenLedger> {
+async function openLedger(path: string | undefined, own: LedgerOwner): Promise<OpenLedger> {
   if (path === undefined) return { ledger: new Ledger(), state: new FacilitatorState(), release: () => undefined };
   const release = await lockLedger(path);
   try {
     writable(path);
-    return { ...replayed(path), release };
+    return { ...replayed(path, own), release };
   } catch (e) {
     release();
     throw e;
@@ -354,14 +361,23 @@ function writable(path: string): void {
   }
 }
 
-function replayed(path: string): { ledger: Ledger; state: FacilitatorState } {
+/** Replays the ledger of `own`, and gives a ledger with no events the header that names its facilitator */
+function replayed(path: string, own: LedgerOwner): { ledger: Ledger; state: FacilitatorState } {
   try {
     const ledger = new Ledger(path);
     const state = new FacilitatorState();
+    let first = true;
     // Each event is applied as it is read, so a long ledger is never held whole
-    for (const event of ledger.events()) state.apply(event);
+    for (const event of ledger.events()) {
+      if (first) checkLedgerHeader(event, own, path);
+      const header = first && event.t === "ledger";
+      first = false;
+      if (!header) state.apply(event);
+    }
+    if (first) ledger.appendSync([{ t: "ledger", network: own.network, payTo: own.payTo }]);
     return { ledger, state };
   } catch (e) {
+    if (e instanceof LedgerMismatch) throw e;
     throw new Error(`ledgerPath: cannot replay ${path}: ${text(e)}`, { cause: e });
   }
 }
@@ -385,7 +401,7 @@ function listen(app: Express, host: string, port: number, log: Log): Promise<Ser
 /** Opens the ledger, polls the chain once, then listens, and a failed poll does not stop the start */
 export async function startFacilitator(o: FacilitatorOptions): Promise<FacilitatorHandle> {
   checkOptions(o);
-  const opened = await openLedger(o.ledgerPath);
+  const opened = await openLedger(o.ledgerPath, { network: o.network, payTo: o.payTo });
   try {
     return await serve(o, opened);
   } catch (e) {

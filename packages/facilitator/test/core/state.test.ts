@@ -416,6 +416,20 @@ describe("commit and the ledger file", () => {
   });
 });
 
+describe("a ledger header in the state", () => {
+  const header = { t: "ledger", network: "zcash:regtest", payTo: `uregtest1${"q".repeat(60)}` } as LedgerEvent;
+
+  test("can only be the first line, so apply refuses it", () => {
+    expect(() => new FacilitatorState().apply(header)).toThrow("a ledger header can only be the first line");
+  });
+
+  test("never reaches the file through commit", () => {
+    const ledger = new Ledger(join(dir, "ledger.jsonl"));
+    expect(() => commit(ledger, new FacilitatorState(), [voucherEvent(), header])).toThrow(LedgerRefusal);
+    expect(existsSync(join(dir, "ledger.jsonl"))).toBe(false);
+  });
+});
+
 describe("FacilitatorState.check", () => {
   test("a valid batch passes and changes nothing", () => {
     const state = new FacilitatorState();

@@ -2,7 +2,8 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { Ledger, LedgerRefusal, type LedgerEvent } from "../../src/core/ledger.js";
+import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET, type ZcashNetwork } from "@z402/protocol";
+import { checkLedgerHeader, Ledger, LedgerRefusal, type LedgerEvent } from "../../src/core/ledger.js";
 import { depositEvent, statusEvent, unreadableEvents, voucherEvent } from "./events.js";
 
 // The ledger imports fs functions by name, so only a module mock can make a write fail part-way or a read refuse
@@ -369,5 +370,49 @@ describe("Ledger replay of a large file", () => {
     } finally {
       vi.mocked(readFileSync).mockImplementation(real.readFileSync);
     }
+  });
+});
+
+describe("the ledger header", () => {
+  const PAY_TO = `uregtest1${"q".repeat(60)}`;
+  const header = (over: Record<string, unknown> = {}) =>
+    ({ t: "ledger", network: NETWORK_REGTEST, payTo: PAY_TO, ...over }) as LedgerEvent;
+  const own = { network: NETWORK_REGTEST, payTo: PAY_TO } as const;
+
+  test("is a ledger event the file can carry and replay", () => {
+    new Ledger(file()).appendSync([header(), voucherEvent()]);
+    expect(new Ledger(file()).replay()).toEqual([header(), voucherEvent()]);
+  });
+
+  test.each<[string, Record<string, unknown>]>([
+    ["a network that is not Zcash", { network: "eip155:1" }],
+    ["no payTo", { payTo: "" }],
+  ])("with %s is not a ledger event", (_, over) => {
+    expect(() => new Ledger(file()).appendSync([header(over)])).toThrow(LedgerRefusal);
+  });
+
+  test("an empty ledger and this facilitator's own header pass", () => {
+    expect(() => checkLedgerHeader(undefined, own, file())).not.toThrow();
+    expect(() => checkLedgerHeader(header(), own, file())).not.toThrow();
+  });
+
+  test.each<[string, Record<string, unknown>, string]>([
+    ["another payTo", { payTo: `uregtest1${"p".repeat(60)}` }, `${NETWORK_REGTEST} uregtest1${"p".repeat(60)}`],
+    ["another network", { network: NETWORK_TESTNET }, `${NETWORK_TESTNET} ${PAY_TO}`],
+  ])("a header with %s refuses the ledger", (_, over, whose) => {
+    expect(() => checkLedgerHeader(header(over), own, file())).toThrow(
+      `ledgerPath: ${file()} is the ledger of ${whose}, not of this facilitator`,
+    );
+  });
+
+  const offMainnet: ZcashNetwork[] = [NETWORK_REGTEST, NETWORK_TESTNET];
+  test.each(offMainnet)("a ledger with no header still opens on %s", (network) => {
+    expect(() => checkLedgerHeader(depositEvent(), { network, payTo: PAY_TO }, file())).not.toThrow();
+  });
+
+  test("a ledger with no header is refused on mainnet", () => {
+    expect(() =>
+      checkLedgerHeader(voucherEvent(), { network: NETWORK_MAINNET, payTo: `u1${"q".repeat(60)}` }, file()),
+    ).toThrow(`ledgerPath: ${file()} has no ledger header; a mainnet facilitator opens only a ledger it created`);
   });
 });

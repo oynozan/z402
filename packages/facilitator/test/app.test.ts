@@ -145,11 +145,13 @@ const creditEvent = () => ({
   confirmations: 0,
 });
 
+/** The types of the ledger's events, after its header */
 const ledgerTypes = (path: string): string[] =>
   readFileSync(path, "utf8")
     .split("\n")
     .filter((l) => l !== "")
-    .map((l) => (JSON.parse(l) as { t: string }).t);
+    .map((l) => (JSON.parse(l) as { t: string }).t)
+    .filter((t) => t !== "ledger");
 
 /** A view whose inspect waits for open() once shut() is called, and `reached` settles when a read is waiting */
 function gated(view: ChainView) {
@@ -924,6 +926,36 @@ describe("startFacilitator", () => {
     await expect(boot({ ledgerPath }, first.chain)).rejects.toThrow(/^ledgerPath: .*already open/);
 
     expect(readFileSync(ledgerPath)).toEqual(before);
+  });
+
+  test("a fresh ledger starts with a header naming the network and payTo", async () => {
+    const ledgerPath = join(scratch, "header-fresh.jsonl");
+    await boot({ ledgerPath });
+    const header = { t: "ledger", network: NETWORK, payTo: PAY_TO };
+    expect(readFileSync(ledgerPath, "utf8")).toBe(`${JSON.stringify(header)}\n`);
+  });
+
+  test("a ledger of another payTo is refused and left byte for byte as it was", async () => {
+    const ledgerPath = join(scratch, "header-other.jsonl");
+    const first = await boot({ ledgerPath });
+    await first.handle.close();
+    const before = readFileSync(ledgerPath);
+    const other = `uregtest1${"p".repeat(60)}`;
+
+    await expect(boot({ ledgerPath, payTo: other, chain: first.chain.viewFor(other) })).rejects.toThrow(
+      new RegExp(`^ledgerPath: .* is the ledger of ${NETWORK} ${PAY_TO}, not of this facilitator$`),
+    );
+    expect(readFileSync(ledgerPath)).toEqual(before);
+  });
+
+  test("a ledger written before the header existed still replays on regtest", async () => {
+    const ledgerPath = join(scratch, "header-less.jsonl");
+    writeFileSync(ledgerPath, `${JSON.stringify(creditEvent())}\n`);
+    const { url } = await boot({ ledgerPath });
+    const r = await requirementsOf(url);
+    const res = await verify(url, pay(r, 500n), r);
+    expect(res.json.extra.session).toMatchObject({ pendingZat: "100000", limitZat: "100000" });
+    expect(ledgerTypes(ledgerPath)).toEqual(["deposit"]);
   });
 
   test("a refused start never touches the ledger it finds held, not even to cut a torn tail", async () => {

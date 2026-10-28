@@ -1,8 +1,18 @@
 import { appendFileSync, closeSync, mkdirSync, openSync, readSync, statSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
-import { DEPOSIT_STATUSES, MAX_MONEY_ZAT, ZAT_RE, type DepositStatus } from "@z402/protocol";
+import {
+  DEPOSIT_STATUSES,
+  isZcashNetwork,
+  MAX_MONEY_ZAT,
+  NETWORK_MAINNET,
+  ZAT_RE,
+  type DepositStatus,
+  type ZcashNetwork,
+} from "@z402/protocol";
 
 export type LedgerEvent =
+  /** The first line of a ledger, naming the facilitator that created it */
+  | { t: "ledger"; network: ZcashNetwork; payTo: string }
   | {
       t: "deposit";
       txid: string;
@@ -30,6 +40,37 @@ export class LedgerRefusal extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = "LedgerRefusal";
+  }
+}
+
+/** The facilitator a ledger belongs to */
+export interface LedgerOwner {
+  network: ZcashNetwork;
+  payTo: string;
+}
+
+/** A ledger that belongs to another facilitator, refused before replay reads past its first line */
+export class LedgerMismatch extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LedgerMismatch";
+  }
+}
+
+/** Refuses the ledger whose first event, undefined when it has none, shows it is not the ledger of `own` */
+export function checkLedgerHeader(first: LedgerEvent | undefined, own: LedgerOwner, path: string): void {
+  if (first === undefined) return;
+  if (first.t === "ledger") {
+    if (first.network === own.network && first.payTo === own.payTo) return;
+    throw new LedgerMismatch(
+      `ledgerPath: ${path} is the ledger of ${first.network} ${first.payTo}, not of this facilitator`,
+    );
+  }
+  // A ledger from before the header existed opens off mainnet, where a mixup moves no real money
+  if (own.network === NETWORK_MAINNET) {
+    throw new LedgerMismatch(
+      `ledgerPath: ${path} has no ledger header; a mainnet facilitator opens only a ledger it created`,
+    );
   }
 }
 
@@ -200,7 +241,7 @@ function sizeOf(path: string): number {
   }
 }
 
-const KINDS: ReadonlySet<unknown> = new Set(["deposit", "voucher", "status"]);
+const KINDS: ReadonlySet<unknown> = new Set(["ledger", "deposit", "voucher", "status"]);
 
 /** "event N" of a batch, with its type when it is one the ledger knows, and never a value from the event */
 export function nth(e: unknown, index: number): string {
@@ -219,6 +260,8 @@ export function isEvent(x: unknown): x is LedgerEvent {
   if (typeof x !== "object" || x === null) return false;
   const e = x as Record<string, unknown>;
   switch (e.t) {
+    case "ledger":
+      return isZcashNetwork(e.network) && isId(e.payTo);
     case "deposit":
       return (
         isId(e.txid) &&
