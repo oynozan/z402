@@ -74,7 +74,6 @@ async function boot(
     network: NETWORK,
     chain: rig.chainOf(OPERATOR).viewFor(OPERATOR),
     payTo: OPERATOR,
-    priceZat: 500n,
     terms: DEMO_TERMS,
     authToken: TOKEN,
     port: 0,
@@ -407,13 +406,70 @@ describe("two providers on one facilitator", () => {
     expect(depositsIn(ledgerOf(rig, B))).toMatchObject([{ txid: tx, valueZat: "150000" }]);
   });
 
-  test("are held to the operator's price until each prices its own routes", async () => {
+  test("price their own routes: a registered provider's 800 is taken beside the operator's 500", async () => {
     const rig = newRig();
     const { url } = await boot(rig);
     const keyB = await enroll(url, B);
     const dear = await requirementsFor(url, B.payTo, "800");
     const res = await verify(url, keyB, pay(dear, 800n), dear);
-    expect(res.json).toMatchObject({ isValid: false, invalidReason: REASON.invalidPaymentRequirements });
+    // Past the amount rule, the voucher stops at the missing deposit and not at the price
+    expect(res.json).toMatchObject({ isValid: false, invalidReason: REASON.depositRequired });
+
+    const paidAt800 = await paid(url, keyB, dear, 800n, deposit(rig.chainOf(B.payTo), B.payTo));
+    expect(paidAt800.json).toMatchObject({ success: true, amount: "800", payer: K });
+    const op = await requirementsFor(url, OPERATOR, "500");
+    const operator = await paid(url, TOKEN, op, 500n, deposit(rig.chainOf(OPERATOR), OPERATOR));
+    expect(operator.json).toMatchObject({ success: true, amount: "500", payer: K });
+  });
+
+  test("take two prices in one session of a provider, and refuse a voucher short of the call's own", async () => {
+    const rig = newRig();
+    const { url } = await boot(rig);
+    const keyA = await enroll(url, A);
+    const keyB = await enroll(url, B);
+    const cheap = await requirementsFor(url, B.payTo, "500");
+    const dear = await requirementsFor(url, B.payTo, "800");
+
+    expect((await paid(url, keyB, cheap, 500n, deposit(rig.chainOf(B.payTo), B.payTo))).json).toMatchObject({
+      success: true,
+      amount: "500",
+    });
+    expect((await settle(url, keyB, pay(dear, 1300n), dear)).json).toMatchObject({ success: true, amount: "800" });
+    expect((await settle(url, keyB, pay(cheap, 1800n), cheap)).json).toMatchObject({ success: true, amount: "500" });
+    // 500 more than cLast is enough for the cheap route and 300 short for the dear one
+    const short = await verify(url, keyB, pay(dear, 2300n), dear);
+    expect(short.json).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.cumulativeMismatch,
+      invalidMessage: "cumulativeZat must be at least 2600",
+    });
+    expect((await verify(url, keyB, pay(cheap, 2300n), cheap)).json).toMatchObject({ isValid: true });
+
+    // B's prices are B's own, so A's session is where it was and A has a price of its own
+    const asA = await requirementsFor(url, A.payTo, "700");
+    expect((await paid(url, keyA, asA, 700n, deposit(rig.chainOf(A.payTo), A.payTo))).json).toMatchObject({
+      success: true,
+      amount: "700",
+    });
+    expect(ledgerTypes(ledgerOf(rig, B))).toEqual(["deposit", "voucher", "voucher", "voucher"]);
+    expect(ledgerTypes(ledgerOf(rig, A))).toEqual(["deposit", "voucher"]);
+  });
+
+  test("advertise one termsVersion, which every provider's resource server copies from /supported", async () => {
+    const rig = newRig();
+    const { url } = await boot(rig);
+    const keyA = await enroll(url, A);
+    const keyB = await enroll(url, B);
+    const rA = await requirementsFor(url, A.payTo);
+    const rB = await requirementsFor(url, B.payTo);
+    const op = await requirementsFor(url, OPERATOR);
+
+    expect(rA.extra.termsVersion).toBe(rB.extra.termsVersion);
+    expect(rA.extra.termsVersion).toBe(op.extra.termsVersion);
+    // The requirements the one /supported gives are taken by each provider's runtime
+    expect((await verify(url, keyA, pay(rA, 500n), rA)).json.invalidReason).toBe(REASON.depositRequired);
+    expect((await verify(url, keyB, pay(rB, 500n), rB)).json.invalidReason).toBe(REASON.depositRequired);
+    expect((await verify(url, TOKEN, pay(op, 500n), op)).json.invalidReason).toBe(REASON.depositRequired);
   });
 
   test("are both brought up to date by the handle's pollNow", async () => {
@@ -1275,7 +1331,7 @@ describe("authentication", () => {
     const without = await call(url, "/supported");
     expect(without.status).toBe(200);
     expect(without.json.kinds).toMatchObject([{ x402Version: 2, scheme: SCHEME, network: NETWORK }]);
-    expect(without.json.kinds[0].extra.payTo).toBe(OPERATOR);
+    expect(without.json.kinds[0].extra).not.toHaveProperty("payTo");
     for (const token of [TOKEN, key]) {
       expect(await call(url, "/supported", { token })).toMatchObject({ status: 200, json: without.json });
     }

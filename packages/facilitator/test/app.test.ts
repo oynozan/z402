@@ -61,7 +61,6 @@ async function boot(over: Partial<FacilitatorOptions> = {}, chain = new FakeChai
     network: NETWORK,
     chain: chain.viewFor(PAY_TO),
     payTo: PAY_TO,
-    priceZat: 500n,
     terms: DEMO_TERMS,
     authToken: TOKEN,
     port: 0,
@@ -248,11 +247,11 @@ function appOver(facilitator: x402Facilitator, over: Partial<AppOptions> = {}) {
 }
 
 describe("GET /supported", () => {
-  test("lists the scheme with the terms, the terms version and payTo", async () => {
+  test("lists the scheme with the terms and the terms version, and no payTo", async () => {
     const { url } = await boot();
     const res = await call(url, "/supported");
     expect(res.status).toBe(200);
-    expect(res.json).toEqual({
+    expect(res.json).toStrictEqual({
       kinds: [
         {
           x402Version: 2,
@@ -264,20 +263,34 @@ describe("GET /supported", () => {
             creditCapZat: "200000",
             zeroConfMinExpiryBlocks: 20,
             termsVersion: expect.stringMatching(/^[0-9a-f]{16}$/),
-            payTo: PAY_TO,
           },
         },
       ],
       extensions: ["bazaar"],
       signers: { "zcash:*": [] },
     });
+    expect(res.json.kinds[0].extra).not.toHaveProperty("payTo");
   });
 
-  test("the terms version is the one taken from payTo, price and terms", async () => {
-    // sha256 of ["uregtest1q...q","500",{the demo terms}] taken with shasum, as in scheme.test.ts
+  test("the terms version is the one taken from the terms alone", async () => {
+    // sha256 of ["z402-terms-v2",{the demo terms}] taken with shasum, as in scheme.test.ts
     const { url } = await boot();
     const res = await call(url, "/supported");
-    expect(res.json.kinds[0].extra.termsVersion).toBe("23e5935a1b39a198");
+    expect(res.json.kinds[0].extra.termsVersion).toBe("cb7f148af0fda19a");
+  });
+
+  test("the terms version moves with the terms and with neither the payTo nor the priceZat option", async () => {
+    const version = async (over: Partial<FacilitatorOptions>, chain?: FakeChain) => {
+      const { url } = await boot(over, chain);
+      return (await call(url, "/supported")).json.kinds[0].extra.termsVersion as string;
+    };
+    const base = await version({});
+    const other = `uregtest1${"p".repeat(60)}`;
+    const chain = new FakeChain({ expiryDelta: 40 });
+
+    expect(await version({ payTo: other, chain: chain.viewFor(other) }, chain)).toBe(base);
+    expect(await version({ priceZat: 700n })).toBe(base);
+    expect(await version({ terms: { ...DEMO_TERMS, windowZat: 250000n } })).not.toBe(base);
   });
 
   test("advertises the configured terms", async () => {
@@ -297,7 +310,6 @@ describe("GET /supported", () => {
     const withToken = await call(url, "/supported");
     expect(await call(url, "/supported", { token: null })).toMatchObject({ status: 200, json: withToken.json });
     expect(await call(url, "/supported?token=wrong", { token: null })).toMatchObject({ status: 200 });
-    expect(withToken.json.kinds[0].extra.payTo).toBe(PAY_TO);
   });
 
   test("still refuses a key that names nobody, as it did before it needed none", async () => {
@@ -1033,8 +1045,6 @@ describe("startFacilitator", () => {
     ["network", { network: "zcash:nope" as ZcashNetwork }],
     ["payTo", { payTo: `utest1${"q".repeat(60)}` }],
     ["payTo", { payTo: `tutest1${"q".repeat(60)}` }],
-    ["priceZat", { priceZat: 0n }],
-    ["priceZat", { priceZat: 500 as unknown as bigint }],
     ["terms", { terms: { ...DEMO_TERMS, creditRatioBps: 20000 } }],
     ["terms", { terms: { ...DEMO_TERMS, windowZat: 0n } }],
     ["authToken", { authToken: "" }],
@@ -1282,13 +1292,69 @@ describe("startFacilitator", () => {
     expect(Date.now() - started).toBeLessThan(4000);
   });
 
-  test("the configured price is enforced", async () => {
-    const { url } = await boot({ priceZat: 700n });
+  test.each<[string, unknown]>([
+    ["a price", 700n],
+    ["zero", 0n],
+    ["a negative", -5n],
+    ["a number", 500],
+    ["a string", "five hundred"],
+    ["nothing", undefined],
+  ])("priceZat is ignored whatever it holds (%s), so the start is not refused", async (_, priceZat) => {
+    const { url } = await boot({ priceZat: priceZat as bigint });
+    const res = await call(url, "/supported");
+
+    expect(res.status).toBe(200);
+    expect(res.json.kinds[0].extra.termsVersion).toBe("cb7f148af0fda19a");
+  });
+
+  test("each call is priced by its own requirements, and the priceZat option decides nothing", async () => {
+    const { url, chain } = await boot({ priceZat: 700n });
     const r = await requirementsOf(url);
-    const res = await verify(url, pay(r, 700n), r);
-    expect(res.json).toMatchObject({ invalidReason: REASON.invalidPaymentRequirements });
-    const ok = await verify(url, pay({ ...r, amount: "700" }, 700n), { ...r, amount: "700" });
-    expect(ok.json.invalidReason).not.toBe(REASON.invalidPaymentRequirements);
+    const d1 = deposit(chain);
+    const at = (amount: string) => ({ ...r, amount });
+
+    // 500 is what requirementsOf asks and 700 is what the ignored option says, and neither is the rule
+    expect((await verify(url, pay(r, 500n, d1), r)).json).toMatchObject({ isValid: true });
+    expect((await settle(url, pay(r, 500n, d1), r)).json).toMatchObject({ success: true, amount: "500" });
+    expect((await settle(url, pay(at("700"), 1200n), at("700"))).json).toMatchObject({ success: true, amount: "700" });
+    expect((await settle(url, pay(at("800"), 2000n), at("800"))).json).toMatchObject({ success: true, amount: "800" });
+    expect((await settle(url, pay(at("1"), 2001n), at("1"))).json).toMatchObject({ success: true, amount: "1" });
+    // The window itself is a price, so this is judged by the limit like any other call
+    expect((await settle(url, pay(at("100000"), 102001n), at("100000"))).json).toMatchObject({
+      success: false,
+      errorReason: REASON.awaitingConfirmation,
+    });
+  });
+
+  test("an amount that is no price from 1 zat to the window is invalid_payment_requirements over HTTP", async () => {
+    const { url } = await boot();
+    const r = await requirementsOf(url);
+
+    for (const amount of ["0", "100001", "0500", "5e2", "-1", "1.5", " 500", "+500"]) {
+      const requirements = { ...r, amount };
+      const v = await verify(url, pay(requirements, 500n), requirements);
+      const s = await settle(url, pay(requirements, 500n), requirements);
+      expect(v.json, amount).toMatchObject({ isValid: false, invalidReason: REASON.invalidPaymentRequirements });
+      expect(s.json, amount).toMatchObject({ success: false, errorReason: REASON.invalidPaymentRequirements });
+    }
+  });
+
+  test("a voucher short of its own call's price is refused naming cLast plus that price, over HTTP too", async () => {
+    const { url, chain } = await boot();
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    await verify(url, pay(r, 500n, d1), r);
+    await settle(url, pay(r, 500n, d1), r);
+    const dear = { ...r, amount: "800" };
+
+    const res = await verify(url, pay(dear, 1000n), dear);
+
+    expect(res.json).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.cumulativeMismatch,
+      invalidMessage: "cumulativeZat must be at least 1300",
+    });
+    expect((await settle(url, pay(dear, 1300n), dear)).json).toMatchObject({ success: true, amount: "800" });
   });
 
   test("pollNow() after close() reads nothing and writes nothing", async () => {

@@ -1,5 +1,5 @@
 /**
- * The merchant's paid HTTP API (design §4.6, protocol.md v1.1 §15). One route, `/chunk`, priced in zatoshi and paid
+ * The merchant's paid HTTP API (design §4.6, protocol.md v2.0 §15). One route, `/chunk`, priced in zatoshi and paid
  * with prepaid-voucher through the stock x402 Express middleware, which has the facilitator verify each voucher
  * before the handler runs and settle it after. The terms come from the facilitator's /supported at start.
  *
@@ -149,10 +149,6 @@ async function checkKey(o: ApiOptions): Promise<void> {
 function startupError(e: unknown, server: x402ResourceServer, o: ApiOptions): Error {
   const at = `the facilitator at ${o.facilitatorUrl}`;
   if (e instanceof FacilitatorCapabilityError) {
-    const advertised = server.getSupportedKind(X402_VERSION, o.network, SCHEME)?.extra?.payTo;
-    if (advertised !== o.payTo) {
-      return new Error(`payTo: ${at} does not advertise ${o.payTo} as its payTo`, { cause: e });
-    }
     return new Error(`facilitatorUrl: ${at} advertises terms this API cannot use (${e.problems.join("; ")})`, {
       cause: e,
     });

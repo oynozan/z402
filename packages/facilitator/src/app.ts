@@ -50,7 +50,8 @@ export interface FacilitatorOptions {
   network: ZcashNetwork;
   chain: ChainView;
   payTo: string;
-  priceZat: bigint;
+  /** Ignored since protocol v2.0, each provider prices its own routes */
+  priceZat?: bigint;
   terms: Terms;
   /** Bearer token of the operator's provider, and without one a request with no header is the operator's */
   authToken?: string;
@@ -429,8 +430,6 @@ function checkProviders(p: ProvidersOptions | undefined): void {
 function checkOptions(o: FacilitatorOptions): void {
   if (!isZcashNetwork(o.network)) throw new Error(`network: expected one of ${ZCASH_NETWORKS.join(", ")}`);
   if (!isValidPayTo(o.payTo, o.network)) throw new Error(`payTo: not a shielded-only unified address for ${o.network}`);
-  if (typeof o.priceZat !== "bigint" || o.priceZat < 1n)
-    throw new Error("priceZat: must be a bigint of at least 1 zat");
   try {
     parseTerms(encodeTerms(o.terms));
   } catch (e) {
@@ -528,7 +527,6 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
       network: o.network,
       payTo,
       chain,
-      priceZat: o.priceZat,
       terms: o.terms,
       ledgerPath,
       depositWaitMs: o.depositWaitMs,

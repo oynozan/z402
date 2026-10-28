@@ -40,8 +40,8 @@ const OTHER_PAY_TO = `uregtest1${"p".repeat(60)}`;
 const TESTNET_PAY_TO = `utest1${"q".repeat(60)}`;
 const MAINNET_PAY_TO = `u1${"q".repeat(60)}`;
 const TOKEN = "t-api-4c9a1e-secret";
-/** The facilitator's terms version for PAY_TO, price 500 and the demo terms, as packages/facilitator/test/app.test.ts pins it */
-const TERMS_VERSION = "23e5935a1b39a198";
+/** The facilitator's terms version for the demo terms, sha256 over ["z402-terms-v2",{the terms}] taken with shasum */
+const TERMS_VERSION = "cb7f148af0fda19a";
 /** Generous for the long runs, which take well under a second each on a laptop */
 const LONG = 30_000;
 
@@ -61,7 +61,6 @@ function facilitatorOptions(chain: FakeChain, over: Partial<FacilitatorOptions> 
     network: NETWORK,
     chain: chain.viewFor(PAY_TO),
     payTo: PAY_TO,
-    priceZat: 500n,
     terms: DEMO_TERMS,
     authToken: TOKEN,
     port: 0,
@@ -281,7 +280,7 @@ describe("paid /chunk through the whole stack", () => {
 
   test("the requirements and the chunk number follow priceZat", async () => {
     const chain = new FakeChain({ expiryDelta: 40 });
-    const facilitator = await facilitatorOn(chain, { priceZat: 700n });
+    const facilitator = await facilitatorOn(chain);
     const api = await apiOn(facilitator.url, { priceZat: 700n });
     expect((await refusalOf(await fetch(`${api.url}/chunk`))).accepts[0]?.amount).toBe("700");
 
@@ -495,17 +494,62 @@ describe("paid /chunk through the whole stack", () => {
   );
 });
 
+describe("a second provider on the operator's facilitator", () => {
+  const PAY_TO_2 = `uregtest1${"p".repeat(60)}`;
+  const UIVK_2 = `uivkregtest1${"sec3ret".repeat(10)}`;
+
+  test("registers and runs its own API at 800 zat beside the operator's at 500, and both are paid", async () => {
+    const chain = new FakeChain({ expiryDelta: 40 });
+    const chain2 = new FakeChain({ expiryDelta: 40 });
+    const facilitator = await facilitatorOn(chain, {
+      providers: {
+        dir: join(scratch, "providers-two"),
+        chainFor: () => chain2.viewFor(PAY_TO_2),
+        owns: async () => true,
+      },
+    });
+    const registered = await fetch(`${facilitator.url}/providers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ payTo: PAY_TO_2, uivk: UIVK_2 }),
+    });
+    expect(registered.status).toBe(201);
+    const { apiKey } = (await registered.json()) as { apiKey: string };
+
+    // The second API starts with its own key, payTo and price, against a /supported that names none of them
+    const operatorApi = await apiOn(facilitator.url);
+    const providerApi = await apiOn(facilitator.url, { facilitatorToken: apiKey, payTo: PAY_TO_2, priceZat: 800n });
+    const accepted = async (url: string) => (await refusalOf(await fetch(`${url}/chunk`))).accepts[0];
+    expect(await accepted(operatorApi.url)).toMatchObject({ payTo: PAY_TO, amount: "500" });
+    expect(await accepted(providerApi.url)).toMatchObject({ payTo: PAY_TO_2, amount: "800" });
+    expect((await accepted(providerApi.url))?.extra.termsVersion).toBe(TERMS_VERSION);
+    expect((await accepted(operatorApi.url))?.extra.termsVersion).toBe(TERMS_VERSION);
+
+    const first = payer(operatorApi.url);
+    const second = payer(providerApi.url);
+    first.client.pendingTxid = deposit(chain, first.client.sessionKey, 1);
+    second.client.pendingTxid = chain2.broadcast({
+      outputs: [{ to: PAY_TO_2, valueZat: 100000n, memo: depositMemo(second.client.sessionKey, 1) }],
+    });
+    expect(await paidChunk(await first.chunk())).toEqual({ chunk: 1, cumulativeZat: "500", data: "chunk-1" });
+    expect(await paidChunk(await second.chunk())).toEqual({ chunk: 1, cumulativeZat: "800", data: "chunk-1" });
+    expect(await paidChunk(await second.chunk())).toEqual({ chunk: 2, cumulativeZat: "1600", data: "chunk-2" });
+    expect(await paidChunk(await first.chunk())).toEqual({ chunk: 2, cumulativeZat: "1000", data: "chunk-2" });
+    expect(first.client.refusals).toEqual([]);
+    expect(second.client.refusals).toEqual([]);
+  });
+});
+
 /** The facilitator's answer at /providers/me to the operator's key, with the providerId its app.test.ts pins */
 const ME = { providerId: "f93eeecbf393ea04", network: NETWORK, payTo: PAY_TO };
 
-/** The terms and payTo of an `accepts` entry, as /supported advertises them */
+/** The terms of an accepts entry as /supported advertises them, with no payTo since protocol v2.0 */
 const ADVERTISED = {
   windowZat: "100000",
   creditRatioBps: 2500,
   creditCapZat: "200000",
   zeroConfMinExpiryBlocks: 20,
   termsVersion: TERMS_VERSION,
-  payTo: PAY_TO,
 };
 
 /** A /supported body that offers prepaid-voucher on `network` with `extra` */
@@ -623,23 +667,32 @@ describe("startApi", () => {
   });
 
   test("a facilitator whose terms the API cannot use fails naming facilitatorUrl", async () => {
-    // A /supported with the right payTo and no terms at all
-    const stub = await stubFacilitator({}, supportedOn(NETWORK, { payTo: PAY_TO }));
+    // A /supported that offers the scheme and no terms at all
+    const stub = await stubFacilitator({}, supportedOn(NETWORK, {}));
     const err = await startFailure(stub.url);
     expect(err.message).toMatch(/^facilitatorUrl:/);
+    expect(err.message).toMatch(/terms/);
     expect(err.cause).toBeInstanceOf(FacilitatorCapabilityError);
   });
 
-  test("a /supported that advertises another payTo still fails naming payTo, once /providers/me agrees", async () => {
-    const stub = await stubFacilitator({}, supportedOn(NETWORK, { ...ADVERTISED, payTo: OTHER_PAY_TO }));
-    const err = await startFailure(stub.url);
-    expect(err.message).toMatch(/^payTo:/);
-    expect(err.cause).toBeInstanceOf(FacilitatorCapabilityError);
-    expect(stub.paths).toEqual(["/providers/me", "/supported"]);
+  test("a /supported that still carries a payTo does not fail the start, since /providers/me binds it", async () => {
+    for (const payTo of [PAY_TO, OTHER_PAY_TO]) {
+      const stub = await stubFacilitator({}, supportedOn(NETWORK, { ...ADVERTISED, payTo }));
+      const api = await apiOn(stub.url);
+      expect((await refusalOf(await fetch(`${api.url}/chunk`))).accepts[0]).toMatchObject({ payTo: PAY_TO });
+      expect(stub.paths.slice(0, 2)).toEqual(["/providers/me", "/supported"]);
+    }
+  });
+
+  test("a /supported without a payTo starts the API at the payTo /providers/me agreed to", async () => {
+    const stub = await stubFacilitator({}, supportedOn(NETWORK, ADVERTISED));
+    const api = await apiOn(stub.url);
+    const accepted = (await refusalOf(await fetch(`${api.url}/chunk`))).accepts[0];
+    expect(accepted).toMatchObject({ payTo: PAY_TO, amount: "500", extra: ADVERTISED });
   });
 
   test("a /supported that offers another network still fails naming network, once /providers/me agrees", async () => {
-    const stub = await stubFacilitator({}, supportedOn(NETWORK_TESTNET, { ...ADVERTISED, payTo: TESTNET_PAY_TO }));
+    const stub = await stubFacilitator({}, supportedOn(NETWORK_TESTNET, ADVERTISED));
     const err = await startFailure(stub.url);
     expect(err.message).toMatch(/^network:/);
     expect(stub.paths).toEqual(["/providers/me", "/supported"]);

@@ -59,7 +59,6 @@ describe("defaults", () => {
       registrationToken: undefined,
       host: "127.0.0.1",
       port: 4022,
-      priceZat: 500n,
       terms: { windowZat: 100000n, creditRatioBps: 2500, creditCapZat: 200000n, zeroConfMinExpiryBlocks: 20 },
       warnings: [],
     });
@@ -99,7 +98,6 @@ describe("defaults", () => {
         Z402_EXPECTED_BRANCH_ID: "AABBCCDD",
         Z402_FACILITATOR_HOST: "127.0.0.2",
         Z402_FACILITATOR_PORT: "0",
-        Z402_PRICE_ZAT: "7",
         Z402_WINDOW_ZAT: "250000",
         Z402_CREDIT_RATIO_BPS: "10000",
         Z402_CREDIT_CAP_ZAT: "0",
@@ -111,7 +109,6 @@ describe("defaults", () => {
       expectedBranchId: "aabbccdd",
       host: "127.0.0.2",
       port: 0,
-      priceZat: 7n,
       terms: { windowZat: 250000n, creditRatioBps: 10000, creditCapZat: 0n, zeroConfMinExpiryBlocks: 0 },
     });
   });
@@ -120,7 +117,7 @@ describe("defaults", () => {
     const config = loadConfig(
       env({ Z402_NETWORK: "", Z402_PRICE_ZAT: "", Z402_LWD_URL: "", Z402_FACILITATOR_PORT: "" }),
     );
-    expect(config).toMatchObject({ network: NETWORK_REGTEST, priceZat: 500n, port: 4022 });
+    expect(config).toMatchObject({ network: NETWORK_REGTEST, port: 4022, warnings: [] });
   });
 });
 
@@ -464,10 +461,14 @@ describe("isValidUivk", () => {
 });
 
 describe("numbers", () => {
-  test.each(["0", "-1", "1.5", "abc", "1e3", "0x10", " 5", "05", "2100000000000001"])(
-    "Z402_PRICE_ZAT=%j is refused",
+  test.each(["0", "-1", "1.5", "abc", "1e3", "0x10", " 5", "05", "2100000000000001", "800"])(
+    "Z402_PRICE_ZAT=%j is not read: no refusal, no price in the config, and one warning",
     (value) => {
-      expect(refusal(env({ Z402_PRICE_ZAT: value })).message).toMatch(/Z402_PRICE_ZAT/);
+      const config = loadConfig(env({ Z402_PRICE_ZAT: value }));
+
+      expect(config).not.toHaveProperty("priceZat");
+      expect(config.warnings).toEqual(["Z402_PRICE_ZAT is ignored: each provider prices its own routes"]);
+      expect({ ...config, warnings: [] }).toEqual({ ...loadConfig(env()), warnings: [] });
     },
   );
 
@@ -560,6 +561,18 @@ describe("warnings", () => {
     expect(loadConfig(env({ ...MAINNET, Z402_LWD_URL: "https://127.0.0.1:9067" })).warnings).toEqual([]);
   });
 
+  test("an empty Z402_PRICE_ZAT counts as unset and is not warned about", () => {
+    expect(loadConfig(env({ Z402_PRICE_ZAT: "" })).warnings).toEqual([]);
+  });
+
+  test("the price warning comes once, after the warnings of the settings it sits beside", () => {
+    expect(loadConfig(env({ Z402_FACILITATOR_HOST: "0.0.0.0", Z402_PRICE_ZAT: "800" })).warnings).toEqual([
+      "Z402_FACILITATOR_HOST: 0.0.0.0 is not a loopback host, so the facilitator and its bearer token are reachable " +
+        "over plain http",
+      "Z402_PRICE_ZAT is ignored: each provider prices its own routes",
+    ]);
+  });
+
   test("a testnet endpoint is not warned about, as no real money is at stake", () => {
     const testnet = { Z402_NETWORK: "testnet", Z402_PAY_TO: bech32("utest"), Z402_UIVK: bech32("uivktest", 100) };
     expect(loadConfig(env(testnet)).warnings).toEqual([]);
@@ -567,7 +580,7 @@ describe("warnings", () => {
 });
 
 test("a refusal is a ConfigError", () => {
-  const error = refusal(env({ Z402_PRICE_ZAT: "0" }));
+  const error = refusal(env({ Z402_WINDOW_ZAT: "0" }));
   expect(error).toBeInstanceOf(Error);
   expect(error.name).toBe("ConfigError");
 });

@@ -13,7 +13,6 @@ import {
   NETWORK_REGTEST,
   NETWORK_TESTNET,
   parseTerms,
-  parseZat,
   ProtocolError,
   type Terms,
   type ZcashNetwork,
@@ -47,7 +46,6 @@ export interface FacilitatorEnv {
   registrationToken: string | undefined;
   host: string;
   port: number;
-  priceZat: bigint;
   terms: Terms;
   /** Settings that work but put something at risk, which main prints before the startup checks */
   warnings: string[];
@@ -193,21 +191,6 @@ function termsOf(env: Env): Terms {
   return parseTerms(wire);
 }
 
-function priceOf(env: Env): bigint {
-  const raw = read(env, "Z402_PRICE_ZAT");
-  if (raw === undefined) return 500n;
-  let price: bigint;
-  try {
-    price = parseZat(raw);
-  } catch (e) {
-    if (e instanceof ProtocolError) throw new ConfigError(`Z402_PRICE_ZAT: ${e.message}`);
-    throw e;
-  }
-  // A price of 0 would let a replayed voucher pass the increment check
-  if (price < 1n) throw new ConfigError("Z402_PRICE_ZAT: must be at least 1 zat");
-  return price;
-}
-
 function maxProvidersOf(env: Env): number {
   const raw = read(env, "Z402_MAX_PROVIDERS");
   if (raw === undefined) return DEFAULT_MAX_PROVIDERS;
@@ -343,7 +326,10 @@ export function loadConfig(env: Env): FacilitatorEnv {
     );
   }
   const port = portOf(env);
-  const priceZat = priceOf(env);
+  // Never read or checked, since each provider prices its own routes
+  if (read(env, "Z402_PRICE_ZAT") !== undefined) {
+    warnings.push("Z402_PRICE_ZAT is ignored: each provider prices its own routes");
+  }
   const terms = termsOf(env);
 
   return {
@@ -360,7 +346,6 @@ export function loadConfig(env: Env): FacilitatorEnv {
     registrationToken,
     host,
     port,
-    priceZat,
     terms,
     warnings,
   };

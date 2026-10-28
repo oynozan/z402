@@ -41,7 +41,6 @@ async function boot(dir: string, lines: string[] = []) {
     network: NETWORK,
     chain: new FakeChain().viewFor(OPERATOR),
     payTo: OPERATOR,
-    priceZat: 500n,
     terms: DEMO_TERMS,
     authToken: TOKEN,
     port: 0,

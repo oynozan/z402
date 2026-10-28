@@ -32,7 +32,6 @@ async function facilitator(payTo = PAY_TO) {
     network: NETWORK_REGTEST,
     chain: new FakeChain({ expiryDelta: 40 }).viewFor(payTo),
     payTo,
-    priceZat: 500n,
     terms: DEMO_TERMS,
     authToken: TOKEN,
     port: 0,

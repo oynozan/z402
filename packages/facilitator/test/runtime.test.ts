@@ -35,7 +35,6 @@ async function open(over: Partial<RuntimeOptions> = {}, chain = new FakeChain({ 
     network: NETWORK,
     payTo: PAY_TO,
     chain: chain.viewFor(PAY_TO),
-    priceZat: 500n,
     terms: DEMO_TERMS,
     onFatal: quiet,
     log: quiet,
@@ -46,7 +45,6 @@ async function open(over: Partial<RuntimeOptions> = {}, chain = new FakeChain({ 
 }
 
 function requirements(runtime: ProviderRuntime, over: Partial<PaymentRequirements> = {}): PaymentRequirements {
-  const { payTo: _payTo, ...terms } = runtime.extra();
   return {
     scheme: SCHEME,
     network: NETWORK,
@@ -54,7 +52,7 @@ function requirements(runtime: ProviderRuntime, over: Partial<PaymentRequirement
     amount: "500",
     payTo: runtime.payTo,
     maxTimeoutSeconds: 60,
-    extra: terms,
+    extra: runtime.extra(),
     ...over,
   };
 }
@@ -117,20 +115,30 @@ describe("openRuntime", () => {
     expect(runtime.id).toBe("f93eeecbf393ea04");
   });
 
-  test("extra() is what its x402Facilitator advertises: the terms, their version and the payTo", async () => {
+  test("extra() is what its x402Facilitator advertises: the terms and their version, and no payTo", async () => {
     const { runtime } = await open();
-    const termsVersionOf = termsVersion(PAY_TO, 500n, DEMO_TERMS);
-    const expected = { ...encodeTerms(DEMO_TERMS), termsVersion: termsVersionOf, payTo: PAY_TO };
-    expect(runtime.extra()).toEqual(expected);
+    const expected = { ...encodeTerms(DEMO_TERMS), termsVersion: termsVersion(DEMO_TERMS) };
+    expect(runtime.extra()).toStrictEqual(expected);
+    expect(runtime.extra()).not.toHaveProperty("payTo");
     expect(runtime.facilitator.getSupported().kinds).toEqual([
       { x402Version: 2, scheme: SCHEME, network: NETWORK, extra: expected },
     ]);
   });
 
+  test("every runtime advertises one extra, whatever its payTo", async () => {
+    const first = await open();
+    const second = await open({ payTo: OTHER_PAY_TO, chain: new FakeChain().viewFor(OTHER_PAY_TO) });
+
+    expect(second.runtime.extra()).toStrictEqual(first.runtime.extra());
+    expect(second.runtime.facilitator.getSupported().kinds).toStrictEqual(
+      first.runtime.facilitator.getSupported().kinds,
+    );
+  });
+
   test("extra() hands out a copy, so a caller cannot change what is advertised", async () => {
     const { runtime } = await open();
-    (runtime.extra() as Record<string, unknown>).payTo = "elsewhere";
-    expect(runtime.extra().payTo).toBe(PAY_TO);
+    (runtime.extra() as Record<string, unknown>).windowZat = "1";
+    expect(runtime.extra().windowZat).toBe("100000");
   });
 
   test("its facilitator verifies and settles a payment to its payTo", async () => {
@@ -186,7 +194,7 @@ describe("openRuntime", () => {
 
   test("a configuration the scheme refuses names the field and gives the ledger lock back", async () => {
     const ledgerPath = ledger("refused");
-    await expect(open({ ledgerPath, priceZat: 0n })).rejects.toThrow(/^priceZat:/);
+    await expect(open({ ledgerPath, depositWaitMs: -1 })).rejects.toThrow(/^depositWaitMs:/);
     expect(existsSync(`${ledgerPath}.lock`)).toBe(false);
     await expect(open({ ledgerPath })).resolves.toBeDefined();
   });
