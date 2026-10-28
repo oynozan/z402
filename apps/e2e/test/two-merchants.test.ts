@@ -54,8 +54,8 @@ test(
     expect(snapshots[0]!.every((snap) => snap.sessionKey === keyA)).toBe(true);
     expect(snapshots[1]!.every((snap) => snap.sessionKey === keyB)).toBe(true);
 
-    // At 800 zat the second merchant's headroom first drops below windowZat on call 33 (125,000 - 32 x 800),
-    // which starts its D2; the first merchant at 500 zat would need call 52
+    // At 800 zat the second merchant's headroom first drops below windowZat after call 32 (125,000 - 32 x 800),
+    // which starts its D2, as the live two-provider run showed; the first merchant at 500 zat would need call 51
     expect(s.wallet.sent.map((d) => [d.to, d.memo])).toEqual([
       [PAY_TO, `${keyA}:1`],
       [PAY_TO_2, `${keyB}:1`],
