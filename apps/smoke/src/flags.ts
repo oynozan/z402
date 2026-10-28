@@ -36,7 +36,7 @@ export const DEFAULTS = Object.freeze({
 export const USAGE = `usage: pnpm --filter @z402/smoke start [flags]
 
 Pays one call on each service that has a URL, checks every answer, and prints one line per step:
-<service> <step> <status> <ms> ms <detail>. All the services share one merchant, so one deposit pays for all.
+<service> <step> <status> <ms> ms <detail>. It makes one deposit per merchant: services that share one share it.
 
   --llm <url>              LLM inference service, e.g. http://127.0.0.1:4031      (skipped when left out)
   --markdown <url>         URL to markdown service, e.g. http://127.0.0.1:4032    (skipped when left out)
