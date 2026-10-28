@@ -89,7 +89,8 @@ interface Refusal {
 type Presented =
   | { kind: "none" }
   | { kind: "credited" }
-  | { kind: "refused"; refusal: Refusal; needsLookup: boolean }
+  /** `refresh` asks verify to read the session's deposits again before it answers */
+  | { kind: "refused"; refusal: Refusal; needsLookup: boolean; refresh?: boolean }
   | { kind: "usable"; record: DepositRecord }
   | { kind: "in_flight" }
   | { kind: "unusable"; refusal: Refusal; retry: boolean; once?: boolean };
@@ -124,6 +125,10 @@ const POISONED_SETTLE: Refusal = { code: REASON.unexpectedSettleError, message: 
 /** One answer for every found deposit a session cannot use, so none of them tells what the merchant's key sees */
 const CANNOT_CREDIT: Refusal = { code: REASON.depositMemoMismatch, message: "the deposit cannot be credited" };
 const DEAD: Refusal = { code: REASON.depositDead, message: "the deposit is dead" };
+const NOT_READ_SINCE_EXPIRY: Refusal = {
+  code: REASON.chainUnavailable,
+  message: "the deposit has not been read since its expiry",
+};
 
 export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator {
   readonly scheme = SCHEME;
@@ -326,7 +331,8 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       return refused({ code: REASON.cumulativeMismatch, message }, snapshot);
     }
     if (presented.kind === "refused") {
-      return refused(presented.refusal, snapshot, { needsLookup: presented.needsLookup, once: false, refresh: false });
+      const { needsLookup, refresh = false } = presented;
+      return refused(presented.refusal, snapshot, { needsLookup, once: false, refresh });
     }
     if (check === "ok") {
       const events: LedgerEvent[] = presented.kind === "usable" ? [depositEvent(presented.record)] : [];
@@ -371,7 +377,9 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     const elsewhere = record !== undefined && record.sessionKey !== v.sessionKey;
     if (record !== undefined && !elsewhere) {
       if (asOfTip(record, tip).status !== "dead") return { kind: "credited" };
-      return { kind: "refused", refusal: DEAD, needsLookup: false };
+      if (record.status === "dead") return { kind: "refused", refusal: DEAD, needsLookup: false };
+      // Dead only at a tip newer than the watcher's last read of it, so verify has the watcher read it again (R49)
+      return { kind: "refused", refusal: NOT_READ_SINCE_EXPIRY, needsLookup: false, refresh: true };
     }
 
     if (known?.kind === "found" && elsewhere) {
@@ -382,7 +390,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       const e = evaluateDeposit(known.inspection, v.sessionKey, this.#config.terms, tip, known.tip);
       // Only a newer tip says it died, and it may have been mined since it was read, so it is read again first
       if (!e.ok && e.code === REASON.depositDead && chainPosition(known.inspection, known.tip).status !== "dead") {
-        return unusable(REASON.chainUnavailable, "the deposit has not been read since its expiry", true, true);
+        return unusable(NOT_READ_SINCE_EXPIRY.code, NOT_READ_SINCE_EXPIRY.message, true, true);
       }
       if (!e.ok) return unusable(e.code, CANNOT_CREDIT.message, false);
       return { kind: "usable", record: creditedRecord(txid, v.sessionKey, e, known.tip) };
