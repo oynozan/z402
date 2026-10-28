@@ -1,5 +1,7 @@
 # z402 client design (`@z402/client`, testkit, demo agent, e2e harness)
 
+> **Package names.** Since 2026-10-28 the SDK packages are published as `@z402-net/{protocol,lightwalletd,server,client,service-kit}`. This design keeps the original `@z402/` names it was written with, and the internal packages (facilitator, api, testkit, the apps) still use them.
+
 2026-10-27 · client agent
 
 **Inputs**
