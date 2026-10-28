@@ -1,6 +1,6 @@
 # @z402/service-llm
 
-LLM inference sold per output chunk, on port 4031. Each paid call (`Z402_PRICE_ZAT`, 500 zat by default) returns one chunk of about `LLM_CHUNK_TOKENS` tokens, streamed from any OpenAI-compatible `chat/completions` API (Ollama by default), so an agent stops paying as soon as it has enough.
+LLM inference sold per output chunk, on port 4031. Each paid call (200 zat, or `Z402_PRICE_ZAT` when set) returns one chunk of about `LLM_CHUNK_TOKENS` tokens, streamed from any OpenAI-compatible `chat/completions` API (Ollama by default), so an agent stops paying as soon as it has enough.
 
 The operator sees the prompts and the output.
 
@@ -36,7 +36,7 @@ Refused before payment, so never charged:
 
 After payment, rare, never settled but counted by the client: 502 `provider_failed`, 504 `chunk_timeout`, 503 `too_many_streams` when paid starts that all found room arrive together at the limit, and 503 `stream_closed` while the service shuts down.
 
-`GET /health` answers 200 once the provider lists `LLM_MODEL` as loaded, 503 otherwise.
+`GET /health` answers 200 once the provider lists `LLM_MODEL` as loaded, 503 otherwise. Only while it answers 200 is the route declared to the facilitator's catalog, every 30 s.
 
 ## Environment
 
@@ -49,7 +49,8 @@ Under Docker, compose reads `docker/env/llm.env` (llama.cpp server at `http://ll
 | `Z402_FACILITATOR_URL` | none | Required |
 | `Z402_PAY_TO` / `_FILE` | none | Required, the facilitator's merchant address |
 | `Z402_FACILITATOR_TOKEN` / `_FILE` | none | The facilitator's bearer token |
-| `Z402_NETWORK`, `Z402_PRICE_ZAT` | `regtest`, `500` | Must match the facilitator |
+| `Z402_NETWORK` | `regtest` | Must match the facilitator |
+| `Z402_PRICE_ZAT` | `200` | Zat per chunk, from 1 to the facilitator's `windowZat`; compose sets 500 until the facilitator takes a price per route |
 | `PUBLIC_URL`, `HOST`, `PORT` | `http://localhost:4031`, `127.0.0.1`, `4031` | |
 | `LLM_BASE_URL` | `http://127.0.0.1:11434/v1` | OpenAI-compatible API root |
 | `LLM_API_KEY` / `_FILE` | none | Sent as a bearer token when set |

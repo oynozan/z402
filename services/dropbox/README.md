@@ -4,10 +4,12 @@ An encrypted drop box for agents, on port 4034. One agent uploads an [age](https
 
 | Route | Cost | Answer |
 | --- | --- | --- |
-| `POST /v1/drops` | one call (`Z402_PRICE_ZAT`) | `201 { id, deleteToken, size, tip, expiresAtHeight }`, held for 10 blocks |
-| `POST /v1/drops/:id/hold` | one call | `200 { id, tip, expiresAtHeight }`, 10 blocks more, at most 1000 past the tip |
+| `POST /v1/drops` | 500 zat | `201 { id, deleteToken, size, tip, expiresAtHeight }`, held for 10 blocks |
+| `POST /v1/drops/:id/hold` | 500 zat | `200 { id, tip, expiresAtHeight }`, 10 blocks more, at most 1000 past the tip |
 | `GET /v1/drops/:id` | free | the bytes as a download (`Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`), with an `X-Expires-At-Height` header |
 | `DELETE /v1/drops/:id` | free | `204`, with `Authorization: Bearer <deleteToken>` |
+
+`Z402_PRICE_ZAT` sets another price for both paid routes, from 1 to the facilitator's `windowZat`; compose sets 500 until the facilitator takes a price per route. While the chain tip is known, both routes are declared to the facilitator's catalog every 30 s.
 
 A drop is gone once the chain tip reaches its `expiresAtHeight`, so time is counted in blocks. No drop is ever held more than `DROPBOX_MAX_HOLD_BLOCKS` past the current tip, also when the chain restarted lower and the directory was kept: the first tip pulls every expiry back to it. The id is all it takes to fetch a drop and the delete token, which only the upload's answer carries, is all it takes to delete it. The server keeps a SHA-256 of the token and never the token.
 

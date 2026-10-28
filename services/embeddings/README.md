@@ -2,7 +2,7 @@
 
 Text embeddings for agents, billed per call: one paid call embeds up to about 1,000 tokens. It asks any OpenAI-compatible provider (Ollama by default) and answers in the OpenAI shape. Design: `docs/superpowers/specs/2026-10-27-z402-services-design.md` §4.3.
 
-`POST /v1/embeddings` costs `Z402_PRICE_ZAT` (500 zat by default) and is paid with `prepaid-voucher` through `@z402/service-kit`.
+`POST /v1/embeddings` costs 100 zat, or `Z402_PRICE_ZAT` when set, and is paid with `prepaid-voucher` through `@z402/service-kit`. While the provider lists the model, the route is declared to the facilitator's catalog every 30 s.
 
 ```json
 { "input": "The quick brown fox" }
@@ -39,7 +39,7 @@ The provider is trusted to be up and not to be right: its answer is read up to 1
 
 ## Settings
 
-An empty variable counts as unset, and a bad one stops the start with a line naming it. The shared `Z402_*`, `PUBLIC_URL`, `HOST` and `PORT` (4033) are in `packages/service-kit`.
+An empty variable counts as unset, and a bad one stops the start with a line naming it. The shared `Z402_*`, `PUBLIC_URL`, `HOST` and `PORT` (4033) are in `packages/service-kit`. `Z402_PRICE_ZAT` replaces the 100 zat price of a call, from 1 to the facilitator's `windowZat`; compose sets 500 until the facilitator takes a price per route.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

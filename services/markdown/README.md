@@ -1,6 +1,7 @@
 # @z402/service-markdown
 
-URL to markdown, one page per paid call (design §4.2, port 4032).
+URL to markdown, one page per paid call of 1,000 zat (design §4.2, port 4032). `Z402_PRICE_ZAT` sets another price,
+from 1 to the facilitator's `windowZat`; compose sets 500 until the facilitator takes a price per route.
 
 ```
 GET /v1/markdown?url=<http(s) URL>
@@ -19,6 +20,21 @@ pnpm --filter @z402/service-markdown start
 
 The ready line is `markdown listening on http://127.0.0.1:4032 network=zcash:regtest`. In Docker, `compose.yaml` runs
 it and sets the shared `Z402_*` variables; `services/markdown/.env` still sets the `MARKDOWN_*` ones.
+
+## As provider 2
+
+URL to markdown runs as provider 2: an independent provider of the rail, paid to its own address and connecting with
+its own API key, as an outside provider would, while the other starter services are the operator's.
+
+- `Z402_PAY_TO` (or `_FILE`) is provider 2's own shielded-only unified address, not the operator's.
+- `Z402_FACILITATOR_TOKEN_FILE` holds the API key the facilitator issued for that address.
+  `scripts/register-provider.mjs` registers the address's view-only keys with `POST /providers` and writes the key to
+  a file without printing it.
+
+The facilitator takes registrations from its multi-provider release on
+([design](../../docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md), section 4.1). Until then, and in
+compose until provider 2 is wired there, the service runs on the operator's address and token like the others. Its
+routes are declared to the facilitator's catalog under whichever key it holds.
 
 ## Refused before payment
 
