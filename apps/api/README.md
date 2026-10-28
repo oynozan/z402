@@ -28,7 +28,7 @@ The ready line goes to stdout and the logs to stderr:
 api listening on http://127.0.0.1:4021 network=zcash:regtest
 ```
 
-`Z402_PAY_TO` is the merchant's public address, so the shell above reads it from the keys file and the API process never opens that file. The alternative is `Z402_MERCHANT_KEYS_FILE=.secrets/merchant-regtest.json`. The API then reads and parses the whole file, seed and viewing key included, and uses only its `orchardOnlyAddress`. Use `Z402_PAY_TO` wherever the API should not be able to read the viewing key or the seed, which is every deployment but a local regtest one, and keep the keys file out of that process's reach (another OS user or another host).
+`Z402_PAY_TO` is the merchant's public address, so the shell above reads it from the keys file and the API process never opens that file. The alternative is `Z402_MERCHANT_KEYS_FILE=.secrets/merchant-regtest.json`. The API then reads and parses the whole file, seed and viewing key included, and uses only its `orchardOnlyAddress`. Since that file holds the spending seed, the API prints `api: warning: Z402_MERCHANT_KEYS_FILE: <file> holds the spending seed; the API needs only Z402_PAY_TO` and goes on, and on mainnet it refuses the file with the same text. Use `Z402_PAY_TO` wherever the API should not be able to read the viewing key or the seed, which is every deployment but a local regtest one, and keep the keys file out of that process's reach (another OS user or another host).
 
 Stop the API with SIGINT or SIGTERM, which closes the server and exits 0 (or exits 1 after 5 s if that hangs).
 
@@ -36,15 +36,15 @@ To run beside the demo (`scripts/demo.sh up` uses 4022 and 4021), start a second
 
 ## Environment
 
-An empty variable counts as unset. A path that is not absolute is relative to the repository root, whatever directory `pnpm` runs the package from. A problem makes the process exit 1 with an `api: ...` line on stderr that names the variable or option at fault. When the facilitator cannot be reached or refuses the token, the x402 SDK first prints its own `Failed to fetch supported kinds from facilitator: ...` warning line.
+An empty variable counts as unset. A path that is not absolute is relative to the repository root, whatever directory `pnpm` runs the package from. A problem makes the process exit 1 with an `api: ...` line on stderr that names the variable or option at fault. A warning is an `api: warning: ...` line on stderr, and the start goes on. When the facilitator cannot be reached or refuses the token, the x402 SDK first prints its own `Failed to fetch supported kinds from facilitator: ...` warning line.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `Z402_NETWORK` | `regtest` | `regtest`, `testnet` or `mainnet`. The facilitator must offer `prepaid-voucher` on it. |
-| `Z402_FACILITATOR_URL` | none | Required. The `http://` or `https://` URL of the facilitator, without a username or password in it (the token has its own variable). There is no default on purpose, because an empty URL makes the x402 SDK send payments to x402.org. |
+| `Z402_FACILITATOR_URL` | none | Required. The `http://` or `https://` URL of the facilitator, without a username or password in it (the token has its own variable). There is no default on purpose, because an empty URL makes the x402 SDK send payments to x402.org. The token and every voucher travel on this link, so on testnet and mainnet `http://` is allowed only to a loopback host (`localhost`, `127.0.0.0/8` or `[::1]`). Regtest allows it to any host, such as another container of a compose network. |
 | `Z402_FACILITATOR_TOKEN` | none | The facilitator's bearer token. Nothing is sent when it is unset, and a facilitator that wants one then answers 401. It must be one token of letters, digits and `-._~+/`, optionally ending in `=`, the same rule as the facilitator's, so the API refuses a token that no header could carry. |
 | `Z402_PAY_TO` | `orchardOnlyAddress` of the keys file | The merchant's shielded-only unified address, which every 402 names as the place to send deposits (`uregtest1...`, `utest1...` or `u1...`, and the ZIP 316 revision 2 `zu...` forms). It must be the facilitator's `Z402_PAY_TO`. Prefer it to the keys file. |
-| `Z402_MERCHANT_KEYS_FILE` | none | The JSON that `zdecrypt keygen` prints, which `scripts/merchant-keygen.mjs` writes. Used only when `Z402_PAY_TO` is unset. The whole file is read and parsed, seed and viewing key included, and only its `orchardOnlyAddress` is used. |
+| `Z402_MERCHANT_KEYS_FILE` | none | The JSON that `zdecrypt keygen` prints, which `scripts/merchant-keygen.mjs` writes. Used only when `Z402_PAY_TO` is unset. The whole file is read and parsed, seed and viewing key included, and only its `orchardOnlyAddress` is used. A file that holds `seedHex` (the spending seed) or `ufvk` (the full viewing key) is refused on mainnet and gives a warning elsewhere. |
 | `Z402_PRICE_ZAT` | `500` | The price of one call in zatoshi, at least 1. It must equal the facilitator's `Z402_PRICE_ZAT`, which nothing checks at start: with different prices the API starts, and then every paid call is refused with `invalid_payment_requirements`. |
 | `Z402_API_HOST` | `127.0.0.1` | The address to listen on. |
 | `Z402_API_PORT` | `4021` | 0 to 65535, where 0 picks a free port. |
@@ -88,12 +88,14 @@ To pay it, run the agent (`scripts/demo.sh honest`, see `docs/demo.md`).
 
 ## Startup failures
 
-Each one names the option to fix, and none quotes a token. The first two rows are checks that run before the facilitator is contacted, so a password in the URL is refused before any message could print it:
+Each one names the option to fix, and none quotes a token. The first three rows are checks that run before the facilitator is contacted, so a password in the URL is refused before any message could print it:
 
 | Message | Cause |
 | --- | --- |
 | `api: facilitatorUrl: must not carry credentials (use facilitatorToken)` | the URL has a username or a password |
 | `api: facilitatorToken: must be one token of letters, digits and -._~+/` | the token has a space, a control character or another character |
+| `api: facilitatorUrl: plaintext http:// is allowed only to a loopback host on zcash:testnet; use https://` | an `http://` URL to a host that is not loopback, on testnet or mainnet |
+| `api: Z402_MERCHANT_KEYS_FILE: <file> holds the spending seed; the API needs only Z402_PAY_TO` | a mainnet keys file that holds the seed (set `Z402_PAY_TO` instead) |
 | `api: Z402_FACILITATOR_URL is required (...)` | no facilitator URL |
 | `api: facilitatorUrl: cannot read /supported from the facilitator at <url> (fetch failed: connect ECONNREFUSED ...)` | the facilitator is not running at that URL |
 | `api: facilitatorToken: the facilitator at <url> refused the request (... (401) ...)` | the token is missing or wrong |
