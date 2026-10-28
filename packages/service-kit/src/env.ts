@@ -47,6 +47,8 @@ const NETWORKS: Readonly<Record<string, { network: ZcashNetwork; payToHint: stri
 
 const PORT_RE = /^(0|[1-9][0-9]{0,4})$/;
 const WHOLE_RE = /^(0|[1-9][0-9]{0,15})$/;
+/** An RFC 6750 b64token, the only token the facilitator takes, and one fetch never quotes in an error */
+const B64TOKEN_RE = /^[A-Za-z0-9\-._~+/]+=*$/;
 
 /** The value of `name`, or undefined when it is unset or empty */
 export function read(env: Env, name: string): string | undefined {
@@ -124,7 +126,16 @@ export function loadServiceEnv(env: Env, o: { port: number; priceZat: bigint }):
   if (profile === undefined) throw new ConfigError("Z402_NETWORK: expected regtest, testnet or mainnet");
 
   const facilitatorUrl = readUrl(env, "Z402_FACILITATOR_URL");
+  const { username, password } = new URL(facilitatorUrl);
+  if (username !== "" || password !== "") {
+    throw new ConfigError("Z402_FACILITATOR_URL: must not contain credentials (use Z402_FACILITATOR_TOKEN)");
+  }
   const facilitatorToken = readOrFile(env, "Z402_FACILITATOR_TOKEN");
+  if (facilitatorToken !== undefined && !B64TOKEN_RE.test(facilitatorToken)) {
+    const name =
+      read(env, "Z402_FACILITATOR_TOKEN") === undefined ? "Z402_FACILITATOR_TOKEN_FILE" : "Z402_FACILITATOR_TOKEN";
+    throw new ConfigError(`${name}: must be one token of letters, digits and -._~+/ only`);
+  }
 
   const payTo = readOrFile(env, "Z402_PAY_TO");
   if (payTo === undefined) {

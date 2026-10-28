@@ -203,6 +203,25 @@ describe("loadServiceEnv", () => {
       loadServiceEnv({ Z402_FACILITATOR_URL: "http://f", Z402_PAY_TO_FILE: join(dir, "missing") }, own),
     ).toThrow(/^Z402_PAY_TO_FILE/);
   });
+
+  test("refuses a facilitator URL with credentials or a token that is not one b64token, without quoting either", () => {
+    // fetch quotes a header value it cannot send, and a URL with credentials, in the error a failed start prints
+    const twoLines = join(mkdtempSync(join(tmpdir(), "kit-env-")), "token");
+    writeFileSync(twoLines, "secret-token\nsecond-line\n");
+    const refused: [Record<string, string>, RegExp][] = [
+      [{ Z402_FACILITATOR_URL: "http://agent:hunter2@127.0.0.1:4022" }, /^Z402_FACILITATOR_URL: must not contain/],
+      [{ Z402_FACILITATOR_TOKEN: "secret-token\r\nsecond-line" }, /^Z402_FACILITATOR_TOKEN: must be one token/],
+      [{ Z402_FACILITATOR_TOKEN: "secret token" }, /^Z402_FACILITATOR_TOKEN: must be one token/],
+      [{ Z402_FACILITATOR_TOKEN_FILE: twoLines }, /^Z402_FACILITATOR_TOKEN_FILE: must be one token/],
+    ];
+    for (const [change, error] of refused) {
+      const load = (): ServiceEnv => loadServiceEnv({ ...base, ...change }, own);
+      expect(load).toThrow(error);
+      expect(load).not.toThrow(/hunter2|secret/);
+    }
+    const key = `z402_${"A".repeat(43)}`;
+    expect(loadServiceEnv({ ...base, Z402_FACILITATOR_TOKEN: key }, own).facilitatorToken).toBe(key);
+  });
 });
 
 describe("a paid service", () => {
