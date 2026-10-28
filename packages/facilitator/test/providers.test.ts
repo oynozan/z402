@@ -508,6 +508,8 @@ describe("POST /providers", () => {
       expect((await call(url, path, { method, token: fresh, body })).status).toBe(200);
     }
     expect(await call(url, "/providers/me", { token: fresh })).toMatchObject({ json: { providerId: ID_A } });
+    expect((await call(url, "/supported", { token: old })).status).toBe(401);
+    expect((await call(url, "/supported", { token: fresh })).status).toBe(200);
   });
 
   test("a rotation stores the new hash and moves keyIssuedAt, and keeps the creation time and the ledger", async () => {
@@ -1156,7 +1158,7 @@ describe("authentication", () => {
     expect(await call(url, "/supported", { method: "POST", body: {} })).toMatchObject({ status: 404 });
   });
 
-  test("GET /supported is public and answered by the operator's runtime", async () => {
+  test("GET /supported needs no key and is answered by the operator's runtime to every key of the facilitator", async () => {
     const rig = newRig();
     const { url } = await boot(rig);
     const key = await enroll(url, A);
@@ -1164,10 +1166,24 @@ describe("authentication", () => {
     expect(without.status).toBe(200);
     expect(without.json.kinds).toMatchObject([{ x402Version: 2, scheme: SCHEME, network: NETWORK }]);
     expect(without.json.kinds[0].extra.payTo).toBe(OPERATOR);
-    for (const token of [TOKEN, key, "wrong", REGISTRATION]) {
+    for (const token of [TOKEN, key]) {
       expect(await call(url, "/supported", { token })).toMatchObject({ status: 200, json: without.json });
     }
     expect(await call(url, "/supported?token=wrong")).toMatchObject({ status: 200, json: without.json });
+  });
+
+  test("GET /supported refuses a key that names no provider, a rotated-out key included", async () => {
+    const rig = newRig();
+    const { url } = await boot(rig);
+    const old = await enroll(url, A);
+    await register(url, A);
+    for (const token of ["wrong", REGISTRATION, old, keyDigest(old)]) {
+      const res = await call(url, "/supported", { token });
+      expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
+      expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    }
+    const basic = await call(url, "/supported", { headers: { authorization: "Basic abc" } });
+    expect(basic.status).toBe(401);
   });
 
   test("a facilitator without a token serves a request with no header as the operator", async () => {

@@ -211,18 +211,31 @@ function refuse(res: Response, status: number, error: string, message: string): 
   res.status(status).json({ error, message });
 }
 
+function unauthorized(res: Response): void {
+  res.set("WWW-Authenticate", "Bearer");
+  res.status(401).json({ error: "unauthorized" });
+}
+
 /** Finds the provider of the request, or refuses it with 401 and a challenge */
 function tenancy(tenantOf: AppOptions["tenantOf"]): RequestHandler {
   return (req, res, next) => {
     const tenant = tenantOf(req.get("authorization"));
     if (tenant === undefined) {
-      res.set("WWW-Authenticate", "Bearer");
-      res.status(401).json({ error: "unauthorized" });
+      unauthorized(res);
       return;
     }
     res.locals.tenant = tenant;
     res.locals.provider = tenant.id;
     next();
+  };
+}
+
+/** For a route that needs no key, which lets a request with none by and refuses one whose key names no provider */
+function noStrangers(tenantOf: AppOptions["tenantOf"]): RequestHandler {
+  return (req, res, next) => {
+    const authorization = req.get("authorization");
+    if (authorization === undefined || tenantOf(authorization) !== undefined) next();
+    else unauthorized(res);
   };
 }
 
@@ -298,7 +311,8 @@ export function createFacilitatorApp(o: AppOptions): Express {
 
   /* Public routes */
 
-  app.get("/supported", (_req: Request, res: Response) => {
+  // Needs no key, yet a key that is presented must be one of ours, so a wrong one is found out at start as before
+  app.get("/supported", noStrangers(tenantOf), (_req: Request, res: Response) => {
     res.json(operator.facilitator.getSupported());
   });
 

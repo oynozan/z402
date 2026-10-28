@@ -115,8 +115,12 @@ const settle = (url: string, payload: PaymentPayload, r: PaymentRequirements) =>
   call(url, "/settle", { body: envelope(payload, r) });
 
 /** The requirements the API would send, built from /supported the way the server scheme copies the terms */
-async function requirementsOf(url: string, over: Partial<PaymentRequirements> = {}): Promise<PaymentRequirements> {
-  const supported = await call(url, "/supported");
+async function requirementsOf(
+  url: string,
+  over: Partial<PaymentRequirements> = {},
+  token: string | null = TOKEN,
+): Promise<PaymentRequirements> {
+  const supported = await call(url, "/supported", { token });
   const { windowZat, creditRatioBps, creditCapZat, zeroConfMinExpiryBlocks, termsVersion } =
     supported.json.kinds[0].extra;
   return {
@@ -282,20 +286,23 @@ describe("GET /supported", () => {
     });
   });
 
-  test("is public: answered without a token, with a wrong one and with a query string", async () => {
+  test("is public: it needs no token, and a query string changes nothing", async () => {
     const { url } = await boot();
     const withToken = await call(url, "/supported");
-    for (const init of [{ token: null }, { token: "" }, { token: "wrong" }, { token: `${TOKEN}x` }] as const) {
-      expect(await call(url, "/supported", init)).toMatchObject({ status: 200, json: withToken.json });
-    }
-    expect(await call(url, `/supported?token=wrong`, { token: null })).toMatchObject({ status: 200 });
+    expect(await call(url, "/supported", { token: null })).toMatchObject({ status: 200, json: withToken.json });
+    expect(await call(url, "/supported?token=wrong", { token: null })).toMatchObject({ status: 200 });
+    expect(withToken.json.kinds[0].extra.payTo).toBe(PAY_TO);
   });
 
-  test("is answered by the operator's facilitator even when the header names nobody", async () => {
+  test("still refuses a key that names nobody, as it did before it needed none", async () => {
     const { url } = await boot();
-    const res = await call(url, "/supported", { token: null, headers: { authorization: "Basic abc" } });
-    expect(res.status).toBe(200);
-    expect(res.json.kinds[0].extra.payTo).toBe(PAY_TO);
+    for (const init of [{ token: "" }, { token: "wrong" }, { token: `${TOKEN}x` }] as const) {
+      const res = await call(url, "/supported", init);
+      expect(res).toMatchObject({ status: 401, json: { error: "unauthorized" } });
+      expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    }
+    const basic = await call(url, "/supported", { token: null, headers: { authorization: "Basic abc" } });
+    expect(basic.status).toBe(401);
   });
 });
 
@@ -406,7 +413,7 @@ describe("the bearer token", () => {
   test("without a configured token a request with no header is the operator's", async () => {
     const { url } = await boot({ authToken: undefined });
     expect((await call(url, "/providers/me", { token: null })).status).toBe(200);
-    const r = await requirementsOf(url);
+    const r = await requirementsOf(url, {}, null);
     const res = await call(url, "/verify", { token: null, body: envelope(pay(r, 500n), r) });
     expect(res.json).toMatchObject({ invalidReason: REASON.depositRequired });
   });
@@ -982,18 +989,18 @@ describe("what the HTTP layer exposes", () => {
     const signature = "PAYMENT-SIGNATURE-VALUE";
 
     await call(url, "/supported?apikey=hunter2", { headers: { "payment-signature": signature } });
-    await call(url, "/providers/me", { token: "nope" });
+    await call(url, "/supported", { token: "nope" });
     await call(url, "/verify", { body: {} });
     await verify(url, pay(r, 500n, d1), r);
     await settle(url, pay(r, 500n, d1), r);
     await settle(url, pay(r, 500n), r);
 
-    // A request names the provider whose key it carried, and a public one or a refused one names nobody
+    // A request on a route that needs a key names the provider whose key it carried, and any other names nobody
     const me = providerId(NETWORK, PAY_TO);
     expect(lines).toEqual([
       "GET /supported 200",
       "GET /supported 200",
-      "GET /providers/me 401",
+      "GET /supported 401",
       `POST /verify 200 invalid_payload ${me}`,
       `POST /verify 200 ${me}`,
       `POST /settle 200 ${me}`,
