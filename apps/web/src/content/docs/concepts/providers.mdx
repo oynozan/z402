@@ -221,7 +221,7 @@ A resource server that is running with the old key is refused from the moment of
 
 ## Connecting a resource server
 
-A resource server uses its key in two ways. It sends the key as a bearer token on every call to the facilitator, and it checks the key and its `payTo` at start with `checkProvider` from `@z402/server`. That calls `GET /providers/me`. When it fails it throws a `ProviderCheckError`, and callers branch on its fields, never on its message. The message never contains the key.
+A resource server uses its key in two ways. It sends the key as a bearer token on every call to the facilitator, and it checks the key and its `payTo` at start with `checkProvider` from `@z402-net/server`. That calls `GET /providers/me`. When it fails it throws a `ProviderCheckError`, and callers branch on its fields, never on its message. The message never contains the key.
 
 | Outcome | `field` | `retryable` |
 |---|---|---|
@@ -232,7 +232,7 @@ A resource server uses its key in two ways. It sends the key as a bearer token o
 | Before any request: a URL that is not http or https or carries credentials, or a token that is not a bearer token | `facilitatorUrl` or `facilitatorToken` | `false` |
 
 ```ts title="check-provider.ts"
-import { checkProvider, ProviderCheckError } from "@z402/server";
+import { checkProvider, ProviderCheckError } from "@z402-net/server";
 
 const facilitatorUrl = "https://facilitator.example.com";
 const token = process.env["Z402_FACILITATOR_TOKEN"]; // the API key

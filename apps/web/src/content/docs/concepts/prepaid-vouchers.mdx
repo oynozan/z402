@@ -118,7 +118,7 @@ import {
   SCHEME,
   signVoucher,
   verifyVoucher,
-} from "@z402/protocol";
+} from "@z402-net/protocol";
 
 // Take the real address from accepts[0].payTo of the 402
 const payTo = "uregtest1qqqqqqqq";
@@ -168,7 +168,7 @@ Two rules sit around the formula. The increment is lenient: `c_new - c_last` onl
 A deposit is zero-conf eligible when it holds at least one window and either never expires or has at least `zeroConfMinExpiryBlocks` blocks left, counted from the tip when the facilitator first saw it. That value is fixed per deposit and never re-evaluated.
 
 ```ts title="ramp.ts"
-import { checkVoucher, computeLimit, DEMO_TERMS, zeroConfEligible, type RampDeposit } from "@z402/protocol";
+import { checkVoucher, computeLimit, DEMO_TERMS, zeroConfEligible, type RampDeposit } from "@z402-net/protocol";
 
 const deposits: RampDeposit[] = [
   { valueZat: 100_000n, status: "confirmed", zeroConf: true }, // D1, mined

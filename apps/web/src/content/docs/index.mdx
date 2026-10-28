@@ -58,7 +58,7 @@ A <Term tip="The smallest unit of ZEC. 1 ZEC is 100,000,000 zat.">zat</Term> is 
 
 ### Agents and their builders
 
-Your agent is the stock x402 client plus one line that registers the Zcash scheme. `@z402/client` makes the deposits, signs the vouchers and recovers when a call is refused.
+Your agent is the stock x402 client plus one line that registers the Zcash scheme. `@z402-net/client` makes the deposits, signs the vouchers and recovers when a call is refused.
 
 <CodeTabs>
 
@@ -75,8 +75,8 @@ console.log(res.status, await res.json());
 ```
 
 ```ts title="zcash.ts"
-import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
+import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
 
 // The endpoints and credentials of the local regtest stack
 const lwd = createLightwalletdClient({ url: "http://127.0.0.1:28137" });
@@ -91,12 +91,12 @@ export const zcashClientScheme = new PrepaidVoucherScheme({
 
 <Cards>
   <Card title="Pay from an agent" href="/docs/guides/pay-from-an-agent">Wire the scheme into your own agent, step by step.</Card>
-  <Card title="@z402/client" href="/docs/reference/client">Options, events and errors of the client library.</Card>
+  <Card title="@z402-net/client" href="/docs/reference/client">Options, events and errors of the client library.</Card>
 </Cards>
 
 ### API providers
 
-Put the x402 middleware in front of any route, set a price and a payTo address, and register with a facilitator once to get an API key. You never run payment infrastructure. `@z402/service-kit` builds a whole paid service from data: its routes, their prices and the checks that run before payment.
+Put the x402 middleware in front of any route, set a price and a payTo address, and register with a facilitator once to get an API key. You never run payment infrastructure. `@z402-net/service-kit` builds a whole paid service from data: its routes, their prices and the checks that run before payment.
 
 <Cards>
   <Card title="Sell an API" href="/docs/guides/sell-an-api">Charge for a route in a few lines.</Card>

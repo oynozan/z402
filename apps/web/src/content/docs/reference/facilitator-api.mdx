@@ -5,7 +5,7 @@ export const meta = {
 
 The facilitator is an HTTP service with eight routes. Resource servers call `POST /verify` and `POST /settle` for every paid request. Providers register with `POST /providers` and list their paid routes with `POST /discovery/resources`. Anyone can read the supported terms and the public catalog.
 
-You rarely call these routes by hand. The stock x402 packages (`@x402/express`, `@x402/core`) call `/verify` and `/settle` for a resource server. At start-up, the demo API and `@z402/service-kit` call `checkProvider` from `@z402/server`, which reads `GET /providers/me`. This page is the contract behind them. The wire format of the payment itself is in [Protocol](/docs/reference/protocol).
+You rarely call these routes by hand. The stock x402 packages (`@x402/express`, `@x402/core`) call `/verify` and `/settle` for a resource server. At start-up, the demo API and `@z402-net/service-kit` call `checkProvider` from `@z402-net/server`, which reads `GET /providers/me`. This page is the contract behind them. The wire format of the payment itself is in [Protocol](/docs/reference/protocol).
 
 ```mermaid
 sequenceDiagram
@@ -394,7 +394,7 @@ curl -s http://127.0.0.1:4022/providers/me -H "authorization: Bearer $Z402_API_K
 ```
 
 ```ts title="check-key.ts"
-import { checkProvider, ProviderCheckError } from "@z402/server";
+import { checkProvider, ProviderCheckError } from "@z402-net/server";
 
 try {
   await checkProvider({

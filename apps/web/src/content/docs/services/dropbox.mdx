@@ -238,9 +238,9 @@ try {
 
 ```ts title="paid-fetch.ts"
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
-import { NETWORK_REGTEST } from "@z402/protocol";
+import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
+import { NETWORK_REGTEST } from "@z402-net/protocol";
 
 // Zallet pays the deposit and lightwalletd (Zaino) reports its status.
 // These are the Z3 regtest defaults.

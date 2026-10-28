@@ -71,9 +71,9 @@ export const DOCS_SECTIONS = [
     pages: [
       { file: "reference/protocol", title: "Protocol" },
       { file: "reference/facilitator-api", title: "Facilitator API" },
-      { file: "reference/client", title: "@z402/client" },
-      { file: "reference/server", title: "@z402/server" },
-      { file: "reference/service-kit", title: "@z402/service-kit" },
+      { file: "reference/client", title: "@z402-net/client" },
+      { file: "reference/server", title: "@z402-net/server" },
+      { file: "reference/service-kit", title: "@z402-net/service-kit" },
       { file: "reference/configuration", title: "Configuration" },
       { file: "reference/errors", title: "Errors and reason codes" },
       { file: "reference/glossary", title: "Glossary" },

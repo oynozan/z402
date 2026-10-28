@@ -75,7 +75,7 @@ A provider's `payTo` must be a unified address with **shielded receivers only**.
 The `zu` forms are the ZIP 316 revision 2 encodings of the same kinds of address, and `uvi` is the matching viewing key. The body of an address is lowercase bech32.
 
 ```ts title="payto.ts"
-import { isValidPayTo, NETWORK_REGTEST } from "@z402/protocol";
+import { isValidPayTo, NETWORK_REGTEST } from "@z402-net/protocol";
 
 // Shortened addresses: only the prefix and the character set are checked here
 console.log(isValidPayTo("uregtest1qqqqqqqq", NETWORK_REGTEST)); // true: a shielded-only address for regtest
@@ -122,7 +122,7 @@ A deposit memo is the thing that ties an anonymous payment to a session. Without
 The session key is 64 lowercase hex characters, the agent's Ed25519 public key. The index is a decimal counter of the session's deposits (1, 2, 3, and so on) with no leading zeros and at most nine digits. The facilitator strips trailing zero bytes from the memo field and then matches the text against `^<sessionKey>:(0|[1-9][0-9]{0,8})$`. It trims nothing else. The index is informational: it has no uniqueness or ordering rule.
 
 ```ts title="memo.ts"
-import { depositMemo, parseDepositMemo } from "@z402/protocol";
+import { depositMemo, parseDepositMemo } from "@z402-net/protocol";
 
 const sessionKey = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
 const memo = depositMemo(sessionKey, 1);

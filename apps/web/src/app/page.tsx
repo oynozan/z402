@@ -37,8 +37,8 @@ export default function Home() {
               </p>
             </div>
             <div className="rise rise-3">
-              <CommandBox label="Install" command="npm install @z402/client">
-                <span className="tk-orange">npm</span> install <span className="tk-green">@z402/client</span>
+              <CommandBox label="Install" command="npm install @z402-net/client">
+                <span className="tk-orange">npm</span> install <span className="tk-green">@z402-net/client</span>
               </CommandBox>
             </div>
           </div>

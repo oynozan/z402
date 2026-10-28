@@ -202,7 +202,7 @@ The signature is pure Ed25519 (RFC 8032) over the UTF-8 bytes of that text. It i
 - A client keeps one session key per agent process and `payTo`. Keys are ephemeral: a restart is a new session with no credit.
 
 ```ts title="voucher.ts"
-import { generateSeed, NETWORK_REGTEST, publicKeyFromSeed, SCHEME, signVoucher, verifyVoucher } from "@z402/protocol";
+import { generateSeed, NETWORK_REGTEST, publicKeyFromSeed, SCHEME, signVoucher, verifyVoucher } from "@z402-net/protocol";
 
 /** What a client signs for one call, and what a facilitator checks. */
 export function signAndCheck(payTo: string): boolean {
@@ -243,7 +243,7 @@ A deposit is a shielded payment from the agent's wallet to `payTo`.
 - The client always deposits exactly `windowZat`, in one output.
 
 ```ts title="memo.ts"
-import { depositMemo, parseDepositMemo } from "@z402/protocol";
+import { depositMemo, parseDepositMemo } from "@z402-net/protocol";
 
 const sessionKey = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
 
@@ -324,10 +324,10 @@ The limits for the demo terms:
 | 100,001 confirmed | 125,001 |
 | 1,000,000 pending (an over-deposit) | 100,000 |
 
-One implementation, `computeLimit()` in `@z402/protocol`, is imported by both sides.
+One implementation, `computeLimit()` in `@z402-net/protocol`, is imported by both sides.
 
 ```ts title="ramp.ts"
-import { checkVoucher, computeLimit, DEMO_TERMS } from "@z402/protocol";
+import { checkVoucher, computeLimit, DEMO_TERMS } from "@z402-net/protocol";
 
 // Deposit D1 of one window has been mined.
 const ramp = computeLimit([{ valueZat: 100_000n, status: "confirmed", zeroConf: true }], DEMO_TERMS);
@@ -432,7 +432,7 @@ The SDK and the resource server can still put their own strings in `PAYMENT-REQU
 
 ## Client rules
 
-These are what a conforming client does. [`@z402/client`](/docs/reference/client) implements them.
+These are what a conforming client does. [`@z402-net/client`](/docs/reference/client) implements them.
 
 1. **Price ZEC.** Implement `findDefaultAsset(asset, network)` so the stock client's spend controls accept `ZEC` on `zcash:*`.
 2. **Spend safely.** Refuse requirements whose `windowZat` exceeds the client's `maxAmountPerPayment` or `maxDepositZat`, or whose `payTo` fails the pattern.
@@ -474,7 +474,7 @@ A provider is one address with its own view-only key (<Term tip="Unified incomin
 | `GET /providers/me` | API key | Answers `providerId`, `network` and `payTo`, or `401`. |
 | `POST /verify`, `POST /settle` | API key | As before. `payTo` must be the key's provider. |
 
-An API key is `z402_` followed by 43 base64url characters. It is shown once and stored only as a hash. `checkProvider` in `@z402/server` calls `GET /providers/me` and throws a `ProviderCheckError` whose `field` (`facilitatorUrl`, `facilitatorToken` or `payTo`) and `retryable` flag tell a caller what to do. See [Providers and API keys](/docs/concepts/providers).
+An API key is `z402_` followed by 43 base64url characters. It is shown once and stored only as a hash. `checkProvider` in `@z402-net/server` calls `GET /providers/me` and throws a `ProviderCheckError` whose `field` (`facilitatorUrl`, `facilitatorToken` or `payTo`) and `retryable` flag tell a caller what to do. See [Providers and API keys](/docs/concepts/providers).
 
 ### The Bazaar
 
@@ -505,7 +505,7 @@ The facilitator and the client both read the chain through lightwalletd, or Zain
 
 ## What the protocol package exports
 
-`@z402/protocol` is pure TypeScript with no network access, and the client, the server scheme and the facilitator all import it. Ed25519 uses `node:crypto`.
+`@z402-net/protocol` is pure TypeScript with no network access, and the client, the server scheme and the facilitator all import it. Ed25519 uses `node:crypto`.
 
 | Group | Exports |
 | --- | --- |
@@ -526,7 +526,7 @@ The facilitator and the client both read the chain through lightwalletd, or Zain
 - <Source path="docs/superpowers/specs/2026-10-27-z402-facilitator-design.md" />: deposit lifecycle, ramp and the facilitator's checks, sections 4 and 7
 - <Source path="docs/superpowers/specs/2026-10-27-z402-client-design.md" />: the client's session, deposits and recovery, section 3
 - <Source path="docs/research/x402-spec.md" />: the x402 version 2 types, headers and error codes the scheme builds on
-- <Source path="packages/protocol/src/index.ts" />: the exports of `@z402/protocol`
+- <Source path="packages/protocol/src/index.ts" />: the exports of `@z402-net/protocol`
 - <Source path="packages/protocol/src/voucher.ts" />: the voucher message and signature
 - <Source path="packages/protocol/src/ramp.ts" />: `computeLimit` and the voucher check
 - <Source path="packages/protocol/src/reasons.ts" />: the closed list of reason codes

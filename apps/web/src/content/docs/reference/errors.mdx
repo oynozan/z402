@@ -143,7 +143,7 @@ A facilitator that does not answer in time reaches the agent as an HTTP 502 with
 
 ## Provider check errors
 
-A resource server calls `checkProvider` from `@z402/server` before it starts, to prove that its API key and its `payTo` belong together. A failure is a `ProviderCheckError`. Branch on `field` and `retryable`, never on the message. The message never echoes the key.
+A resource server calls `checkProvider` from `@z402-net/server` before it starts, to prove that its API key and its `payTo` belong together. A failure is a `ProviderCheckError`. Branch on `field` and `retryable`, never on the message. The message never echoes the key.
 
 | Outcome | `field` | `retryable` | What to do |
 | --- | --- | --- | --- |
@@ -155,7 +155,7 @@ A resource server calls `checkProvider` from `@z402/server` before it starts, to
 | Before any request: a key that is not one b64token | `facilitatorToken` | false | Fix the key. It is letters, digits and `-._~+/`. |
 
 ```ts title="check-key.ts"
-import { checkProvider, ProviderCheckError } from "@z402/server";
+import { checkProvider, ProviderCheckError } from "@z402-net/server";
 
 try {
   await checkProvider({

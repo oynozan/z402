@@ -235,9 +235,9 @@ The stock fetch wrapper returns a refused call as a `402` response. It does not 
 ```ts title="agent.ts"
 import { decodePaymentResponseHeader } from "@x402/core/http";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
-import { parseSessionSnapshot } from "@z402/protocol";
+import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
+import { parseSessionSnapshot } from "@z402-net/protocol";
 
 // The endpoints and credentials of the local Z3 regtest stack
 const lwd = createLightwalletdClient({ url: "http://127.0.0.1:28137" });

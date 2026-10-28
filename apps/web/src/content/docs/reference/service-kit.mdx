@@ -1,15 +1,20 @@
 export const meta = {
-  title: "@z402/service-kit",
-  description: "Every export of the service kit and its testing entry point: createPaidService, PaidRoute, settings, delivery hooks, the process runner and the test stack.",
+  title: "@z402-net/service-kit",
+  description: "Every export of the service kit: createPaidService, PaidRoute, settings, delivery hooks, the process runner, and the repository-only test stack.",
 };
 
-`@z402/service-kit` builds a paid HTTP service from a list of routes. It wires the stock x402 Express middleware with the z402 scheme, checks the provider's API key and the facilitator's terms at start-up, lists the routes in the facilitator's Bazaar, and serves `GET /health`. The [guide](/docs/guides/service-kit) builds a service with it. This page lists every export, option, variable and limit.
+`@z402-net/service-kit` builds a paid HTTP service from a list of routes. It wires the stock x402 Express middleware with the z402 scheme, checks the provider's API key and the facilitator's terms at start-up, lists the routes in the facilitator's Bazaar, and serves `GET /health`. The [guide](/docs/guides/service-kit) builds a service with it. This page lists every export, option, variable and limit.
 
-The package is a workspace package (`private`, version `0.0.0`). It depends on `@x402/core`, `@x402/express` and `@x402/extensions`, all pinned to exactly 2.28.0, on `express` 5.3.0, and on `@z402/protocol` and `@z402/server`. The testing entry point also needs `@x402/fetch`, `@z402/client`, `@z402/facilitator` and `@z402/testkit`.
+```bash
+npm install --save-exact @z402-net/service-kit
+npm install --save-dev --save-exact @types/express@5.0.6
+```
+
+The package has no peer dependencies. It depends on `@x402/core`, `@x402/express` and `@x402/extensions`, all pinned to exactly 2.28.0, on `express` 5.3.0, and on `@z402-net/protocol` and `@z402-net/server`, so the one install brings them all. `@types/express` is for TypeScript, because the package's declarations name Express's types. The testing entry point is available inside the z402 repository only, and it also needs `@x402/fetch`, `@z402-net/client`, `@z402/facilitator` and `@z402/testkit`.
 
 <Callout type="note">
 
-`@z402/service-kit` is not on npm yet: it ships TypeScript source and needs a build step before it is published. Until then, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
+`@z402-net/service-kit` is not published to npm yet. Until it is, depend on it from the z402 monorepo with `"workspace:*"` and run with `tsx` on Node 22 or later.
 
 </Callout>
 
@@ -17,8 +22,8 @@ The package is a workspace package (`private`, version `0.0.0`). It depends on `
 
 | Entry point | Source | Exports |
 | --- | --- | --- |
-| `@z402/service-kit` | `src/index.ts` | `createPaidService`, `PROBE_HEADER`, `Z402_EXTENSION`, `PaidMethod`, `PaidRoute`, `PaidService`, `PaidServiceOptions`, `ServiceDefinition`, `loadServiceEnv`, `ConfigError`, `read`, `readInt`, `readOrFile`, `readUrl`, `Env`, `ServiceEnv`, `loadDotEnv`, `onDelivered`, `DeliveryHandlers`, `serve`, `Listening`, `runMain`, `CallStats` |
-| `@z402/service-kit/testing` | `src/testing.ts` | `startTestStack`, `TestStack`, `TestStackOptions`, `PayingClient`, `Built`, `CatalogStub`, `Declaration`, `paymentRequiredOf`, `railOf`, `Rail`, `declarationRefusal`, `TEST_NETWORK`, `TEST_PAY_TO`, `TEST_TOKEN`, `TEST_PUBLIC_URL` |
+| `@z402-net/service-kit` | `src/index.ts` | `createPaidService`, `PROBE_HEADER`, `Z402_EXTENSION`, `PaidMethod`, `PaidRoute`, `PaidService`, `PaidServiceOptions`, `ServiceDefinition`, `loadServiceEnv`, `ConfigError`, `read`, `readInt`, `readOrFile`, `readUrl`, `Env`, `ServiceEnv`, `loadDotEnv`, `onDelivered`, `DeliveryHandlers`, `serve`, `Listening`, `runMain`, `CallStats` |
+| `@z402-net/service-kit/testing`, in the z402 repository only | `src/testing.ts` | `startTestStack`, `TestStack`, `TestStackOptions`, `PayingClient`, `Built`, `CatalogStub`, `Declaration`, `paymentRequiredOf`, `railOf`, `Rail`, `declarationRefusal`, `TEST_NETWORK`, `TEST_PAY_TO`, `TEST_TOKEN`, `TEST_PUBLIC_URL` |
 
 ## createPaidService
 
@@ -431,7 +436,7 @@ Counts paid calls delivered since 00:00 UTC. It keeps an aggregate only: nothing
 
 ## The testing entry point
 
-`@z402/service-kit/testing` starts an in-process stack for service tests. A call made with `paidFetch` is a real paid call: a deposit, a voucher, verification, your handler and settlement. It needs no Docker and no network.
+`@z402-net/service-kit/testing` starts an in-process stack for service tests. It is available inside the z402 repository only. It runs the repository's own facilitator and fake chain, `@z402/facilitator` and `@z402/testkit`, which are not published, so the package leaves this entry point out when it is published. A call made with `paidFetch` is a real paid call: a deposit, a voucher, verification, your handler and settlement. It needs no Docker and no network.
 
 ### startTestStack
 
