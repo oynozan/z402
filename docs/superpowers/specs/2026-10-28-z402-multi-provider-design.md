@@ -232,7 +232,7 @@ v2.0 changes nothing the client sends or signs. It is a major version because `/
 | 5.2 | The credit unit is consumed once **per provider**, under `<network>:<payTo>:<txid>`, with one ledger file per provider. A transaction funds at most one session per `payTo`, and credits each `payTo` with its own outputs only |
 | 6 | `amount` in the accept rule is this call's `requirements.amount` |
 | 10 | "Check `payTo`, `amount` and the terms against its own config" becomes "`payTo` must be the authenticated provider's; `amount` canonical in [1, `windowZat`]; terms equal to the rail's; else `invalid_payment_requirements`" |
-| 12 | 500 zat becomes our services' default route price, not a protocol value |
+| 12 | 500 zat becomes the demo API's `GET /chunk` price, not a protocol value. Each service sets its own (the starter services charge 200, 100, 1,000 and 500) |
 | 14 | `apps/discovery` is retired; the Bazaar is the facilitator's |
 | 15 | `FacilitatorOptions.priceZat` becomes optional and is ignored. New `providers?: { dir; chainFor(p): ChainView; owns(p): Promise<boolean>; max?; registrationToken? }`. The token rule also covers API keys and the registration token. The API's startup check is `checkProvider` |
 | 16 (new) | Providers: `POST /providers`, `GET /providers/me`, API keys, rotation, the operator provider (§4.1 of this design) |
