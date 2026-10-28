@@ -15,9 +15,8 @@ own facilitator API key ([`markdown`](markdown/README.md#as-provider-2)).
 Each service prices its own routes. `Z402_PRICE_ZAT`, in the environment or the service's `.env`, replaces the price
 above, and a route may also carry a price of its own (`PaidRoute.priceZat`). A price is a whole number of zat from 1 to
 the facilitator's `windowZat` (100,000 on the demo terms), and a service with a price outside that refuses to start,
-naming `Z402_PRICE_ZAT`. Until the facilitator takes a price per route it accepts 500 zat only, so compose sets
-`Z402_PRICE_ZAT=500` on every service for now. A refused call is never charged, because each service refuses
-everything it can before the agent sends a voucher.
+naming `Z402_PRICE_ZAT`. A refused call is never charged, because each service refuses everything it can before the
+agent sends a voucher.
 
 ## Settings and keys
 

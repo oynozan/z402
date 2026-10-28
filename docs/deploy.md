@@ -91,7 +91,7 @@ bypass `ufw`.
 
 ## Settings and API keys
 
-- Compose settings (bind address, host ports, block time, price, models): copy `.env.example` to `.env`.
+- Compose settings (bind address, host ports, block time, the demo API's price, models): copy `.env.example` to `.env`.
 - A service's own settings and keys: `services/<name>/.env`, from `services/<name>/.env.example`. Compose reads
   `docker/env/<name>.env` first (the Docker defaults: the local model URLs, and limits that fit the local models), then
   this file, which wins. An empty value counts as unset, so `NAME=` brings back the service's own default. Leave out
@@ -99,8 +99,11 @@ bypass `ufw`.
 - On a server, set `PUBLIC_URL` in each `services/<name>/.env` to the origin agents reach it at (for example
   `https://llm.example.com`, or `http://203.0.113.7:4031`): it is the resource URL in every 402 and in discovery.
   Change it with the host port too.
-- `HOST`, `PORT`, the network, the price, the facilitator URL and token, and the payTo are fixed by `compose.yaml` and
-  cannot be changed from these files. `markdown`'s token and payTo are provider 2's own ([Providers](#providers)).
+- A service charges its own price (LLM 200 zat a chunk, embeddings 100 a call, markdown 1,000 a page, drop box 500 an
+  upload or hold), and `Z402_PRICE_ZAT` in its `services/<name>/.env` sets another, from 1 to the facilitator's
+  `windowZat`.
+- `HOST`, `PORT`, the network, the facilitator URL and token, and the payTo are fixed by `compose.yaml` and cannot be
+  changed from these files. `markdown`'s token and payTo are provider 2's own ([Providers](#providers)).
 
 `docker compose up -d` recreates a service whose settings changed. After pulling new code:
 `docker compose up -d --build --remove-orphans`. `--remove-orphans` also removes the container of a service that is

@@ -29,7 +29,6 @@ x-job: &job
 x-service-env: &service-env
   HOST: 0.0.0.0
   Z402_NETWORK: regtest
-  Z402_PRICE_ZAT: ${Z402_PRICE_ZAT:-500}
   Z402_FACILITATOR_URL: http://facilitator:4022
   Z402_FACILITATOR_TOKEN_FILE: /run/z402/facilitator-token
   Z402_PAY_TO_FILE: /run/z402/pay-to
@@ -280,7 +279,6 @@ services:
         exec node --import tsx packages/facilitator/src/main.ts
     environment:
       Z402_NETWORK: regtest
-      Z402_PRICE_ZAT: ${Z402_PRICE_ZAT:-500}
       Z402_LWD_URL: http://zaino:8137
       Z402_FACILITATOR_HOST: 0.0.0.0
       Z402_FACILITATOR_PORT: "4022"

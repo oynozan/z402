@@ -19,8 +19,7 @@ This is the build contract for everything the services session adds. It sits nex
   `withBazaar(new HTTPFacilitatorClient({ url: siteOrigin })).extensions.bazaar.listResources({ type: "http" })`.
 - **A price per route.** A service sets its own price, and a route may set its own (`PaidRoute.priceZat`). Any
   canonical amount from 1 to the facilitator's `windowZat` (100,000) is valid, and the kit refuses to start outside
-  that range. What one call buys is the service's *billing unit*. Compose sets `Z402_PRICE_ZAT=500` on every service
-  only until the facilitator's per-route amount rule lands; compose then uses each service's own price.
+  that range. What one call buys is the service's *billing unit*. Compose runs each service at its own price.
 - **Two providers.** The operator's services (LLM, embeddings, drop box) and `apps/api` share the operator's `payTo`
   and facilitator token, so one deposit window funds them (the client keeps one session per `payTo`). URL to markdown
   is provider 2 in compose, with its own `payTo` and API key, so a client pays it with a deposit of its own.
@@ -280,8 +279,8 @@ network. On demand: `docker compose run --rm agent` (the demo loop on `/chunk`),
 catalog, no wallet) and `docker compose run --rm smoke` (one real paid call on every starter service, `apps/smoke`).
 Details in `docs/deploy.md`.
 
-- **Prices.** Compose sets `Z402_PRICE_ZAT=500` on every service only until the facilitator's per-route amount rule
-  lands; compose then uses each service's own price.
+- **Prices.** Each service charges its own price, and `Z402_PRICE_ZAT` in its `services/<name>/.env` sets another.
+  `Z402_PRICE_ZAT` in the root `.env` prices only the demo API's `GET /chunk`; the facilitator no longer reads it.
 - **Provider 2: URL to markdown.** An independent provider, as one on another machine would be. The other services and
   `apps/api` keep the operator's `payTo` and token.
   - `keygen` creates its own key set in a `markdown-keys` volume, mounted only into `keygen` and `markdown-register`.

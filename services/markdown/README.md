@@ -1,7 +1,7 @@
 # @z402/service-markdown
 
 URL to markdown, one page per paid call of 1,000 zat (design §4.2, port 4032). `Z402_PRICE_ZAT` sets another price,
-from 1 to the facilitator's `windowZat`; compose sets 500 until the facilitator takes a price per route.
+from 1 to the facilitator's `windowZat`.
 
 ```
 GET /v1/markdown?url=<http(s) URL>

@@ -39,7 +39,7 @@ The provider is trusted to be up and not to be right: its answer is read up to 1
 
 ## Settings
 
-An empty variable counts as unset, and a bad one stops the start with a line naming it. The shared `Z402_*`, `PUBLIC_URL`, `HOST` and `PORT` (4033) are in `packages/service-kit`. `Z402_PRICE_ZAT` replaces the 100 zat price of a call, from 1 to the facilitator's `windowZat`; compose sets 500 until the facilitator takes a price per route.
+An empty variable counts as unset, and a bad one stops the start with a line naming it. The shared `Z402_*`, `PUBLIC_URL`, `HOST` and `PORT` (4033) are in `packages/service-kit`. `Z402_PRICE_ZAT` replaces the 100 zat price of a call, from 1 to the facilitator's `windowZat`.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

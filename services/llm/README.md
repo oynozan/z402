@@ -50,7 +50,7 @@ Under Docker, compose reads `docker/env/llm.env` (llama.cpp server at `http://ll
 | `Z402_PAY_TO` / `_FILE` | none | Required, the facilitator's merchant address |
 | `Z402_FACILITATOR_TOKEN` / `_FILE` | none | The facilitator's bearer token |
 | `Z402_NETWORK` | `regtest` | Must match the facilitator |
-| `Z402_PRICE_ZAT` | `200` | Zat per chunk, from 1 to the facilitator's `windowZat`; compose sets 500 until the facilitator takes a price per route |
+| `Z402_PRICE_ZAT` | `200` | Zat per chunk, from 1 to the facilitator's `windowZat` |
 | `PUBLIC_URL`, `HOST`, `PORT` | `http://localhost:4031`, `127.0.0.1`, `4031` | |
 | `LLM_BASE_URL` | `http://127.0.0.1:11434/v1` | OpenAI-compatible API root |
 | `LLM_API_KEY` / `_FILE` | none | Sent as a bearer token when set |
