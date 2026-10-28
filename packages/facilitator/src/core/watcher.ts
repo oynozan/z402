@@ -86,7 +86,7 @@ export class ChainWatcher {
       const sweep = this.#sweep;
       if (sweep === null || tip !== sweep.tip || this.#now() - sweep.at >= this.#sweepMs) await this.pollNow();
     } catch (e) {
-      this.#log("chain tick failed", e);
+      this.#warn("chain tick failed", e);
     } finally {
       this.#ticking = false;
     }
@@ -102,7 +102,7 @@ export class ChainWatcher {
         const live = this.#state.liveDeposits(tip);
         await this.#reread(sessionKey === undefined ? live : live.filter((d) => d.sessionKey === sessionKey), tip);
       } catch (e) {
-        this.#log(sessionKey === undefined ? "chain poll failed" : "session refresh failed", e);
+        this.#warn(sessionKey === undefined ? "chain poll failed" : "session refresh failed", e);
       }
     });
   }
@@ -120,7 +120,12 @@ export class ChainWatcher {
       const after = await this.#look(before, tip);
       if (after !== undefined && moved(before, after)) events.push(statusOf(after));
     }
-    if (events.length > 0) this.#commit(events);
+    if (events.length === 0) return;
+    try {
+      this.#commit(events);
+    } catch (e) {
+      this.#warn("ledger commit failed", e);
+    }
   }
 
   /** The deposit after one more look at the chain, or undefined when the chain gave no answer */
@@ -129,13 +134,20 @@ export class ChainWatcher {
     try {
       answer = await this.#chain.inspect(before.txid);
     } catch (e) {
-      this.#log(`inspect of ${before.txid} failed`, e);
+      this.#warn(`inspect of ${before.txid} failed`, e);
       return undefined;
     }
     const after = observe({ ...before, notFound: this.#streaks.get(before.txid) ?? null }, answer, tip, this.#now());
     if (after.notFound === null) this.#streaks.delete(before.txid);
     else this.#streaks.set(before.txid, after.notFound);
     return after;
+  }
+
+  /** Logs without letting a logger that throws end a pass, or reject the interval's tick */
+  #warn(msg: string, err: unknown): void {
+    try {
+      this.#log(msg, err);
+    } catch {}
   }
 
   #stamp(sessionKey: string, now: number): void {

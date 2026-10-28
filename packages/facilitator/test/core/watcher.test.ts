@@ -282,6 +282,32 @@ describe("a deposit that expires or disappears", () => {
   });
 });
 
+describe("a not-found streak across failed inspects", () => {
+  test("failed inspects neither count toward nor reset the streak, so a later not-found still kills", async () => {
+    const eyes = blinkable();
+    const { fake, batches, watcher, credit } = rig(eyes.wrap);
+    const txid = await credit();
+    fake.hold(txid);
+    eyes.hidden.add(txid);
+    await watcher.pollNow();
+
+    eyes.broken.add(txid);
+    for (let pass = 0; pass < 3; pass++) {
+      vi.advanceTimersByTime(40_000);
+      fake.mine();
+      await watcher.pollNow();
+    }
+    expect(batches).toEqual([]);
+
+    eyes.broken.delete(txid);
+    await watcher.pollNow();
+
+    expect(batches).toEqual([
+      [{ t: "status", txid, status: "dead", minedHeight: null, confirmations: 0, deadAtTip: 1003 }],
+    ]);
+  });
+});
+
 describe("when the chain cannot answer", () => {
   test("an inspect that fails neither counts as not-found nor changes the deposit", async () => {
     const eyes = blinkable();
@@ -363,7 +389,7 @@ describe("when the chain cannot answer", () => {
       throw new Error("the logger broke");
     });
     fake.setUnavailable(true);
-    await expect(watcher.pollNow()).rejects.toThrow("the logger broke");
+    await expect(watcher.pollNow()).resolves.toBeUndefined();
 
     fake.setUnavailable(false);
     fake.mine();
@@ -372,7 +398,23 @@ describe("when the chain cannot answer", () => {
     expect(state.deposit(txid)?.status).toBe("confirmed");
   });
 
-  test("a commit that throws is logged, and the next pass commits the change", async () => {
+  test("a logger that throws on a failed inspect does not end the pass for the other deposits", async () => {
+    const eyes = blinkable();
+    const { fake, state, log, watcher, credit } = rig(eyes.wrap);
+    const unreadable = await credit();
+    const readable = await credit(OTHER_SESSION_KEY);
+    eyes.broken.add(unreadable);
+    log.mockImplementation(() => {
+      throw new Error("the logger broke");
+    });
+    fake.mine();
+
+    await expect(watcher.pollNow()).resolves.toBeUndefined();
+
+    expect(state.deposit(readable)?.status).toBe("confirmed");
+  });
+
+  test("a commit that throws is logged as a ledger failure, and the next pass commits the change", async () => {
     const { fake, state, batches, control, log, watcher, credit } = rig();
     const txid = await credit();
     fake.mine();
@@ -381,6 +423,7 @@ describe("when the chain cannot answer", () => {
     await expect(watcher.pollNow()).resolves.toBeUndefined();
 
     expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toContain("ledger");
     expect(log.mock.calls[0]?.[1]).toBe(control.commitError);
     expect(state.deposit(txid)?.status).toBe("pending");
 

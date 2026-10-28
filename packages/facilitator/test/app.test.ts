@@ -645,7 +645,8 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
     await handle.pollNow();
     const failed = await settle(url, pay(r, 1000n, d1), r);
 
-    expect(log.mock.calls.filter(([msg]) => msg === "chain poll failed")).toHaveLength(2);
+    expect(log.mock.calls.filter(([msg]) => msg === "ledger commit failed")).toHaveLength(2);
+    expect(log.mock.calls.filter(([msg]) => msg === "chain poll failed")).toEqual([]);
     expect(failed.json).toMatchObject({ success: false, errorReason: "unexpected_settle_error" });
     expect(onFatal).toHaveBeenCalledTimes(1);
     expect(onFatal.mock.calls[0]?.[0]).toMatchObject({ code: "EISDIR" });
