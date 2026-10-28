@@ -5,7 +5,7 @@
 ARG ZALLET_IMAGE=zodlinc/zallet:v0.1.0-beta.1@sha256:1849b4469875dc0165942c06d15fa6a7da76b2d43bade578cc8e5903a639869d
 
 FROM busybox:1.37.0-musl AS busybox
-FROM alpine:3.22 AS certs
+FROM alpine:3.22.6 AS certs
 
 FROM ${ZALLET_IMAGE}
 COPY --from=busybox /bin/busybox /bin/busybox

@@ -1,5 +1,6 @@
 // The wallet-fund job of compose.yaml, a port of infra/z3/fund-agent.sh. The agent is account 0 of the Zallet wallet,
-// paying from its Orchard-only address at diversifier index 1. When it holds less than 1 ZEC spendable, the job mines
+// paying from its Orchard-only address at the lowest diversifier index from 1 that accepts one, the rule packages/client
+// follows. When it holds less than 1 ZEC spendable, the job mines
 // 110 blocks of coinbase to the wallet's miner address, shields up to 10 mature coinbase outputs to the agent, and
 // mines the block that confirms them. Otherwise it changes nothing, so every `docker compose up` can run it again.
 // RPC addresses come from Z3_ZEBRA_RPC and Z3_ZALLET_RPC (infra/z3/rpc.mjs).
@@ -8,7 +9,8 @@ import { mineNow, zalletRpc, zebraRpc } from "../../infra/z3/rpc.mjs";
 import { publish, runJob, sleep, waitFor } from "./lib.mjs";
 
 const MIN_ZAT = 100_000_000;
-const AGENT_DIVERSIFIER = 1;
+const FIRST_AGENT_DIVERSIFIER = 1;
+const LAST_AGENT_DIVERSIFIER = 16;
 /** Coinbase matures after 100 blocks, so 110 leave 10 outputs to shield */
 const COINBASE_BLOCKS = 110;
 const SHIELD_LIMIT = 10;
@@ -51,6 +53,27 @@ async function operationTxid(opid) {
   throw new Error(`z_shieldcoinbase ${opid} did not finish within 600 s`);
 }
 
+/** Zallet's DiversifierIndexReuse: the account's default address already took the index with other receivers */
+const isDiversifierReuse = (e) => e?.code === -4 && /already generated with different receiver types/.test(e?.message ?? "");
+
+/** The agent's Orchard-only address at the lowest index from 1 that accepts one, as packages/client picks it */
+async function agentAddress(account) {
+  for (let index = FIRST_AGENT_DIVERSIFIER; index <= LAST_AGENT_DIVERSIFIER; index += 1) {
+    let result;
+    try {
+      result = await zalletRpc("z_getaddressforaccount", [account, ["orchard"], index]);
+    } catch (e) {
+      if (isDiversifierReuse(e)) continue;
+      throw e;
+    }
+    if (typeof result?.address !== "string") throw new Error("z_getaddressforaccount returned no address");
+    return result.address;
+  }
+  throw new Error(
+    `Zallet has no Orchard-only address at diversifier indices ${FIRST_AGENT_DIVERSIFIER} to ${LAST_AGENT_DIVERSIFIER}`,
+  );
+}
+
 runJob("wallet-fund", async () => {
   const miner = readFileSync(MINER_FILE, "utf8").trim();
   if (!miner.startsWith("tm")) throw new Error(`${MINER_FILE} holds no regtest t-address (zallet-init writes it)`);
@@ -58,16 +81,7 @@ runJob("wallet-fund", async () => {
   const accounts = await waitFor("Zallet RPC", 300_000, () => zalletRpc("z_listaccounts"));
   const account = accounts?.[0]?.account_uuid;
   if (typeof account !== "string") throw new Error("Zallet has no account 0 (zallet-init creates it)");
-  const agent = (
-    await zalletRpc("z_getaddressforaccount", [account, ["orchard"], AGENT_DIVERSIFIER]).catch((e) => {
-      if (!/different receiver types/.test(e?.message ?? "")) throw e;
-      throw new Error(
-        `account 0's default address took diversifier index ${AGENT_DIVERSIFIER}, the agent's; ` +
-          "zallet-init avoids that in a new wallet (docker compose down -v)",
-      );
-    })
-  )?.address;
-  if (typeof agent !== "string") throw new Error("z_getaddressforaccount returned no address");
+  const agent = await agentAddress(account);
   publish(AGENT_FILE, agent);
 
   await waitFor("Zallet sync", 600_000, synced);

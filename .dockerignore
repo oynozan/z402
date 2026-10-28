@@ -28,3 +28,4 @@ docs
 compose.yaml
 docker/env
 docker/test.env
+docker/test

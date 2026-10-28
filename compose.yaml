@@ -244,6 +244,8 @@ services:
 
   facilitator:
     <<: *node
+    # The ledger lock records its host, so a recreated container must keep the same name to take over its own lock
+    hostname: facilitator
     command:
       - sh
       - -c
@@ -276,7 +278,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 10m
+      # wait-lightwalletd.mjs alone may take 10 minutes, and its startup checks come after it
+      start_period: 15m
       start_interval: 3s
 
   # Paid HTTP ------------------------------------------------------------------
@@ -405,10 +408,12 @@ services:
 
   # Local model runtime for llm and embeddings ----------------------------------
 
-  # Two streams at a time, each with 10240 tokens of context: the llm service's longest prompt (LLM_MAX_PROMPT_CHARS,
-  # 8000) at up to one token per character, its longest answer (LLM_MAX_TOKENS, 1024) and the chat template
+  # Two generations at a time, each in a slot of 10240 tokens. llama.cpp refuses a longer prompt only once the call is
+  # paid, so docker/env/llm.env keeps a prompt and a system prompt within 9600 tokens; an answer that reaches the end
+  # of the slot stops there. Z402_LLM_MODEL_SCALE=0 leaves it out for a hosted provider.
   llm-model:
     <<: *model
+    scale: ${Z402_LLM_MODEL_SCALE:-1}
     command:
       - -hf
       - "${Z402_LLM_HF_MODEL:-Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M}"
@@ -423,9 +428,11 @@ services:
 
   # A whole input must fit in one micro-batch to be embedded. llama-server caps the context at the model's own 2048
   # tokens, and attention over a longer input needs more memory than a small server has (4000 tokens took over
-  # 768 MiB), so docker/env/embeddings.env caps a call at 2000 characters: at most one token each, plus two.
+  # 768 MiB), so docker/env/embeddings.env caps one input string at 2000 characters: at most one token each, plus two.
+  # Z402_EMBED_MODEL_SCALE=0 leaves it out for a hosted provider.
   embed-model:
     <<: *model
+    scale: ${Z402_EMBED_MODEL_SCALE:-1}
     command:
       - -hf
       - "${Z402_EMBED_HF_MODEL:-nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M}"
@@ -503,6 +510,56 @@ services:
       wallet-fund:
         condition: service_completed_successfully
       zaino:
+        condition: service_healthy
+
+  # The service catalog as an agent sees it, run on demand: docker compose run --rm discover --intent "..." ---------
+
+  discover:
+    <<: *job
+    profiles: [agent]
+    # Reads the list only, so it needs no wallet and pays nothing; flags after the service name are added to these
+    entrypoint: ["node", "--import", "tsx", "apps/agent/src/main.ts", "discover", "--discovery", "http://discovery:4030"]
+    mem_limit: 256m
+    depends_on:
+      discovery:
+        condition: service_healthy
+
+  # Paid calls on every starter service, run on demand: docker compose run --rm smoke ------------------------------
+
+  smoke:
+    <<: *job
+    profiles: [smoke]
+    # The entrypoint rather than the command, so that flags after the service name (--page <url>) are added to these
+    # and, given again, win over them
+    entrypoint:
+      - node
+      - --import
+      - tsx
+      - apps/smoke/src/main.ts
+      - --llm
+      - http://llm:4031
+      - --markdown
+      - http://markdown:4032
+      - --embeddings
+      - http://embeddings:4033
+      - --dropbox
+      - http://dropbox:4034
+      - --zallet-url
+      - http://zallet:28232
+      - --lightwalletd
+      - http://zaino:8137
+    mem_limit: 512m
+    depends_on:
+      # Pays from the agent's wallet, so the funding check runs first, as for the agent
+      wallet-fund:
+        condition: service_completed_successfully
+      llm:
+        condition: service_healthy
+      markdown:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+      dropbox:
         condition: service_healthy
 
 volumes:

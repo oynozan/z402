@@ -21,7 +21,14 @@ COPY tsconfig.base.json ./
 COPY packages packages
 COPY apps/web apps/web
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN NODE_OPTIONS=--max-old-space-size=1536 pnpm --filter @z402/web build \
+# next/font downloads the fonts from Google Fonts during the build and gives up after under a second of retries, which
+# would end the whole docker compose up on a short network failure
+RUN for attempt in 1 2 3; do \
+      NODE_OPTIONS=--max-old-space-size=1536 pnpm --filter @z402/web build && break; \
+      [ "$attempt" -lt 3 ] || exit 1; \
+      echo "web build failed (attempt $attempt of 3), retrying in 30 s" >&2; \
+      sleep 30; \
+    done \
  && mkdir -p apps/web/public
 
 FROM ${NODE_IMAGE}
@@ -30,7 +37,8 @@ ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 HOSTNAME=0.0.0.0 PORT=3000
 COPY --from=build --chown=node:node /app/apps/web/.next/standalone ./
 COPY --from=build --chown=node:node /app/apps/web/.next/static apps/web/.next/static
 COPY --from=build --chown=node:node /app/apps/web/public apps/web/public
-COPY docker/healthcheck.mjs docker/healthcheck.mjs
+# Owned by node like the rest: COPY keeps the host's modes, which a strict umask makes unreadable to others
+COPY --chown=node:node docker/healthcheck.mjs docker/healthcheck.mjs
 USER node
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]
