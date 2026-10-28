@@ -5,7 +5,8 @@ import { createMarkdownService } from "./service.js";
 
 runMain("markdown", async () => {
   loadDotEnv(new URL("../.env", import.meta.url));
-  const env = loadServiceEnv(process.env, { port: 4032 });
+  // Per page, unless Z402_PRICE_ZAT sets another price
+  const env = loadServiceEnv(process.env, { port: 4032, priceZat: 1000n });
   const config = loadMarkdownConfig(process.env);
   const service = await createMarkdownService({ env, config });
   const listening = await serve(service.app, env).catch(async (e: unknown) => {

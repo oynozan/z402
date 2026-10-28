@@ -6,7 +6,14 @@
  * once its delivery succeeded, with its drop kept through any expiry that lands while it settles.
  */
 import { createLightwalletdClient, type LightwalletdClient } from "@z402/lightwalletd";
-import { ConfigError, createPaidService, onDelivered, type PaidRoute, type ServiceEnv } from "@z402/service-kit";
+import {
+  ConfigError,
+  createPaidService,
+  onDelivered,
+  type PaidRoute,
+  type PaidService,
+  type ServiceEnv,
+} from "@z402/service-kit";
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { isAgeEncrypted } from "./age.js";
 import type { DropboxConfig } from "./config.js";
@@ -34,7 +41,7 @@ export interface DropboxService {
   app: Express;
   store: DropStore;
   tips: TipSource;
-  /** Stops the tip source, which the service starts itself */
+  /** Stops declaring and the tip source, which the service starts itself */
   close(): Promise<void>;
 }
 
@@ -225,17 +232,18 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
     },
   ];
 
-  let app: Express;
+  let paid: PaidService;
   try {
-    ({ app } = await createPaidService({
+    paid = await createPaidService({
       env,
       service: { serviceName: "Encrypted drop box", tags: ["storage", "handoff", "encrypted"], routes },
       ready: () => clock.tip() !== undefined,
-    }));
+    });
   } catch (e) {
     client?.close();
     throw e;
   }
+  const { app } = paid;
 
   app.post("/v1/drops", (req, res) => {
     const tip = tipOrRefuse(res);
@@ -357,6 +365,7 @@ export async function createDropboxService(o: DropboxOptions): Promise<DropboxSe
     store,
     tips: clock,
     close: async () => {
+      await paid.close();
       clock.stop();
       client?.close();
     },

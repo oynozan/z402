@@ -77,7 +77,12 @@ test(
     expect(match, line).not.toBeNull();
     const origin = match?.[1] ?? "";
 
-    expect(await (await fetch(`${origin}/health`)).json()).toMatchObject({ ready: true, service: "URL to markdown" });
+    expect(await (await fetch(`${origin}/health`)).json()).toMatchObject({
+      ready: true,
+      service: "URL to markdown",
+      priceZat: "1000",
+      routes: [{ path: "/v1/markdown", priceZat: "1000" }],
+    });
     for (const target of [
       "http://127.0.0.1/",
       "http://localhost:8080/",
@@ -92,6 +97,8 @@ test(
     }
     const probe = await fetch(`${origin}/v1/markdown`, { headers: { "x-z402-probe": "1" } });
     expect(probe.status).toBe(402);
+    const required = JSON.parse(Buffer.from(probe.headers.get("payment-required") ?? "", "base64").toString("utf8"));
+    expect(required.accepts[0].amount).toBe("1000");
     // The pool starts one worker at start and says so on stderr if it has to fall back to the main thread
     expect(run.stderr()).not.toContain("main thread");
 

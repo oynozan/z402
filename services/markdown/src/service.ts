@@ -39,6 +39,7 @@ export interface MarkdownServiceOptions {
 export interface MarkdownService {
   app: Express;
   stats: PaidService["stats"];
+  /** Stops declaring and ends the conversion workers; the HTTP server is the caller's to close */
   close(): Promise<void>;
 }
 
@@ -245,5 +246,12 @@ export async function createMarkdownService(o: MarkdownServiceOptions): Promise<
     }
     res.json(answer);
   });
-  return { app, stats: service.stats, close: () => pool.close() };
+  return {
+    app,
+    stats: service.stats,
+    close: async () => {
+      await service.close();
+      await pool.close();
+    },
+  };
 }

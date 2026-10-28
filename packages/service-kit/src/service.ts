@@ -1,8 +1,9 @@
 /**
  * A paid service (design §3.2): its routes are paid with prepaid-voucher through the stock x402 Express middleware,
- * and each one declares itself for Bazaar discovery. The wiring follows apps/api/src/app.ts: one payTo and one network
- * for the scheme and every route, the facilitator's terms loaded and checked before anything listens, and route keys
- * without a verb so that HEAD, which Express hands to the GET handler, must pay too.
+ * each at its own price, and each one declares itself for Bazaar discovery, in its 402 and to the facilitator's
+ * catalog while the service is ready. The wiring follows apps/api/src/app.ts: one payTo and one network for the scheme
+ * and every route, the facilitator's terms loaded and checked before anything listens, and route keys without a verb so
+ * that HEAD, which Express hands to the GET handler, must pay too.
  */
 import { decodePaymentSignatureHeader } from "@x402/core/http";
 import {
@@ -25,10 +26,21 @@ import {
   sanitizeTags,
   type DeclareDiscoveryExtensionInput,
 } from "@x402/extensions/bazaar";
-import { ASSET, parseVoucherPayload, SCHEME, ZCASH_NETWORKS } from "@z402/protocol";
+import { ASSET, parseTerms, parseVoucherPayload, SCHEME, ZCASH_NETWORKS } from "@z402/protocol";
 import { PrepaidVoucherServerScheme } from "@z402/server";
 import express, { type Express, type Request, type RequestHandler } from "express";
-import type { ServiceEnv } from "./env.js";
+import {
+  declarationBodies,
+  declaredResource,
+  MAX_DESCRIPTION_CHARS,
+  MAX_EXTENSIONS_BYTES,
+  MAX_MIME_TYPE_CHARS,
+  MAX_ROUTES,
+  MAX_URL_CHARS,
+  startDeclaring,
+  type DeclaredResource,
+} from "./declare.js";
+import { ConfigError, type ServiceEnv } from "./env.js";
 import { CallStats } from "./stats.js";
 
 export type PaidMethod = "GET" | "POST" | "PUT" | "DELETE";
@@ -47,6 +59,8 @@ export interface PaidRoute {
   note?: string;
   /** Default "application/json" */
   mimeType?: string;
+  /** Price of one call in zatoshi, default env.priceZat */
+  priceZat?: bigint;
   discovery: DeclareDiscoveryExtensionInput;
   /**
    * Handlers that run before the payment middleware on this route, e.g. a body parser and the request checks. A
@@ -72,7 +86,9 @@ export interface PaidServiceOptions {
   before?: RequestHandler[];
   /** How long to keep retrying a facilitator that does not answer yet, default env.facilitatorWaitMs or 120000; 0 fails at once */
   facilitatorWaitMs?: number;
-  /** Where the retries are reported, default stderr */
+  /** How often the routes are declared to the facilitator's Bazaar, default env.declareIntervalMs or 30000; 0 never */
+  declareIntervalMs?: number;
+  /** Where the retries and the outcomes of the declarations are reported, default stderr */
   log?: (message: string) => void;
 }
 
@@ -81,6 +97,8 @@ export interface PaidService {
   app: Express;
   stats: CallStats;
   http: x402HTTPResourceServer;
+  /** Stops declaring the routes; the HTTP server is the caller's to close */
+  close(): Promise<void>;
 }
 
 /** The z402 extension that rides next to bazaar in every 402 */
@@ -145,6 +163,8 @@ const READY_TIMEOUT_MS = 2_000;
 const READY_CACHE_MS = 5_000;
 const FACILITATOR_WAIT_MS = 120_000;
 const FACILITATOR_RETRY_MS = 2_000;
+/** The heartbeat the facilitator's catalog reads liveness from (multi-provider design §4.4) */
+const DECLARE_INTERVAL_MS = 30_000;
 const X402_VERSION = 2;
 const MAX_CAUSES = 5;
 const ROUTE_PATH_RE = /^\/[A-Za-z0-9._~:/-]*$/;
@@ -156,6 +176,9 @@ function text(e: unknown): string {
 function checkDefinition(s: ServiceDefinition): void {
   if (!isValidServiceName(s.serviceName)) throw new Error("serviceName: expected 1 to 32 printable ASCII characters");
   if (s.routes.length === 0) throw new Error("routes: a paid service needs at least one route");
+  if (s.routes.length > MAX_ROUTES) {
+    throw new Error(`routes: at most ${MAX_ROUTES}, which is all the facilitator lists for one provider`);
+  }
   const seen = new Set<string>();
   for (const r of s.routes) {
     if (!ROUTE_PATH_RE.test(r.path) || r.path.includes(" ")) {
@@ -169,6 +192,35 @@ function checkDefinition(s: ServiceDefinition): void {
     }
     if (r.unit.trim() === "") throw new Error(`routes: "${r.path}" needs a billing unit`);
     if (r.description.trim() === "") throw new Error(`routes: "${r.path}" needs a description`);
+    if (r.description.length > MAX_DESCRIPTION_CHARS) {
+      throw new Error(`routes: the description of "${r.path}" is over ${MAX_DESCRIPTION_CHARS} characters`);
+    }
+    if ((r.mimeType ?? "").length > MAX_MIME_TYPE_CHARS) {
+      throw new Error(`routes: the mimeType of "${r.path}" is over ${MAX_MIME_TYPE_CHARS} characters`);
+    }
+  }
+}
+
+/** Each route's resource URL is PUBLIC_URL and its path, which the catalog takes only without credentials and short */
+function checkResources(env: ServiceEnv, s: ServiceDefinition): void {
+  const { username, password } = new URL(env.publicUrl);
+  if (username !== "" || password !== "") throw new ConfigError("PUBLIC_URL: must not contain credentials");
+  for (const r of s.routes) {
+    if (`${env.publicUrl}${r.path}`.length > MAX_URL_CHARS) {
+      throw new ConfigError(`PUBLIC_URL: with ${r.path} it makes a resource URL over ${MAX_URL_CHARS} characters`);
+    }
+  }
+}
+
+/** A price is a whole number of zat from 1 to the facilitator's deposit window, which one call can never exceed */
+function checkPrices(env: ServiceEnv, s: ServiceDefinition, server: x402ResourceServer): void {
+  const { windowZat } = parseTerms(server.getSupportedKind(X402_VERSION, env.network, SCHEME)?.extra);
+  for (const r of s.routes) {
+    const price = r.priceZat ?? env.priceZat;
+    if (price < 1n || price > windowZat) {
+      const range = `1 to ${windowZat}, the facilitator's windowZat`;
+      throw new ConfigError(`Z402_PRICE_ZAT: ${r.method} ${r.path} would cost ${price} zat, outside ${range}`);
+    }
   }
 }
 
@@ -229,8 +281,11 @@ function startupError(e: unknown, server: x402ResourceServer, env: ServiceEnv): 
     wait: false,
   });
   if (e instanceof FacilitatorCapabilityError) {
+    // A facilitator that serves several providers advertises no payTo at all
     const advertised = server.getSupportedKind(X402_VERSION, env.network, SCHEME)?.extra?.payTo;
-    if (advertised !== env.payTo) return fail(`Z402_PAY_TO: ${at} does not advertise ${env.payTo} as its payTo`);
+    if (advertised !== undefined && advertised !== env.payTo) {
+      return fail(`Z402_PAY_TO: ${at} does not advertise ${env.payTo} as its payTo`);
+    }
     return fail(`Z402_FACILITATOR_URL: ${at} advertises terms this service cannot use (${e.problems.join("; ")})`);
   }
   if (e instanceof RouteConfigurationError) {
@@ -257,7 +312,7 @@ function routeConfig(env: ServiceEnv, s: ServiceDefinition, r: PaidRoute, tags: 
     accepts: {
       scheme: SCHEME,
       network: env.network,
-      price: { amount: env.priceZat.toString(), asset: ASSET },
+      price: { amount: (r.priceZat ?? env.priceZat).toString(), asset: ASSET },
       payTo: env.payTo,
       maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
     },
@@ -305,6 +360,7 @@ async function readiness(ready: PaidServiceOptions["ready"]): Promise<boolean> {
 export async function createPaidService(o: PaidServiceOptions): Promise<PaidService> {
   const { env, service } = o;
   checkDefinition(service);
+  checkResources(env, service);
   const tags = service.tags === undefined ? undefined : sanitizeTags(service.tags);
 
   const facilitator = facilitatorClient(env);
@@ -326,6 +382,18 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
       if (attempt === 1) log(`${error.message}; waiting for it`);
       await new Promise((resolve) => setTimeout(resolve, FACILITATOR_RETRY_MS));
     }
+  }
+  checkPrices(env, service, server);
+
+  // Each route's catalog item, read once from its 402, which nothing changes while the service runs
+  const declared: DeclaredResource[] = [];
+  for (const r of service.routes) {
+    const item = await declaredResource(http, r, routes[r.path]?.extensions?.["bazaar"]);
+    const bytes = Buffer.byteLength(JSON.stringify(item.extensions ?? {}));
+    if (bytes > MAX_EXTENSIONS_BYTES) {
+      throw new Error(`routes: the 402 of "${r.path}" has ${bytes} bytes of extensions, over ${MAX_EXTENSIONS_BYTES}`);
+    }
+    declared.push(item);
   }
 
   const stats = new CallStats();
@@ -364,6 +432,7 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
         path: r.path,
         ...(r.probePath !== undefined && { probePath: r.probePath }),
         unit: r.unit,
+        priceZat: (r.priceZat ?? env.priceZat).toString(),
       })),
     });
   });
@@ -436,5 +505,19 @@ export async function createPaidService(o: PaidServiceOptions): Promise<PaidServ
       vouchersInFlight.delete(voucher);
     }
   });
-  return { app, stats, http };
+
+  const intervalMs = o.declareIntervalMs ?? env.declareIntervalMs ?? DECLARE_INTERVAL_MS;
+  const declaring =
+    intervalMs > 0
+      ? startDeclaring({
+          facilitatorUrl: env.facilitatorUrl,
+          token: env.facilitatorToken,
+          bodies: declarationBodies(declared),
+          routes: declared.length,
+          ready: () => readiness(o.ready),
+          intervalMs,
+          log,
+        })
+      : undefined;
+  return { app, stats, http, close: async () => declaring?.stop() };
 }

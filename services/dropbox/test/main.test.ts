@@ -77,7 +77,15 @@ describe("main", () => {
     const url = /listening on (http:\/\/\S+)/.exec(line ?? "")?.[1];
     const health = await fetch(`${url}/health`);
     expect(health.status).toBe(503);
-    expect(await health.json()).toMatchObject({ ready: false, service: "Encrypted drop box" });
+    expect(await health.json()).toMatchObject({
+      ready: false,
+      service: "Encrypted drop box",
+      priceZat: "500",
+      routes: [
+        { path: "/v1/drops", priceZat: "500" },
+        { path: "/v1/drops/:id/hold", priceZat: "500" },
+      ],
+    });
     const upload = await fetch(`${url}/v1/drops`, { method: "POST", body: "anything" });
     expect(upload.status).toBe(503);
 

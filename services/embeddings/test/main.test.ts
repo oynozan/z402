@@ -87,7 +87,8 @@ describe("src/main.ts", () => {
       const stack = await facilitator();
       const fake = await startFakeProvider({ apiKey: "sk-main-test-key" });
       fakes.push(fake);
-      const service = start(envFor(stack, fake));
+      // The stack's facilitator takes one price, 500 zat
+      const service = start(envFor(stack, fake, { Z402_PRICE_ZAT: "500" }));
       const url = await listening(service);
 
       // The ready line says where it listens and with what, and never quotes the key
@@ -127,7 +128,13 @@ describe("src/main.ts", () => {
       fakes.push(fake);
       const service = start(envFor(stack, fake, { EMBEDDINGS_API_KEY: "" }));
       const url = await listening(service);
-      expect((await fetch(`${url}/health`)).status).toBe(503);
+      const health = await fetch(`${url}/health`);
+      expect(health.status).toBe(503);
+      // Its own price, as Z402_PRICE_ZAT is not set
+      expect(await health.json()).toMatchObject({
+        priceZat: "100",
+        routes: [{ path: "/v1/embeddings", priceZat: "100" }],
+      });
       expect(service.stderr).toContain("embeddings: not ready, the provider does not list nomic-embed-text");
     },
     START_TIMEOUT_MS,

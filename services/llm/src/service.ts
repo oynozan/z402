@@ -33,7 +33,7 @@ export interface LlmService {
   app: Express;
   /** The streams being sold, for monitoring and tests */
   streams: StreamRegistry;
-  /** Stops every generation, which ends the calls waiting on one; the HTTP server is the caller's to close */
+  /** Stops declaring and ends every generation, and so the calls waiting on one; the HTTP server is the caller's */
   close(): Promise<void>;
 }
 
@@ -329,13 +329,20 @@ export async function createLlmService(o: LlmServiceOptions): Promise<LlmService
     onFailure: (e) => log(`generation failed: ${message(e)}`),
   });
   try {
-    const { app } = await createPaidService({
+    const paid = await createPaidService({
       env: o.env,
       service: { serviceName: "LLM inference", tags: ["llm", "inference", "text"], routes: [route(registry, config)] },
       ready: modelReadiness(provider, config.model, log),
     });
-    app.post(GENERATE_PATH, generate(registry, config));
-    return { app, streams: registry, close: async () => registry.close() };
+    paid.app.post(GENERATE_PATH, generate(registry, config));
+    return {
+      app: paid.app,
+      streams: registry,
+      close: async () => {
+        await paid.close();
+        registry.close();
+      },
+    };
   } catch (e) {
     registry.close();
     throw e;

@@ -40,7 +40,7 @@ function readyUrl(child: ChildProcess, timeoutMs: number): Promise<string> {
 }
 
 /** The service as its own process, in front of `provider` and the facilitator of `stack` */
-function startMain(stack: TestStack, provider: FakeProvider): ChildProcess {
+function startMain(stack: TestStack, provider: FakeProvider, more: Record<string, string> = {}): ChildProcess {
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([k]) => !OWN_VARIABLE_RE.test(k)));
   const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
     cwd: PACKAGE_DIR,
@@ -53,6 +53,7 @@ function startMain(stack: TestStack, provider: FakeProvider): ChildProcess {
       PORT: "0",
       LLM_BASE_URL: provider.baseUrl,
       LLM_MODEL: "test-model",
+      ...more,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -75,7 +76,7 @@ async function fake(o: Parameters<typeof fakeProvider>[0] = {}): Promise<FakePro
   return provider;
 }
 
-test("main prints its ready line, serves the 402 and exits 0 on SIGTERM", { timeout: 30_000 }, async () => {
+test("main prints its ready line, serves the 402 at 200 zat and exits 0 on SIGTERM", { timeout: 30_000 }, async () => {
   const stack = await facilitatorOnly();
   const child = startMain(stack, await fake());
 
@@ -86,8 +87,11 @@ test("main prints its ready line, serves the 402 and exits 0 on SIGTERM", { time
     body: JSON.stringify({ prompt: "hi" }),
   });
   expect(unpaid.status).toBe(402);
-  expect(unpaid.headers.get("payment-required")).toBeTruthy();
-  expect((await fetch(`${url}/health`)).status).toBe(200);
+  const required = JSON.parse(Buffer.from(unpaid.headers.get("payment-required") ?? "", "base64").toString("utf8"));
+  expect(required.accepts[0].amount).toBe("200");
+  const health = await fetch(`${url}/health`);
+  expect(health.status).toBe(200);
+  expect(await health.json()).toMatchObject({ priceZat: "200", routes: [{ path: "/v1/generate", priceZat: "200" }] });
 
   const exited = once(child, "exit");
   child.kill("SIGTERM");
@@ -98,7 +102,8 @@ test("SIGTERM with a paid call in flight answers it unsettled and exits 0 at onc
   const stack = await facilitatorOnly();
   const hold = gate();
   const provider = await fake({ reply: () => ({ steps: [hold, "a", "b", "c"] }) });
-  const child = startMain(stack, provider);
+  // The stack's facilitator takes one price, 500 zat
+  const child = startMain(stack, provider, { Z402_PRICE_ZAT: "500" });
   const url = await readyUrl(child, 20_000);
 
   const call = stack.paidFetch(`${url}/v1/generate`, {

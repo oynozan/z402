@@ -27,6 +27,7 @@ export interface ServiceEnv {
   facilitatorUrl: string;
   facilitatorToken: string | undefined;
   payTo: string;
+  /** Price of one call in zatoshi, for every route that does not set its own */
   priceZat: bigint;
   /** Public origin of the service, without a trailing slash, used for 402 resource URLs and discovery */
   publicUrl: string;
@@ -34,6 +35,8 @@ export interface ServiceEnv {
   port: number;
   /** How long a service waits at start for a facilitator that does not answer yet */
   facilitatorWaitMs?: number;
+  /** How often a ready service declares its routes to the facilitator's Bazaar, 30000 by default; 0 never does */
+  declareIntervalMs?: number;
 }
 
 const NETWORKS: Readonly<Record<string, { network: ZcashNetwork; payToHint: string }>> = {
@@ -44,7 +47,6 @@ const NETWORKS: Readonly<Record<string, { network: ZcashNetwork; payToHint: stri
 
 const PORT_RE = /^(0|[1-9][0-9]{0,4})$/;
 const WHOLE_RE = /^(0|[1-9][0-9]{0,15})$/;
-const DEFAULT_PRICE_ZAT = 500n;
 
 /** The value of `name`, or undefined when it is unset or empty */
 export function read(env: Env, name: string): string | undefined {
@@ -90,9 +92,9 @@ export function readUrl(env: Env, name: string, fallback?: string): string {
   return raw.replace(/\/+$/, "");
 }
 
-function priceOf(env: Env): bigint {
+function priceOf(env: Env, fallback: bigint): bigint {
   const raw = read(env, "Z402_PRICE_ZAT");
-  if (raw === undefined) return DEFAULT_PRICE_ZAT;
+  if (raw === undefined) return fallback;
   let price: bigint;
   try {
     price = parseZat(raw);
@@ -112,8 +114,11 @@ function portOf(env: Env, fallback: number): number {
   return port;
 }
 
-/** Reads and checks the shared variables, throwing a ConfigError that names the one at fault */
-export function loadServiceEnv(env: Env, o: { port: number }): ServiceEnv {
+/**
+ * Reads and checks the shared variables, throwing a ConfigError that names the one at fault. `priceZat` is the service's
+ * own price for one call, which Z402_PRICE_ZAT overrides.
+ */
+export function loadServiceEnv(env: Env, o: { port: number; priceZat: bigint }): ServiceEnv {
   const name = read(env, "Z402_NETWORK") ?? "regtest";
   const profile = Object.hasOwn(NETWORKS, name) ? NETWORKS[name] : undefined;
   if (profile === undefined) throw new ConfigError("Z402_NETWORK: expected regtest, testnet or mainnet");
@@ -140,7 +145,7 @@ export function loadServiceEnv(env: Env, o: { port: number }): ServiceEnv {
     facilitatorUrl,
     facilitatorToken,
     payTo,
-    priceZat: priceOf(env),
+    priceZat: priceOf(env, o.priceZat),
     publicUrl: readUrl(env, "PUBLIC_URL", `http://localhost:${port}`),
     host,
     port,

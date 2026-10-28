@@ -5,7 +5,8 @@ import { createLlmService } from "./service.js";
 
 runMain("llm", async () => {
   loadDotEnv(new URL("../.env", import.meta.url));
-  const env = loadServiceEnv(process.env, { port: 4031 });
+  // Per output chunk, unless Z402_PRICE_ZAT sets another price
+  const env = loadServiceEnv(process.env, { port: 4031, priceZat: 200n });
   const config = loadLlmConfig(process.env);
   const service = await createLlmService({ env, config });
   const listening = await serve(service.app, env).catch(async (e: unknown) => {
