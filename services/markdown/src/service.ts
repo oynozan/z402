@@ -220,7 +220,8 @@ export async function createMarkdownService(o: MarkdownServiceOptions): Promise<
             note: "The site sees this server's IP, not yours.",
             discovery: {
               input: { url: "https://example.com" },
-              inputSchema: { properties: { url: { type: "string", format: "uri" } }, required: ["url"] },
+              // A pattern, as the Bazaar validator knows no format "uri" and warns about it at every start
+              inputSchema: { properties: { url: { type: "string", pattern: "^https?://" } }, required: ["url"] },
               output: { example: EXAMPLE },
             },
             prepare: [prepare],

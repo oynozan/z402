@@ -7,7 +7,7 @@ import {
   TEST_PUBLIC_URL,
   type TestStack,
 } from "@z402/service-kit/testing";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadMarkdownConfig, type MarkdownConfig } from "../src/config.js";
 import { safeFetch } from "../src/fetch.js";
 import type { Resolver } from "../src/guard.js";
@@ -321,6 +321,24 @@ describe("GET /v1/markdown", { timeout: 30_000 }, () => {
       method: "GET",
       queryParams: { url: "https://example.com" },
     });
+  });
+
+  test("the input schema uses only keywords the Bazaar validator knows, so a start logs no warning", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const h = await harness();
+      const probe = await fetch(`${h.stack.url}/v1/markdown`, { headers: { "x-z402-probe": "1" } });
+      const header = probe.headers.get("payment-required") ?? "";
+      type Schema = { properties: Record<string, Schema> };
+      const required = JSON.parse(Buffer.from(header, "base64").toString("utf8")) as {
+        extensions: { bazaar: { schema: Schema } };
+      };
+      const params = required.extensions.bazaar.schema.properties["input"]?.properties["queryParams"]?.properties;
+      expect(params).toEqual({ url: { type: "string", pattern: "^https?://" } });
+      expect(warn.mock.calls.filter(([m]) => /unknown format/.test(String(m)))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("HEAD must pay too, and a wrong method is refused before payment", async () => {
