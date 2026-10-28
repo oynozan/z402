@@ -148,6 +148,7 @@ The catalog is keyed by (`providerId`, canonical resource, HTTP method). The can
    - The resource comes from `paymentPayload.resource.url` and `extensions.bazaar.routeTemplate`. The method comes from `extensions.bazaar.info.input.method`.
    - A provider that has never declared anything is listed from its payments, as standard Bazaar facilitators do. A matching item is created from `paymentRequirements` (the server's, not the client's `accepted`), the sanitized `resource` metadata, and the `bazaar` extension.
    - **Once a provider has declared anything, its settled payments only update matching declared items, and never create one.** In a payment, `resource.url` and `extensions.bazaar` are echoed by the client. Without this rule, any payer could add a listing with any URL and description under a declaring provider's `payTo`, for the price of one call.
+   - **A provider's first declaration removes its payment-sourced items** that the declaration does not itself declare, and is written to disk (fsync, rename) before the answer. A declaring flag lost to a crash or a corrupt file then lets a payment-created item live only until the provider's next heartbeat.
    - Client-echoed data never overwrites a declared item.
 
 **Item validation** (declarations; payment-sourced items get the same sanitizers):
