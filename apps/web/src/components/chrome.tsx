@@ -5,6 +5,8 @@ import { MenuToggle, NavLink, type NavItem } from "./nav";
 
 const HOW: NavItem = { href: "/#how", label: "How it works" };
 const SERVICES: NavItem = { href: "/services", label: "Services" };
+const DOCS: NavItem = { href: "/docs", label: "Docs" };
+const QUICKSTART: NavItem = { href: "/docs/quickstart", label: "Quickstart" };
 const START: NavItem = { href: "/#start", label: "Get started" };
 
 function repoItem(): NavItem | null {
@@ -33,7 +35,10 @@ export function Badge({ index, label }: { index?: string; label: string }) {
 
 export function Header() {
   const repo = repoItem();
-  const links = repo === null ? [HOW, SERVICES] : [HOW, SERVICES, repo];
+  // Three link cells take three quarters of the row after the wordmark and GET STARTED the last, as on pay.sh. With a
+  // repository GitHub takes the place of How it works, which the menu and the footer still list
+  const links = repo === null ? [HOW, SERVICES, DOCS] : [SERVICES, DOCS, repo];
+  const menu = repo === null ? links : [HOW, SERVICES, DOCS, repo];
   return (
     <header className="section nav">
       <div className="frame nav-bar">
@@ -48,14 +53,14 @@ export function Header() {
         <Link className="nav-cta" href={START.href}>
           {START.label}
         </Link>
-        <MenuToggle items={links} />
+        <MenuToggle items={menu} />
       </div>
     </header>
   );
 }
 
-/** The proxy's JSON, which is no page for the router to prefetch */
-const DEVELOPERS: NavItem[] = [{ href: "/discovery/resources", label: "Bazaar list" }];
+/** The docs' quickstart, and the proxy's JSON, which is no page for the router to prefetch */
+const DEVELOPERS: NavItem[] = [QUICKSTART, { href: "/discovery/resources", label: "Bazaar list" }];
 
 function FootColumn({ title, items }: { title: string; items: NavItem[] }) {
   return (
@@ -90,7 +95,7 @@ export function Footer() {
             </Link>
             <p className="foot-line">Shielded x402 payments for AI agents.</p>
           </div>
-          <FootColumn title="Site" items={[HOW, SERVICES, START]} />
+          <FootColumn title="Site" items={[HOW, SERVICES, DOCS, START]} />
           <FootColumn title="Developers" items={repo === null ? DEVELOPERS : [...DEVELOPERS, repo]} />
         </div>
         <div className="foot-tail" aria-hidden="true">
