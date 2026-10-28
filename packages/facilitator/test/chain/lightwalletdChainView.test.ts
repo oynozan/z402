@@ -6,7 +6,7 @@ import {
   NETWORK_TESTNET,
   type ZcashNetwork,
 } from "@z402/protocol";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test, vi } from "vitest";
 import { LightwalletdChainView } from "../../src/chain/lightwalletdChainView.js";
 import { ZdecryptError } from "../../src/chain/zdecrypt.js";
 import { FakeBinaries } from "../support/fakeZdecrypt.js";
@@ -294,7 +294,15 @@ describe("LightwalletdChainView with a scripted zdecrypt", () => {
 describe("LightwalletdChainView tip", () => {
   test("the tip read for a mempool inspect is reused by a tip() right after it", async () => {
     const lwd = fakeLwd(inMempool(keys.deposit.hex));
-    const view = merchantView(lwd, ZDECRYPT_BIN);
+    // A frozen clock, so a slow zdecrypt spawn cannot age the tip past the reuse window
+    const view = new LightwalletdChainView({
+      lwd,
+      zdecryptBin: ZDECRYPT_BIN,
+      uivk: keys.merchant.uivk,
+      payTo: keys.merchant.address,
+      network: NETWORK_TESTNET,
+      now: () => 0,
+    });
 
     await view.inspect(keys.deposit.txid);
     await expect(view.tip()).resolves.toBe(DEPOSIT_TIP);
@@ -321,6 +329,51 @@ describe("LightwalletdChainView tip", () => {
     ms += 1;
     await view.tip();
     expect(lwd.tipCalls).toBe(2);
+  });
+
+  /** A view over a counting lightwalletd whose tip age is measured on the given clock */
+  const clocked = (now: () => number) => {
+    const lwd = fakeLwd({ found: false }, 4_547_999);
+    const view = new LightwalletdChainView({
+      lwd,
+      zdecryptBin: ZDECRYPT_BIN,
+      uivk: keys.merchant.uivk,
+      payTo: keys.merchant.address,
+      network: NETWORK_TESTNET,
+      now,
+    });
+    return { lwd, view };
+  };
+
+  test("a tip whose age comes out negative is read again", async () => {
+    let ms = 3_600_000;
+    const { lwd, view } = clocked(() => ms);
+    await view.tip();
+    ms -= 3_600_000;
+    await view.tip();
+    expect(lwd.tipCalls).toBe(2);
+  });
+
+  test("a tip whose age is not a number is read again", async () => {
+    const { lwd, view } = clocked(() => Number.NaN);
+    await view.tip();
+    await view.tip();
+    expect(lwd.tipCalls).toBe(2);
+  });
+
+  test("the wall clock stepping back an hour does not freeze the tip", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance"] });
+    try {
+      const lwd = fakeLwd({ found: false }, 4_547_999);
+      const view = merchantView(lwd, ZDECRYPT_BIN);
+      await view.tip();
+      vi.setSystemTime(Date.now() - 3_600_000);
+      vi.advanceTimersByTime(1000);
+      await view.tip();
+      expect(lwd.tipCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test.each([2 ** 53, 2 ** 32, -1, 1.5, Number.NaN])("a tip of %d is no block height and is refused", async (tip) => {
