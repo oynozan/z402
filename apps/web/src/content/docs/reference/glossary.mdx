@@ -1,0 +1,473 @@
+export const meta = {
+  title: "Glossary",
+  description: "Every term the z402 docs use, in alphabetical order, from zat and ZEC to payTo, UIVK, windows, vouchers, the facilitator and the Bazaar.",
+};
+
+The terms below are used across these docs, in alphabetical order. A term that has a page of its own links to it.
+
+<Callout type="tip" title="Units">
+
+Amounts are in zat, the smallest unit of ZEC. 1 ZEC is 100,000,000 zat, and every amount on the wire is a decimal string. A price of 500 zat is 0.000005 ZEC.
+
+</Callout>
+
+
+## A
+
+### accepts
+
+The list of payment options in a 402. Each entry names a scheme, a network, an amount, an asset and a `payTo`. z402 offers one entry, for `prepaid-voucher`. See [Payment requirements](/docs/reference/protocol#payment-requirements).
+
+### Agent
+
+Software that calls paid APIs on its own. In z402 an agent holds a Zcash wallet, runs the client scheme and pays by calling `paidFetch` where it would call `fetch`. See [Pay from an agent](/docs/guides/pay-from-an-agent).
+
+### Ambiguous outcome
+
+A paid call whose result the client cannot tell: the answer came back with neither a settle receipt nor a corrective 402, for example a 502 from the service. The client counts the call as paid, so its total moves forward and its next voucher pays for it.
+
+### API key
+
+A provider's credential for the facilitator. It is `z402_` followed by 43 base64url characters, and it is sent as a bearer token on `/verify`, `/settle`, `GET /providers/me` and `POST /discovery/resources`. It is shown once and stored only as a hash. See [Providers and API keys](/docs/concepts/providers).
+
+### Asset
+
+What a payment is made in. For z402 the asset is `ZEC`, and amounts are in zat.
+
+
+## B
+
+### Basis points
+
+One hundredth of a percent. `creditRatioBps` of 2500 is 2500 basis points, which is 25 percent.
+
+### Bazaar
+
+The x402 catalog of paid resources. In z402 the facilitator hosts it: providers declare their routes, and anyone reads the list at `GET /discovery/resources` and `GET /discovery/search`. See [Discovery](/docs/concepts/discovery).
+
+### Bearer token
+
+A secret sent in the `Authorization: Bearer` header. z402 uses it for API keys, for the registration token and for a drop's delete token. A token is made of letters, digits and the characters `-._~+/` (an RFC 6750 b64token).
+
+### Billing unit
+
+What one paid call buys: an output chunk, a page, about 1,000 tokens or 10 blocks. Each route declares it as `unit` in the `z402` extension of its 402. See [Starter services](/docs/services).
+
+### Block
+
+One unit of chain time. A block holds transactions, and confirmations are counted in blocks. The drop box measures how long it holds a file in blocks.
+
+### Block clock
+
+The process that mines a block on a timer. On regtest blocks exist only when something mines them, and without the clock nothing confirms or expires. The demo's clock mines one every 25 seconds by default (`Z402_BLOCK_SECONDS`).
+
+
+## C
+
+### Client scheme
+
+`PrepaidVoucherScheme` in `@z402/client`: the x402 client scheme that keeps the sessions, decides when to deposit and signs each voucher. One `register` call adds it to the stock x402 client. See [`@z402/client`](/docs/reference/client).
+
+### Confirmation
+
+The block that contains a transaction is its first confirmation, and each block after it adds one. A deposit with at least 1 confirmation is `confirmed`, and with 10 it is `final`.
+
+### Corrective 402
+
+A 402 that a resource server sends after a refused verify. It carries the facilitator's snapshot of the session in `accepts[0].extra.session`, which is how a refused client learns its state.
+
+### Credit
+
+Headroom above the confirmed and pending deposits that the facilitator grants for free. It is the smaller of the credit cap and the credit ratio times the confirmed deposits, so it grows only from confirmed deposits. On the demo terms one confirmed window earns 25,000 zat. See [Trust ramp](/docs/reference/protocol#trust-ramp).
+
+### Credit cap
+
+`creditCapZat`: the most credit a session can have. 200,000 zat on the demo terms.
+
+### Credit ratio
+
+`creditRatioBps`: the share of confirmed deposits that becomes credit, in basis points. 2500 (25 percent) on the demo terms.
+
+### Cumulative
+
+The running total of everything a session has vouchered to one `payTo`. Each voucher carries `cumulativeZat`, the new total, and not the price of one call, so a voucher that is sent twice is refused the second time. A call is accepted when the total grows by at least the price and stays within the limit.
+
+
+## D
+
+### Dead
+
+A deposit status: the transaction expired unmined, or it has been missing from the chain for long enough that it is given up. A dead deposit counts nowhere.
+
+### Declaration
+
+A provider's post of its routes to `POST /discovery/resources`. A service built with the kit declares every 30 seconds while it is ready.
+
+### Deposit
+
+One shielded transaction of exactly one window to the provider's `payTo`, with a memo that names the session. It funds many calls: after it, each call only signs a voucher. See [Prepaid vouchers](/docs/concepts/prepaid-vouchers).
+
+### Deposit memo
+
+The ZIP 302 text memo of a deposit, `<sessionKey>:<index>`. It binds the deposit to one session, so a leaked transaction id is useless to anyone else.
+
+### Deposit status
+
+Where the facilitator sees a deposit: `pending` (in the mempool), `confirmed` (mined), `final` (10 confirmations), `orphaned` (on a fork) or `dead`. See [Deposits](/docs/reference/protocol#deposits).
+
+### depositTxid
+
+The optional payload field that presents a deposit's transaction id. The client sends it on every call until a successful settle acknowledges the deposit.
+
+
+## E
+
+### Ed25519
+
+The signature scheme of a voucher, pure Ed25519 as in RFC 8032. A session key is an Ed25519 public key.
+
+### Expiry height
+
+The block height at which an unmined transaction expires: once the tip reaches it, the transaction can no longer be mined. The facilitator reads it from the transaction. A pending deposit earns zero-conf credit only if it expires at least `zeroConfMinExpiryBlocks` (20) blocks after the tip at which it was first seen.
+
+
+## F
+
+### Facilitator
+
+The service that verifies and settles payments for resource servers. In z402 one facilitator is a rail for many providers. It reads deposits from the chain with each provider's viewing key, keeps each session's limit, hosts the registry of providers and the Bazaar. It is meant to hold only viewing keys, which cannot spend. See [Run the facilitator](/docs/guides/run-a-facilitator) and [Facilitator API](/docs/reference/facilitator-api).
+
+### Final
+
+A deposit status: 10 or more confirmations. A final deposit is no longer polled.
+
+
+## H
+
+### Headroom
+
+`headroomZat`: how much more a session may voucher, which is the limit minus the cumulative total.
+
+### Heartbeat
+
+A service's declaration to the Bazaar, repeated every 30 seconds while it is ready. It is the liveness signal behind `lastSeen`.
+
+### HTTP 402
+
+The status code Payment Required. HTTP reserves it for future use, and x402 gives it a meaning: the server answers 402 with what it accepts, and the client pays and retries. See [x402 and HTTP 402](/docs/concepts/x402).
+
+
+## I
+
+### Ironwood
+
+The shielded pool that NU6.3 introduced. A payment to the Orchard receiver of a unified address lands in it, in a version 6 transaction. It shares the Orchard receiver, so there is no new address type. Deposits on regtest are Ironwood outputs.
+
+
+## L
+
+### lastSeen
+
+When a provider last declared a route in the Bazaar, as an ISO 8601 time. A reader derives the route's status from its age: up under 90 seconds, stale under 10 minutes, down after that. It is absent for a route listed only from payments.
+
+### Ledger
+
+The facilitator's append-only file of deposits, vouchers and status changes. It is replayed at start, so a restart never credits a deposit or a voucher twice. There is one per network, and in v2.0 one per provider.
+
+### lightwalletd
+
+A server that serves compact blocks and transactions to light wallets over gRPC. The facilitator and the client read deposits from it, and Zaino speaks the same protocol.
+
+### Limit
+
+`limitZat`: the most the facilitator accepts for a session right now. It is the confirmed deposits plus the pending deposit plus the credit.
+
+
+## M
+
+### Mainnet
+
+The live Zcash chain. Network id `zcash:mainnet`.
+
+### Memo
+
+The 512-byte field of a shielded output that carries a message for the recipient (ZIP 302). z402 uses it to name the session of a deposit.
+
+### Mempool
+
+Where a transaction waits before a block includes it. A deposit that is there is `pending`.
+
+### Merchant
+
+The older name for a provider, still used in code and settings, such as the merchant keys file.
+
+
+## N
+
+### Network id
+
+The chain in an offer, in CAIP-2 form: `zcash:regtest`, `zcash:testnet` or `zcash:mainnet`. No `zcash` namespace is registered yet, so the id is provisional. It is part of the signed voucher bytes.
+
+### NU6.3 and NU7
+
+Zcash network upgrades. NU6.3 introduced Ironwood and is active on regtest and on mainnet. NU7 is active on testnet and brings blocks of about 25 seconds. Its mainnet activation is set for height 3,543,405.
+
+
+## O
+
+### Offer
+
+The payment requirements a server puts in a 402 for one route: an entry of `accepts`, read from the `PAYMENT-REQUIRED` header. A client pays what the offer says.
+
+### Operator
+
+Whoever runs a service. In z402 "the operator" is also the provider configured when the facilitator starts, which runs LLM inference, embeddings, the drop box and the demo API. Its API key is `Z402_FACILITATOR_TOKEN`.
+
+### Orphaned
+
+A deposit status: the transaction was mined on a fork that is not the main chain. It counts nowhere.
+
+
+## P
+
+### paidCallsToday
+
+The number of calls settled for a route since 00:00 UTC, listed on each Bazaar item. It is an aggregate: no session, key or amount per call is ever exposed.
+
+### paidFetch
+
+The stock `fetch` wrapped with payment (`wrapFetchWithPayment`) on a client that has the Zcash scheme registered. It pays a 402 and retries, so a paid call reads like an ordinary one.
+
+### payer
+
+In a verify or settle answer, the session key of the payer.
+
+### Payload
+
+The scheme-specific part of an x402 payment. For `prepaid-voucher` it holds `sessionKey`, `cumulativeZat`, `sig` and, optionally, `depositTxid`. See [Payment payload](/docs/reference/protocol#payment-payload).
+
+### PAYMENT-REQUIRED
+
+The response header of a 402. It holds the offer as base64 JSON.
+
+### PAYMENT-RESPONSE
+
+The response header of a paid call. It holds the settle answer as base64 JSON, with the session snapshot.
+
+### PAYMENT-SIGNATURE
+
+The request header of a paid call. It holds the payment, voucher included, as base64 JSON.
+
+### payTo
+
+The provider's shielded-only unified address, which a 402 names and a deposit pays. A voucher is signed over it, so it never verifies at another provider.
+
+### Pending
+
+A deposit status: the transaction is in the mempool and not yet mined.
+
+### Prepaid voucher
+
+The z402 payment scheme (`prepaid-voucher`): one shielded deposit per window, then a signed cumulative voucher for each call. See [Prepaid vouchers](/docs/concepts/prepaid-vouchers).
+
+### Price
+
+The cost of one call in zat, the `amount` of the offer. A provider sets it for each route, from 1 zat up to `windowZat`.
+
+### Provider
+
+One payment address with its own view-only key, API key, ledger and prices. A provider runs resource servers and never runs a facilitator. The operator is a provider too. See [Providers and API keys](/docs/concepts/providers).
+
+### Provider id
+
+The first 16 hex characters of the SHA-256 of `z402-provider-v1`, the network and the `payTo`, joined by newlines. It is fixed by the address, so rotating a key keeps the provider's ledger and catalog entries.
+
+
+## R
+
+### Rail
+
+One facilitator that many providers connect to, with the same terms for all of them.
+
+### Reason code
+
+The string in `invalidReason` or `errorReason` that says why a verify or a settle refused. The list is closed: 8 standard codes and 11 scheme codes. See [Errors and reason codes](/docs/reference/errors).
+
+### Registration token
+
+An optional bearer token that gates `POST /providers`. Set it with `Z402_REGISTRATION_TOKEN` before a facilitator is reachable from the internet.
+
+### Regtest
+
+A private Zcash test chain that you run yourself. The demo uses it through the Z3 stack, with blocks mined on a timer. Network id `zcash:regtest`.
+
+### Resource server
+
+The paid API that answers 402 and talks to the facilitator. The starter services and `apps/api` are resource servers. See [`@z402/server`](/docs/reference/server).
+
+
+## S
+
+### Server scheme
+
+`PrepaidVoucherServerScheme` in `@z402/server`: the x402 server scheme that builds each route's offer, copies the facilitator's terms into it and adds the session snapshot to a corrective 402.
+
+### Service kit
+
+`@z402/service-kit`: the library that turns a description of paid routes into an Express app with the payment, `/health` and the Bazaar declarations. See [Build with the service kit](/docs/guides/service-kit).
+
+### Session
+
+An agent's account with one `payTo`: a session key, a cumulative total and its deposits. An agent keeps one session for each address and network it pays, and a restart starts new ones with no credit.
+
+### Session key
+
+The Ed25519 public key of a session, 64 lowercase hex characters. It names the session in vouchers and in the deposit memo. Its private seed never leaves the client.
+
+### Session snapshot
+
+The facilitator's view of one session: the total, the limit, the headroom, the confirmed, pending and credit amounts, the tip and the deposits. It rides in `extra.session` of every answer. See [Session snapshot](/docs/reference/protocol#session-snapshot).
+
+### Settle
+
+The facilitator call that commits a voucher after the handler has run. It advances the session's last settled total and credits a deposit, atomically.
+
+### Shielded
+
+A shielded Zcash transaction hides the sender, the recipient and the amount on the public chain. Only someone with the right viewing key can read them. z402 deposits are shielded, and a `payTo` that includes a transparent receiver is refused. See [Shielded payments](/docs/concepts/shielded-payments).
+
+### Starter services
+
+The four paid services the project runs: LLM inference, URL to markdown, text embeddings and the encrypted drop box. See [Starter services](/docs/services).
+
+
+## T
+
+### Terms
+
+The rail-wide parameters of the scheme: the window, the credit ratio, the credit cap and the zero-conf expiry margin. The facilitator owns them, and every provider gets the same ones.
+
+### termsVersion
+
+A 16-hex id for the terms, in the offer's `extra`. The client ignores it.
+
+### Testnet
+
+Zcash's public test chain. Network id `zcash:testnet`.
+
+### Tip
+
+The height of the latest block, as the facilitator or a service last read it from lightwalletd.
+
+### Trust ramp
+
+The rule that sets how much a session may voucher: confirmed deposits, one pending window and a credit line that grows with confirmations. It bounds what a provider can lose to one window plus the credit. See [Trust ramp](/docs/reference/protocol#trust-ramp).
+
+### txid
+
+A transaction id, 64 lowercase hex characters in display order. It is the unit of credit: a deposit's txid funds one session, once.
+
+
+## U
+
+### UA
+
+A unified address (ZIP 316): one address that bundles receivers for several pools. A `payTo` is a shielded-only unified address. On regtest it starts with `uregtest1`, on testnet with `utest1` and on mainnet with `u1`.
+
+### UFVK
+
+A unified full viewing key (ZIP 316). It reads a wallet's incoming and outgoing activity. The facilitator refuses a keys file that holds one on mainnet.
+
+### UIVK
+
+A unified incoming viewing key (ZIP 316). It can read the payments an address receives and cannot spend. A provider gives its UIVK to the facilitator when it registers, so that the facilitator can check deposits. It reveals the provider's incoming payments, so keep it private.
+
+
+## V
+
+### Verify
+
+The facilitator call that checks a voucher without changing any state: the signature, the increment, the limit and any deposit presented.
+
+### Viewing key
+
+A key that can read a wallet's transactions but cannot spend. See UIVK and UFVK.
+
+### Voucher
+
+A signed message that says "my running total with this `payTo` is now N zat". One is signed for each call, with Ed25519 over the network, the address, the session key and the total. See [Voucher signature](/docs/reference/protocol#voucher-signature).
+
+
+## W
+
+### Wallet
+
+The agent's Zcash wallet, which pays deposits. The client library takes any object with a `sendDeposit` method (`ZcashWallet`). Its adapter today is Zallet over JSON-RPC.
+
+### Window
+
+`windowZat`: the size of one deposit, 100,000 zat on the demo terms. It is also the largest price a route may set.
+
+
+## X
+
+### x402
+
+An open standard for payments over HTTP. A server answers 402 with what it accepts, the client pays and retries, and a facilitator verifies and settles. z402 adds a Zcash scheme to x402 version 2. See [x402 and HTTP 402](/docs/concepts/x402).
+
+
+## Z
+
+### Z3
+
+The Zcash Foundation's stack of Zebra, Zaino and Zallet. The demo runs it in Docker on a private regtest chain.
+
+### Zaino
+
+A Zcash indexer written in Rust that serves the lightwalletd gRPC protocol. The facilitator, the client and the drop box read the chain tip and deposits from it.
+
+### Zallet
+
+A Zcash wallet with a JSON-RPC interface, part of Z3. It holds the demo agent's funds and pays its deposits.
+
+### zat
+
+The smallest unit of ZEC. 1 ZEC is 100,000,000 zat. Prices, windows and totals in z402 are in zat, written as decimal strings.
+
+### zdecrypt
+
+The facilitator's Rust command-line tool. It parses a transaction and trial-decrypts it with a UIVK to find the output to `payTo` and its memo. It does not check proofs, so the facilitator trusts its lightwalletd on whether a deposit exists.
+
+### Zebra
+
+The Zcash Foundation's Zcash node, written in Rust.
+
+### ZEC
+
+The currency of Zcash, and the `asset` of every offer.
+
+### Zero-conf
+
+Credit on a deposit that is still pending. It is capped at one window and given only if the deposit's expiry is at least 20 blocks away, so a deposit about to expire earns none.
+
+### ZIP
+
+A Zcash Improvement Proposal. z402 relies on ZIP 302 (memos) and ZIP 316 (unified addresses and viewing keys).
+
+## References
+
+- <Source path="docs/spec/protocol.md" />: the wire contract behind most of these terms
+- <Source path="docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md" />: providers, API keys, provider ids and the Bazaar
+- <Source path="docs/superpowers/specs/2026-10-27-z402-facilitator-design.md" />: deposits, the trust ramp, the ledger and zdecrypt
+- <Source path="docs/superpowers/specs/2026-10-27-z402-client-design.md" />: sessions, deposits and the client scheme
+- <Source path="docs/research/x402-spec.md" />: the x402 version 2 headers and types
+- <Source path="docs/research/decrypt-spike.md" />: Ironwood and trial decryption with a viewing key
+- <Source path="docs/research/client/z3.md" />: the Z3 stack
+- <Source path="packages/protocol/src/index.ts" />: the shared code and the names it exports
+- <Source path="compose.yaml" />: the block clock and the demo stack
+- [ZIP 302: standardized memo field format](https://zips.z.cash/zip-0302)
+- [ZIP 316: unified addresses and unified viewing keys](https://zips.z.cash/zip-0316)
+- [RFC 6750: bearer token usage](https://datatracker.ietf.org/doc/html/rfc6750)
+- [RFC 8032: Edwards-curve digital signature algorithm](https://datatracker.ietf.org/doc/html/rfc8032)
+- [RFC 9110: 402 Payment Required](https://www.rfc-editor.org/rfc/rfc9110.html#name-402-payment-required)
+- [CAIP-2: blockchain ID specification](https://standards.chainagnostic.org/CAIPs/caip-2)

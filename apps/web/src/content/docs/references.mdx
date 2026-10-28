@@ -1,0 +1,94 @@
+export const meta = {
+  title: "Further reading",
+  description: "Where to learn more: x402 and its Bazaar, the Zcash protocol and ZIPs, Zebra, Zaino and Zallet, the standards z402 uses and the tools behind these docs.",
+};
+
+z402 builds on open standards and open source. This page lists what to read next, and why each item matters to the project.
+
+## x402
+
+z402 is a payment scheme for x402, so the standard comes first.
+
+- [x402.org](https://x402.org): The home of the open standard. A server answers HTTP 402 with what it accepts, the client pays and retries, and z402 adds a Zcash scheme to that loop.
+- [x402 Foundation repository](https://github.com/x402-foundation/x402): The canonical repository, with the specification, the TypeScript SDK that z402 pins to exactly 2.28.0 and the examples. [coinbase/x402](https://github.com/coinbase/x402), where the project began, is now a development fork.
+- [x402 specification, version 2](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md): The types, headers, facilitator calls and error codes that `prepaid-voucher` extends. The same file is in [coinbase/x402](https://github.com/coinbase/x402/blob/main/specs/x402-specification-v2.md).
+- [x402 HTTP transport, version 2](https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md): How `PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE` and `PAYMENT-RESPONSE` travel over HTTP.
+- [The `bazaar` extension](https://github.com/x402-foundation/x402/blob/main/specs/extensions/bazaar.md): What a route declares in its 402 so that a catalog can list it. The facilitator's catalog reads exactly this.
+- [x402 on the Coinbase Developer Platform](https://docs.cdp.coinbase.com/x402/welcome): A seller's and a buyer's view of how x402 works, in plain language.
+- [Discover services (Bazaar)](https://docs.cdp.coinbase.com/x402/buyer/discover-services): How buyers list and search the x402 Bazaar. The facilitator's `GET /discovery/resources` and `GET /discovery/search` follow the same model, so a standard Bazaar client reads them.
+
+See [x402 and HTTP 402](/docs/concepts/x402) for how z402 uses the standard, and [Discovery](/docs/concepts/discovery) for its Bazaar.
+
+## Zcash
+
+Deposits are shielded Zcash transactions, so these explain what the chain does with them.
+
+- [Zcash protocol specification](https://zips.z.cash/protocol/protocol.pdf): The definition of shielded pools, notes, memos and viewing keys. It is the last word on what a deposit is.
+- [Zcash documentation](https://zcash.readthedocs.io/en/latest/): The home of Zcash documentation for end users and developers, with an introduction to Zcash, an integration guide and light client notes.
+- [Zcash Improvement Proposals](https://zips.z.cash/): The index of every ZIP, which is where Zcash standards live.
+- [ZIP 316: unified addresses and unified viewing keys](https://zips.z.cash/zip-0316): Defines the unified address that every provider's `payTo` is, and the unified incoming viewing key (UIVK) a provider registers so the facilitator can read its deposits.
+- [ZIP 302: standardized memo field format](https://zips.z.cash/zip-0302): Defines how a text memo is encoded. z402 puts `<sessionKey>:<index>` in the memo of each deposit, which is how a deposit finds its session.
+- [ZIP 315: best practices for wallet implementations](https://zips.z.cash/zip-0315): The wallet rules that shape how an agent funds its deposits, such as waiting for confirmations before spending its own change.
+- [ZIP 317: proportional transfer fee mechanism](https://zips.z.cash/zip-0317): The fee rule that prices a deposit transaction. A deposit costs its window plus this fee.
+- [ZIP 311: Zcash payment disclosures](https://zips.z.cash/zip-0311): A mechanism for a sender to prove that it paid a shielded address. If an agent disclosed its own deposit this way, a provider would not need to give the facilitator a viewing key. The multi-provider design lists that as future work.
+
+See [Shielded payments](/docs/concepts/shielded-payments) and [Privacy model](/docs/concepts/privacy).
+
+## Chain software
+
+The demo runs a private Zcash chain with the Z3 stack, and the facilitator reads it through the same interfaces a mainnet node would offer.
+
+- [Zebra](https://github.com/ZcashFoundation/zebra) and [the Zebra Book](https://zebra.zfnd.org): The Zcash full node, written in Rust by the Zcash Foundation. The demo's private chain runs on it.
+- [Zaino](https://github.com/zingolabs/zaino): The indexer in front of Zebra. The facilitator, the client and the drop box read deposits and the chain tip from it, over the lightwalletd gRPC protocol.
+- [Zallet](https://github.com/zcash/zallet): The wallet with a JSON-RPC interface. It holds the demo agent's funds and sends its deposits through `ZalletRpcWallet`.
+- [Z3](https://github.com/ZcashFoundation/z3): The Zcash Foundation's combination of Zebra, Zaino and Zallet. The Docker demo is built on it.
+- [lightwalletd](https://github.com/zcash/lightwalletd) and [lightwallet-protocol](https://github.com/zcash/lightwallet-protocol): The gRPC interface for compact blocks and transactions. `@z402/lightwalletd` speaks it to look up a deposit and read the tip.
+
+See [Deploy with Docker](/docs/guides/deploy-with-docker) to run the whole stack.
+
+## Standards on the wire
+
+- [RFC 8032: Edwards-curve digital signature algorithm](https://datatracker.ietf.org/doc/html/rfc8032): The Ed25519 signature on every voucher.
+- [RFC 6750: bearer token usage](https://datatracker.ietf.org/doc/html/rfc6750): The shape of API keys, the registration token and a drop's delete token.
+- [RFC 9110: 402 Payment Required](https://www.rfc-editor.org/rfc/rfc9110.html#name-402-payment-required): HTTP reserves the status code that x402 gives a meaning.
+- [CAIP-2: blockchain ID specification](https://standards.chainagnostic.org/CAIPs/caip-2): The form of a network id such as `zcash:regtest`. There is no registered `zcash` namespace yet, so z402's ids are provisional.
+
+## Formats and tools
+
+- [age](https://age-encryption.org) and the [age v1 format](https://age-encryption.org/v1): The file encryption format the drop box accepts. [age-encryption (typage)](https://github.com/FiloSottile/typage) is the TypeScript implementation used in the examples.
+- [Pele](https://pele.run): Renders the Mermaid diagrams in these docs to SVG that the site themes, at build time. It supports every diagram type of Mermaid 12.1.
+- [Mermaid](https://mermaid.js.org): The diagram syntax Pele reads. Every flow in these docs is a few lines of it.
+- [Ollama: OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility): The API shape that the LLM and embeddings services speak to their model, so any compatible provider can replace the default.
+- [llama.cpp server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server): The model runtime the Docker demo uses for chat and embeddings.
+- [Qwen2.5 0.5B Instruct (GGUF)](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF) and [nomic-embed-text v1.5 (GGUF)](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF): The default chat and embeddings models in the Docker demo.
+- [Mozilla Readability](https://github.com/mozilla/readability), [Turndown](https://github.com/mixmark-io/turndown) and [jsdom](https://github.com/jsdom/jsdom): The three libraries URL to markdown uses to find a page's main content and write it as markdown.
+- [OWASP: Server Side Request Forgery](https://owasp.org/www-community/attacks/Server_Side_Request_Forgery): The attack that URL to markdown's address guard exists to stop.
+
+## Prior art
+
+z402 credits the projects that did shielded x402 first. Its decryptor follows the decrypt loop of both.
+
+- [Kage](https://github.com/nickthelegend/zec-shielded-x402): Agents pay for HTTP APIs with shielded Zcash on x402 version 1, with a facilitator that holds only a viewing key. z402 differs by using an unmodified x402 version 2 client and a trust ramp in place of a wait for one confirmation.
+- [Hanko](https://github.com/nickthelegend/zec-payment-verify-sdk): A library that verifies shielded Zcash payments with a viewing key.
+
+## In this repository
+
+These files are the sources of truth. The docs summarise them, and they carry the detail and the history.
+
+- <Source path="docs/spec/protocol.md" />: The wire contract between the client, the server scheme and the facilitator.
+- <Source path="docs/superpowers/specs/2026-10-27-z402-facilitator-design.md" />: How the facilitator checks deposits, runs the trust ramp and keeps its ledger.
+- <Source path="docs/superpowers/specs/2026-10-27-z402-client-design.md" />: How the client keeps sessions, deposits and recovers from refusals.
+- <Source path="docs/superpowers/specs/2026-10-27-z402-services-design.md" />: The service kit and the four starter services.
+- <Source path="docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md" />: The multi-provider rail: providers, API keys, per-route prices and the Bazaar.
+- <Source path="docs/deploy.md" />: The Docker runbook, with ports, settings and how to wipe and restart.
+- <Source path="docs/demo.md" />: The demo script: what each log line means and what to point at.
+- <Source path="docs/research/live-run.md" />: What a live run on the Z3 stack showed.
+
+## References
+
+- <Source path="docs/research/x402-spec.md" />: the x402 version 2 types and error codes, and the move of the canonical repository
+- <Source path="docs/research/client/z3.md" />: the Z3 stack and its components
+- <Source path="docs/research/decrypt-spike.md" />: Ironwood, trial decryption and the ZIP 317 fee of a deposit
+- <Source path="docs/spec/mvp-build-doc.md" />: the credits to Kage and Hanko, and the ZIP 315 wallet note
+- <Source path="docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md" />: the mention of ZIP 311 as future work
+- <Source path="packages/lightwalletd/src/index.ts" />: the lightwalletd client that `@z402/lightwalletd` exports

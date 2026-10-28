@@ -1,0 +1,339 @@
+export const meta = {
+  title: "Configuration",
+  description: "Every environment variable, flag and default of the facilitator, the starter services, the demo API, the website, the agent and Docker Compose.",
+};
+
+This page lists every setting by component. A setting is an environment variable unless the table says it is a flag.
+
+## Rules that apply everywhere
+
+- **An empty variable counts as unset**, the way `VAR= command` unsets it in a shell. `NAME=` in an `.env` file brings back the default.
+- **A bad value stops the start.** The process exits 1 and prints one line that starts with its name, such as `facilitator: Z402_FACILITATOR_PORT: expected a whole number from 0 to 65535`. A message names the variable and never quotes a secret, a viewing key or the contents of a keys file.
+- **`NAME` and `NAME_FILE`.** Where a setting has a `_FILE` form, the variable wins over the file. The file is read and trimmed. A file that cannot be read or is empty is an error that names `NAME_FILE`.
+- **Whole numbers** are written in decimal digits with no sign and no leading zero.
+- **Zat amounts** are decimal strings of at most 16 digits, up to 2,100,000,000,000,000.
+- **Tokens and keys** are RFC 6750 b64tokens: letters, digits and `-._~+/`, optionally ending in `=`. A token with a space or a control character is refused at start.
+- **URLs** are `http://` or `https://`.
+- **Paths.** For the facilitator and the demo API, a path that is not absolute is relative to the repository root, whatever directory `pnpm` runs from. For the drop box it is relative to the working directory.
+- **`.env` files.** Each starter service reads `services/<name>/.env`. A variable already set in the environment wins over the file.
+
+## Facilitator
+
+The process is `pnpm --filter @z402/facilitator start`. Its ready lines go to stdout and everything else to stderr. See [Run the facilitator](/docs/guides/run-a-facilitator).
+
+### Variables
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `Z402_NETWORK` | `regtest` | `regtest`, `testnet` or `mainnet`. It picks the defaults of `Z402_LWD_URL` and `Z402_EXPECTED_BRANCH_ID`, and the address and key prefixes that are accepted. |
+| `Z402_MERCHANT_KEYS_FILE` | none | The operator's keys: the JSON that `zdecrypt keygen` prints, or the view-only file that `merchant-keygen.mjs --view-only` writes. Only `orchardOnlyAddress` and `uivk` are used, and only for the two variables below that are not set. A file with a `seedHex` or `ufvk` key is refused on mainnet and gives a warning elsewhere. |
+| `Z402_PAY_TO` | `orchardOnlyAddress` of the keys file | The operator's shielded-only unified address: `uregtest1...`, `utest1...` or `u1...`, and the ZIP 316 revision 2 `zu...` forms. Required unless the keys file has it. |
+| `Z402_UIVK` | `uivk` of the keys file | The operator's unified incoming viewing key: `uivkregtest1...`, `uivktest1...` or `uivk1...`, and the revision 2 `uvi...` forms. Required unless the keys file has it. It sees deposits and cannot spend. |
+| `Z402_FACILITATOR_TOKEN` | none, required | The operator's API key. Callers present it as `Authorization: Bearer <token>`. One b64token. |
+| `Z402_LWD_URL` | regtest `http://127.0.0.1:28137`, testnet `https://testnet.zec.rocks:443`, mainnet none | A lightwalletd-compatible gRPC endpoint. Required on mainnet. Plain `http://` is allowed to any host on regtest and only to a loopback host elsewhere. A user name or password in the URL is ignored. |
+| `Z402_EXPECTED_BRANCH_ID` | regtest `37a5165b`, testnet `77190ad9`, mainnet none | Eight hex digits. Start-up compares them with the endpoint's consensus branch id. Unset on mainnet, that check is skipped with a warning. |
+| `Z402_ZDECRYPT_BIN` | `crates/zdecrypt/target/release/zdecrypt` | The decryptor. `pnpm --filter @z402/facilitator build:native` builds the default. |
+| `Z402_LEDGER` | `.data/facilitator-ledger.<network>.jsonl` | The operator's ledger. One facilitator writes it at a time, through `<ledger>.lock`. |
+| `Z402_PROVIDERS_DIR` | `.data/providers.<network>` | The provider registry, the registered providers' ledgers and the catalog file. Created with mode 0700. |
+| `Z402_MAX_PROVIDERS` | `32` | The most providers that can register, the operator not counted. 0 to 1,000. `0` turns away new providers. |
+| `Z402_REGISTRATION_TOKEN` | unset | When set, `POST /providers` needs it as a bearer token. One b64token. Unset leaves registration open. |
+| `Z402_FACILITATOR_HOST` | `127.0.0.1` | The address to listen on. Anything that is not loopback prints a warning, because the only protection is the key. |
+| `Z402_FACILITATOR_PORT` | `4022` | 0 to 65,535. `0` picks a free port. |
+| `Z402_PRICE_ZAT` | unset | Not used. Each provider prices its own routes, from 1 zat to `windowZat`. If it is set, the facilitator prints one warning that says so. |
+
+The loopback test accepts `localhost` in any letter case, `::1` or `[::1]`, and `127.` followed by three groups of one to three digits. Other spellings, such as `127.1`, are treated as not loopback for the listen host.
+
+### Trust terms
+
+The four terms are the same for every provider. `GET /supported` advertises them and each resource server copies them into its 402s. Change them only when you can restart every resource server.
+
+| Variable | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `Z402_WINDOW_ZAT` | `100000` | A zat amount of at least 1 | The size of one deposit. It is also the cap on unconfirmed exposure, and the highest price a route may have. |
+| `Z402_CREDIT_RATIO_BPS` | `2500` | 0 to 10,000 | Credit on confirmed deposits, in basis points. |
+| `Z402_CREDIT_CAP_ZAT` | `200000` | A zat amount, 0 allowed | The most credit one session can hold. |
+| `Z402_ZERO_CONF_MIN_EXPIRY_BLOCKS` | `20` | A whole number from 0 | An unconfirmed deposit earns zero-conf credit only with at least this many blocks left before it expires. |
+
+A whole-number term is limited to ten digits. An invalid term is reported with its variable name, as `Z402_WINDOW_ZAT: windowZat must be at least 1`.
+
+### Embedding the facilitator
+
+`startFacilitator` from `@z402/facilitator` takes the same settings as options. Tests and `apps/e2e` call it directly. It checks every option before it opens anything, and refuses a bad one with a message that starts with the option's name and never quotes its value.
+
+| Option | Allowed | Default |
+| --- | --- | --- |
+| `network`, `payTo`, `chain`, `terms` | A Zcash network, the operator's address, a chain view and the trust terms | Required |
+| `priceZat` | A bigint of at least 1. Optional | Ignored: each provider prices its own routes |
+| `authToken` | One b64token. Left out, a request with no `Authorization` header is the operator's | None |
+| `ledgerPath` | Not blank. Left out, the ledger is in memory and takes no lock | None |
+| `providers` | `{ dir, chainFor, owns, max?, registrationToken? }`. Left out, `POST /providers` answers `registration_disabled` | None |
+| `host` | Not blank | `127.0.0.1` |
+| `port` | A whole number from 0 to 65,535 | `0`, a free port |
+| `pollIntervalMs` | A whole number from 1 to 2,147,483,647 | `5000` |
+| `depositWaitMs` | A whole number from 0 to 30,000 | `30000` |
+| `onFatal` | A function, called once on the first failed ledger write or lost lock | None |
+| `log` | A function that receives one line per request and the diagnostics | None: diagnostics go to stderr, and no request lines are written |
+
+## Resource servers
+
+### Shared by every starter service
+
+Every service reads these through `loadServiceEnv` from `@z402/service-kit`. A service runs as one provider: its key and its address belong together, and `checkProvider` proves it at start.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `Z402_NETWORK` | `regtest` | `regtest`, `testnet` or `mainnet`. Must be the facilitator's network. |
+| `Z402_FACILITATOR_URL` | none, required | The facilitator's `http://` or `https://` URL, with no user name or password in it. |
+| `Z402_FACILITATOR_TOKEN`, `Z402_FACILITATOR_TOKEN_FILE` | none | The provider's API key, sent as a bearer token. The operator's token, or the key that `POST /providers` issued. |
+| `Z402_PAY_TO`, `Z402_PAY_TO_FILE` | none, required | The provider's shielded-only unified address. It must be the address the API key is registered to. |
+| `Z402_PRICE_ZAT` | The service's own price | Replaces the price of every route that sets none. A whole number of zat from 1 to the facilitator's `windowZat`. A service with a price outside that range refuses to start, naming `Z402_PRICE_ZAT`. |
+| `PUBLIC_URL` | `http://localhost:<PORT>` | The public origin of the service, used as the `resource` URL in every 402 and in the catalog. |
+| `HOST` | `127.0.0.1` | The listen address. Not blank. |
+| `PORT` | Per service | 0 to 65,535. |
+| `Z402_FACILITATOR_WAIT_MS` | `120000` | How long a service keeps retrying a facilitator that is starting or down, 0 to 3,600,000. `0` fails at once. A refused key, another `payTo` or a wrong answer is never retried. |
+
+At start a service runs `checkProvider`, then reads `GET /supported`, then checks every route's price. Then it declares its routes to the catalog every 30 s while it is ready. Declaring is on by default, and there is no variable for its interval.
+
+### LLM inference
+
+Port 4031, 200 zat per output chunk. Ready while the provider lists `LLM_MODEL`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LLM_BASE_URL` | `http://127.0.0.1:11434/v1` | The OpenAI-compatible API root. |
+| `LLM_API_KEY`, `LLM_API_KEY_FILE` | none | Sent as a bearer token to the provider. Printable ASCII without spaces. |
+| `LLM_MODEL` | `qwen2.5:0.5b` | The model id as the provider lists it. No leading or trailing whitespace. A name without a tag also matches `name:latest`. |
+| `LLM_CHUNK_TOKENS` | `32` | Tokens per paid chunk, 1 to 512. |
+| `LLM_MAX_TOKENS` | `1024` | The output cap per stream, and the most a call may ask for, 1 to 32,768. |
+| `LLM_MAX_PROMPT_CHARS` | `8000` | The longest prompt, and separately the longest system prompt, 1 to 1,000,000. |
+| `LLM_MAX_STREAMS` | `64` | Streams live at once, 1 to 100,000. |
+| `LLM_STREAM_IDLE_MS` | `600000` | An untouched stream is dropped and its generation stopped, 1,000 to 86,400,000. |
+| `LLM_CHUNK_TIMEOUT_MS` | `60000` | How long a paid call waits for its chunk, 1 to 60,000. |
+
+### URL to markdown
+
+Port 4032, 1,000 zat per page. It fetches public pages itself and has no provider key. See [URL to markdown](/docs/services/markdown).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MARKDOWN_ALLOWED_PORTS` | `80,443,8080,8443` | Ports a page URL and every redirect may use. Comma-separated, 1 to 65,535. |
+| `MARKDOWN_MAX_BYTES` | `5242880` | The largest page body, counted as received and again after decompression. 1,024 to 64 MiB. |
+| `MARKDOWN_MAX_MARKDOWN_BYTES` | `1048576` | The largest markdown answer. A longer one is cut and marked `truncated`. 1,024 to 16 MiB. |
+| `MARKDOWN_TIMEOUT_MS` | `15000` | One deadline for a page fetch, and another for its conversion. 100 to 120,000. |
+| `MARKDOWN_MAX_REDIRECTS` | `5` | 0 to 20. |
+| `MARKDOWN_RATE_PER_MIN` | `30` | Page fetches per minute per client IP, where an IPv6 client counts per /64. A cached page costs nothing. 1 to 100,000. |
+| `MARKDOWN_MAX_CONCURRENT` | `4` | Pages fetched and converted at once, 1 to 64. More get `503 busy`. |
+| `MARKDOWN_CONVERT_WORKERS` | `1` | Conversion worker threads, 1 to 16. |
+| `MARKDOWN_WORKER_HEAP_MB` | `192` | The heap limit of each worker, 128 to 4,096. It also sets how many tags a page may have. |
+| `MARKDOWN_CACHE_MS` | `60000` | How long a converted page answers unpaid attempts from the cache. 1,000 to 86,400,000. Docker sets `120000`. |
+| `MARKDOWN_CACHE_ENTRIES` | `100` | 1 to 100,000. |
+| `MARKDOWN_CACHE_BYTES` | `33554432` | What the cached pages keep at most, 1 MiB to 1,024 MiB. |
+| `MARKDOWN_USER_AGENT` | `z402-markdown/0.1` | 1 to 256 printable ASCII characters. |
+| `MARKDOWN_TRUST_PROXY` | off | Express `trust proxy`: the number of proxies in front, or their addresses. `true` is refused, because the client writes the left-most `X-Forwarded-For` address itself. |
+
+### Text embeddings
+
+Port 4033, 100 zat per call of about 1,000 tokens. Ready while the provider lists `EMBEDDINGS_MODEL`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `EMBEDDINGS_BASE_URL` | `http://127.0.0.1:11434/v1` | The provider's OpenAI-style base URL, with no credentials in it. |
+| `EMBEDDINGS_API_KEY`, `EMBEDDINGS_API_KEY_FILE` | none | Sent as a bearer token. Visible ASCII without spaces. |
+| `EMBEDDINGS_MODEL` | `nomic-embed-text` | Not blank. |
+| `EMBEDDINGS_MAX_CHARS` | `4000` | The most characters in one call, summed over all inputs and counted in Unicode code points. 1 to 60,000. |
+| `EMBEDDINGS_MAX_INPUT_CHARS` | No limit below 60,000 | The most characters in one input string, 1 to 60,000. A local model with a short context needs it. |
+| `EMBEDDINGS_MAX_INPUTS` | `64` | The most strings in one call, 1 to 2,048. |
+
+### Encrypted drop box
+
+Port 4034, 500 zat per upload or hold of 10 blocks. One process per `DROPBOX_DIR`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DROPBOX_DIR` | `.data/dropbox` | Where the drops live, as `<id>.age` and `<id>.json`. Relative to the working directory. Not blank. |
+| `DROPBOX_MAX_BYTES` | `1048576` | The largest upload, 1 to 1 GiB. |
+| `DROPBOX_MAX_TOTAL_BYTES` | `268435456` | The largest total of all stored uploads. At least `DROPBOX_MAX_BYTES`. |
+| `DROPBOX_BLOCKS_PER_CALL` | `10` | Blocks one paid call buys, 1 to 1,000,000,000. |
+| `DROPBOX_MAX_HOLD_BLOCKS` | `1000` | A drop is never held more than this many blocks past the tip. At least `DROPBOX_BLOCKS_PER_CALL`. |
+| `DROPBOX_LWD_URL` | `http://127.0.0.1:28137` | The lightwalletd gRPC endpoint that gives the chain tip, which is the drop box's clock. |
+| `DROPBOX_TIP_POLL_MS` | `10000` | How often the tip is read, 100 to 30,000. |
+| `DROPBOX_RATE_PER_MIN` | `30` | Upload attempts per minute per client, refused before the body is read. 1 to 100,000. |
+
+### Demo API
+
+The demo resource server, with one paid route, `GET /chunk`. It reads no `PORT` or `HOST`: its own variables are below.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `Z402_NETWORK` | `regtest` | `regtest`, `testnet` or `mainnet`. The facilitator must offer `prepaid-voucher` on it. |
+| `Z402_FACILITATOR_URL` | none, required | The facilitator's `http://` or `https://` URL. There is no default on purpose, because an empty URL makes the x402 SDK send payments to x402.org. Off regtest, plain `http://` is allowed only to a loopback host. |
+| `Z402_FACILITATOR_TOKEN` | none | The provider's API key. Nothing is sent when it is unset. |
+| `Z402_PAY_TO` | `orchardOnlyAddress` of the keys file | The address every 402 names for deposits. Prefer it to the keys file. |
+| `Z402_MERCHANT_KEYS_FILE` | none | Used only when `Z402_PAY_TO` is unset. Only its `orchardOnlyAddress` is used. A file with a `seedHex` or `ufvk` key is refused on mainnet and gives a warning elsewhere. |
+| `Z402_PRICE_ZAT` | `500` | The price of one call, from 1 to the facilitator's `windowZat`. |
+| `Z402_API_HOST` | `127.0.0.1` | The listen address. Not blank. |
+| `Z402_API_PORT` | `4021` | 0 to 65,535. |
+
+## Website
+
+| Variable | Default | When it is read |
+| --- | --- | --- |
+| `DISCOVERY_URL` | `http://127.0.0.1:4022` | At request time, by the pages and the proxy. The facilitator, which hosts the Bazaar. A trailing slash is dropped. |
+| `NEXT_PUBLIC_REPO_URL` | unset | At build time. An `http(s)` URL. When set, the header and the footer link to the repository, and a source path in these docs becomes a link to that file on `main`. |
+| `PORT` | `3000` | By the standalone server. |
+| `HOSTNAME` | `0.0.0.0` | By the standalone server. |
+
+The proxy at `/discovery/*` passes on only `GET /discovery/resources` and `GET /discovery/search`, and only the query parameters each documents, with a 5 s timeout.
+
+## Agent and smoke test
+
+The agent and the smoke test read flags and no environment variables.
+
+### Agent
+
+`pnpm --filter @z402/agent demo [flags]`, or `docker compose run --rm agent [flags]`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--api <url>` | `http://127.0.0.1:4021` | A merchant's base URL. `GET <url>/chunk` is the paid call. |
+| `--url <url>` | none | A paid GET URL. Repeat it to call several in turn, with one session per payee. Takes the place of `--api`. |
+| `--calls <n>` | `150` | Paid calls per target. |
+| `--interval-ms <ms>` | `1000` | The pause between calls. `0` allowed. |
+| `--cheat` | off | Deposit once, then let the merchant refuse at its credit limit. One target only. |
+| `--network <id>` | `zcash:regtest` | `zcash:regtest`, `zcash:testnet` or `zcash:mainnet`. |
+| `--wallet <kind>` | `zallet` | `zallet`. The parser also accepts `zingo`, which is refused until Phase 2 (mainnet). |
+| `--zallet-url <url>` | `http://127.0.0.1:50232` | The Zallet JSON-RPC endpoint. |
+| `--zallet-user <user>` | `zebra` | Zallet's RPC user. |
+| `--zallet-password <pw>` | `zebra` | Zallet's RPC password. It shows in the process list, and the default is the public regtest one. |
+| `--lightwalletd <url>` | `http://127.0.0.1:28137` | A lightwalletd or Zaino gRPC endpoint, for deposit status. |
+
+### Discover
+
+`pnpm --filter @z402/agent discover [flags]`, or `docker compose run --rm discover [flags]`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--discovery <url>` | `http://127.0.0.1:4022` | A Bazaar endpoint: the facilitator, or the website that proxies it. No credentials, query or fragment. |
+| `--intent <text>` | none | Rank the list by word overlap with this text. It is matched on your machine and never sent. |
+| `--json` | off | Print the list as the service sent it. Cannot be combined with `--intent`. |
+
+### Smoke
+
+`pnpm --filter @z402/smoke start [flags]`, or `docker compose run --rm smoke [flags]`. A service without its flag is skipped, and a run with no service is a flag error.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--llm <url>`, `--markdown <url>`, `--embeddings <url>`, `--dropbox <url>` | none | The base URL of each service to check. No credentials, query or fragment. |
+| `--page <url>` | `https://example.com` | The page the markdown service fetches. |
+| `--network <id>` | `zcash:regtest` | The network. |
+| `--zallet-url <url>`, `--zallet-user <user>`, `--zallet-password <pw>` | `http://127.0.0.1:50232`, `zebra`, `zebra` | Zallet, as for the agent. |
+| `--lightwalletd <url>` | `http://127.0.0.1:28137` | Zaino, as for the agent. |
+
+Exit status: 0 when every step passed, 1 when a step failed or the wallet could not be used, 2 for a flag error.
+
+## Compose
+
+### Compose settings
+
+Copy `.env.example` to `.env` next to `compose.yaml` and change what you need. Every setting has the default shown. See [Deploy with Docker](/docs/guides/deploy-with-docker).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `Z402_PUBLISH_HOST` | `0.0.0.0` | The address published ports bind to. On a laptop use `127.0.0.1`. Docker's published ports bypass `ufw`. |
+| `Z402_WEB_PORT` | `3000` | Host port of the website. |
+| `Z402_API_PORT` | `4021` | Host port of the demo API. |
+| `Z402_LLM_PORT` | `4031` | Host port of `llm`. |
+| `Z402_MARKDOWN_PORT` | `4032` | Host port of `markdown`. |
+| `Z402_EMBEDDINGS_PORT` | `4033` | Host port of `embeddings`. |
+| `Z402_DROPBOX_PORT` | `4034` | Host port of `dropbox`. |
+| `Z402_BLOCK_SECONDS` | `25` | Seconds between the blocks the clock mines. Nothing confirms or expires without blocks. |
+| `Z402_PRICE_ZAT` | `500` | The price of the demo API's `GET /chunk`. Compose gives it to the demo API only: each starter service charges its own price. |
+| `Z402_REGISTRATION_TOKEN` | empty | The token a provider presents to register with the facilitator. A b64token, for example from `openssl rand -hex 32`. Empty leaves registration open, which is safe only while the facilitator's port stays unpublished. `markdown-register` sends it for provider 2. |
+| `Z402_LLM_HF_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M` | The local chat model, as llama.cpp `-hf <Hugging Face repo>:<quant>`. Needs at least a 10,240-token context. The service asks for the alias `qwen2.5-0.5b-instruct`, which stays. |
+| `Z402_EMBED_HF_MODEL` | `nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M` | The local embedding model. Needs at least a 2,048-token context. The alias `nomic-embed-text` stays. |
+| `Z402_LLM_MODEL_SCALE` | `1` | `1` runs the local chat model. `0` leaves it out once `services/llm/.env` names a hosted provider. |
+| `Z402_EMBED_MODEL_SCALE` | `1` | `1` runs the local embedding model. `0` leaves it out once `services/embeddings/.env` names a hosted provider. |
+
+To run a second stack beside a running one, `docker/test.env` sets `Z402_PUBLISH_HOST=127.0.0.1` and the ports `13000` and `14021` to `14034`:
+
+```bash
+docker compose -p z402test --env-file docker/test.env up -d
+```
+
+### Fixed by compose.yaml
+
+These cannot be changed from `.env` or from a service's own `.env`.
+
+| Setting | Value | Applies to |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | Every starter service |
+| `PORT` | `4031`, `4032`, `4033`, `4034` | `llm`, `markdown`, `embeddings`, `dropbox` |
+| `Z402_NETWORK` | `regtest` | The facilitator, the API and every service |
+| `Z402_FACILITATOR_URL` | `http://facilitator:4022` | The API and every service |
+| `Z402_FACILITATOR_TOKEN_FILE` | `/run/z402/facilitator-token` | `llm`, `embeddings`, `dropbox`. `markdown` uses `/run/markdown/api-key`. |
+| `Z402_PAY_TO_FILE` | `/run/z402/pay-to` | `llm`, `embeddings`, `dropbox`. `markdown` uses `/run/markdown/pay-to`. |
+| `Z402_FACILITATOR_TOKEN`, `Z402_PAY_TO` | empty | Every service, so that a value left in `services/<name>/.env` cannot shadow the files |
+| `Z402_LWD_URL` | `http://zaino:8137` | The facilitator |
+| `Z402_FACILITATOR_HOST`, `Z402_FACILITATOR_PORT` | `0.0.0.0`, `4022` | The facilitator |
+| `Z402_MERCHANT_KEYS_FILE` | `/keys/merchant-regtest.json` | The facilitator |
+| `Z402_LEDGER` | `/data/facilitator-ledger.regtest.jsonl` | The facilitator |
+| `Z402_PROVIDERS_DIR` | `/data/providers.regtest` | The facilitator |
+| `Z402_API_HOST`, `Z402_API_PORT` | `0.0.0.0`, `4021` | The API |
+| `DISCOVERY_URL`, `HOSTNAME`, `PORT` | `http://facilitator:4022`, `0.0.0.0`, `3000` | The website |
+
+The facilitator's start command reads its token from `/run/z402/facilitator-token` and exports it as `Z402_FACILITATOR_TOKEN`. The API's reads the token and the address from the same volume.
+
+### Docker defaults of the services
+
+Compose reads `docker/env/<name>.env` first and then `services/<name>/.env`, which wins.
+
+| File | Settings |
+| --- | --- |
+| `docker/env/llm.env` | `LLM_BASE_URL=http://llm-model:8080/v1`, `LLM_MODEL=qwen2.5-0.5b-instruct`, `PUBLIC_URL=http://localhost:4031`, `LLM_MAX_PROMPT_CHARS=1600` |
+| `docker/env/embeddings.env` | `EMBEDDINGS_BASE_URL=http://embed-model:8080/v1`, `EMBEDDINGS_MODEL=nomic-embed-text`, `EMBEDDINGS_MAX_CHARS=4000`, `EMBEDDINGS_MAX_INPUT_CHARS=2000`, `PUBLIC_URL=http://localhost:4033` |
+| `docker/env/dropbox.env` | `DROPBOX_LWD_URL=http://zaino:8137`, `DROPBOX_DIR=/data/dropbox`, `PUBLIC_URL=http://localhost:4034` |
+| `docker/env/markdown.env` | `PUBLIC_URL=http://localhost:4032`, `MARKDOWN_CACHE_MS=120000` |
+
+The prompt and string caps keep a call within the local models, because llama.cpp refuses a longer prompt only after the call is paid. With a hosted provider, an empty `LLM_MAX_PROMPT_CHARS=` or `EMBEDDINGS_MAX_INPUT_CHARS=` in the service's `.env` brings back the service's own limit.
+
+## Helper scripts and tests
+
+| Variable | Default | Used by |
+| --- | --- | --- |
+| `Z3_ZEBRA_RPC` | `http://127.0.0.1:29232` | `infra/z3` and the compose chain jobs. Compose sets `http://zebra:18232`. |
+| `Z3_ZALLET_RPC` | `http://127.0.0.1:50232` | The same. Compose sets `http://zallet:28232`. |
+| `Z3_ZAINO_GRPC` | `http://127.0.0.1:28137` | `infra/z3`. |
+| `Z3_RPC_USER`, `Z3_RPC_PASSWORD` | `zebra`, `zebra` | The Z3 RPC clients. Regtest only. |
+| `Z402_FACILITATOR_WAIT_MS` | `900000` | `docker/register-provider.mjs`, the `markdown-register` job: how long it retries a facilitator that is down or answers 5xx. |
+| `Z402_FACILITATOR_URL` | `http://127.0.0.1:4022` | `docker/register-provider.mjs` and `docker/wait-facilitator.mjs`. |
+| `Z402_LWD_URL` | `http://127.0.0.1:28137` | `docker/wait-lightwalletd.mjs`, which waits up to 600 s for Zaino before the facilitator starts. |
+| `ZDECRYPT_KEY` | none | The `zdecrypt` binary reads the viewing key from it and from nowhere else. The facilitator sets it for each run. |
+| `Z402_LIVE` | unset | Not a setting of a process. Switches on the live tests, which only read and need the Z3 stack. |
+
+<Cards>
+<Card title="Run the facilitator" href="/docs/guides/run-a-facilitator">What the facilitator needs and how to keep it safe.</Card>
+<Card title="Deploy with Docker" href="/docs/guides/deploy-with-docker">Compose, volumes, ports and updates.</Card>
+<Card title="Errors and reason codes" href="/docs/reference/errors">What a refused setting or call means.</Card>
+</Cards>
+
+## References
+
+- <Source path="packages/facilitator/src/config.ts" />: the facilitator's variables, defaults and messages.
+- <Source path="packages/facilitator/src/app.ts" />: the options of `startFacilitator`.
+- <Source path="packages/facilitator/README.md" />: the facilitator's environment table.
+- <Source path="packages/service-kit/src/env.ts" />: the variables every service shares.
+- <Source path="packages/service-kit/src/dotenv.ts" />: how a service reads its `.env`.
+- <Source path="services/llm/src/config.ts" />: the LLM service's variables.
+- <Source path="services/markdown/src/config.ts" />: the markdown service's variables.
+- <Source path="services/embeddings/src/config.ts" />: the embeddings service's variables.
+- <Source path="services/dropbox/src/config.ts" />: the drop box's variables.
+- <Source path="apps/api/src/config.ts" />: the demo API's variables.
+- <Source path="apps/web/src/lib/proxy.ts" />: the website's proxy and its default facilitator URL.
+- <Source path="apps/agent/src/flags.ts" />: the agent's flags.
+- <Source path="apps/smoke/src/flags.ts" />: the smoke test's flags.
+- <Source path="compose.yaml" />: what compose fixes.
+- <Source path=".env.example" />: the compose settings.
+- <Source path="docker/env/llm.env" />: the Docker defaults of `llm`, with `embeddings.env`, `dropbox.env` and `markdown.env` beside it.
+- <Source path="docker/test.env" />: the settings of a second stack.
+- <Source path="infra/z3/rpc.mjs" />: the Z3 helper variables.
+- [RFC 6750](https://datatracker.ietf.org/doc/html/rfc6750): the bearer token format.
