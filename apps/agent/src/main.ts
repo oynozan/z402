@@ -1,7 +1,7 @@
 import { constants } from "node:os";
 import { runAgent, type RunEnd } from "./agent.js";
 import { FlagError, parseFlags, USAGE, type Flags } from "./flags.js";
-import { stopAtDepositRefusal } from "./log.js";
+import { formatRunHeader, stopAtDepositRefusal, TargetTally } from "./log.js";
 import { createZcashClient, PreflightError, type ZcashClient } from "./zcash.js";
 
 const print = (line: string): void => console.log(line);
@@ -33,10 +33,8 @@ async function run(flags: Flags): Promise<number> {
     return e instanceof FlagError ? 2 : 1;
   }
 
-  print(
-    `z402 demo: ${flags.calls} calls to ${flags.api}/chunk every ${flags.intervalMs} ms on ${flags.network}` +
-      (flags.cheat ? ", cheating after one deposit" : ""),
-  );
+  for (const line of formatRunHeader(flags)) print(line);
+  const tally = flags.targets.length > 1 ? new TargetTally(flags.targets) : undefined;
   let end: RunEnd;
   try {
     end = await runAgent({
@@ -45,10 +43,12 @@ async function run(flags: Flags): Promise<number> {
       print,
       signal: abort.signal,
       ...(flags.cheat ? { shouldStop: stopAtDepositRefusal } : {}),
+      ...(tally === undefined ? {} : { onCall: (target, outcome) => tally.record(target, outcome) }),
     });
   } finally {
     await zcash.close().catch((e: unknown) => console.error(`closing the wallet failed: ${e instanceof Error ? e.message : e}`));
   }
+  if (tally !== undefined) for (const line of tally.lines(zcash.zcashClientScheme.sessions())) print(line);
   print(ENDINGS[end]);
   if (end === "failed") return 1;
   return signalled === undefined ? 0 : 128 + constants.signals[signalled];

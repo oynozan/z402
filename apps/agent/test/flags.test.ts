@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { FlagError, parseFlags, USAGE, type Flags } from "../src/flags.js";
 
 const DEFAULTS: Flags = {
-  api: "http://127.0.0.1:4021",
+  targets: ["http://127.0.0.1:4021/chunk"],
   calls: 150,
   intervalMs: 1000,
   cheat: false,
@@ -36,7 +36,7 @@ describe("parseFlags", () => {
       "--lightwalletd", "https://testnet.zec.rocks:443",
     ]);
     expect(flags).toEqual({
-      api: "https://api.example.com",
+      targets: ["https://api.example.com/chunk"],
       calls: 7,
       intervalMs: 250,
       cheat: false,
@@ -57,8 +57,40 @@ describe("parseFlags", () => {
     expect(parseFlags(["--", "--cheat"])).toEqual({ ...DEFAULTS, cheat: true });
   });
 
-  it("drops trailing slashes from --api, so the loop can append /chunk", () => {
-    expect(parseFlags(["--api", "http://127.0.0.1:4021/"]).api).toBe("http://127.0.0.1:4021");
+  it("drops trailing slashes from --api before appending /chunk", () => {
+    expect(parseFlags(["--api", "http://127.0.0.1:4021/"]).targets).toEqual(["http://127.0.0.1:4021/chunk"]);
+  });
+
+  describe("--url", () => {
+    it("replaces the default target with the URL as given", () => {
+      expect(parseFlags(["--url", "http://127.0.0.1:4023/chunk"]).targets).toEqual(["http://127.0.0.1:4023/chunk"]);
+    });
+
+    it("repeats for several targets, kept in order", () => {
+      const flags = parseFlags(["--url", "http://127.0.0.1:4021/chunk", "--url", "http://127.0.0.1:4023/chunk?size=2"]);
+      expect(flags.targets).toEqual(["http://127.0.0.1:4021/chunk", "http://127.0.0.1:4023/chunk?size=2"]);
+    });
+
+    it("takes the place of --api, so a --url after the compose entrypoint's --api wins", () => {
+      expect(parseFlags(["--api", "http://a.test", "--url", "http://b.test/x"]).targets).toEqual(["http://b.test/x"]);
+      expect(parseFlags(["--api", "http://a.test", "--url", "http://a.test/chunk"]).targets).toEqual(["http://a.test/chunk"]);
+    });
+
+    it("leaves --cheat alone with one --url, whatever --api says", () => {
+      expect(parseFlags(["--cheat", "--api", "http://a.test", "--url", "http://b.test/x"])).toMatchObject({ cheat: true, targets: ["http://b.test/x"] });
+    });
+
+    it.each([
+      [["--url", "not a url"], /--url/],
+      [["--url", "ftp://127.0.0.1/x"], /--url/],
+      [["--url", "http://user:pw@127.0.0.1/x"], /--url: .*credentials/],
+      [["--url", "http://a.test/x", "--url", "http://a.test:80/x"], /--url: .*twice/],
+      [["--api", "http://user:pw@127.0.0.1"], /--api: .*credentials/],
+      [["--cheat", "--url", "http://a.test/x", "--url", "http://b.test/x"], /--cheat: .*one target, got 2/],
+    ])("rejects %j with a FlagError", (argv, message) => {
+      expect(() => parseFlags(argv)).toThrow(FlagError);
+      expect(() => parseFlags(argv)).toThrow(message);
+    });
   });
 
   it.each([
@@ -84,7 +116,8 @@ describe("parseFlags", () => {
   });
 
   it("documents every flag in the usage text", () => {
-    for (const flag of Object.keys(DEFAULTS).map((k) => k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`))) {
+    const fields = Object.keys(DEFAULTS).filter((k) => k !== "targets");
+    for (const flag of [...fields.map((k) => k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)), "api", "url"]) {
       expect(USAGE, flag).toContain(`--${flag}`);
     }
   });

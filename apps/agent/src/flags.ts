@@ -5,8 +5,9 @@ import { Z3_DEFAULTS } from "./z3.js";
 export type WalletKind = "zallet" | "zingo";
 
 export interface Flags {
-  /** The merchant's base URL, without a trailing slash */
-  api: string;
+  /** The paid GET URLs, called in turn */
+  targets: readonly string[];
+  /** Per target */
   calls: number;
   intervalMs: number;
   /** One deposit, then none, so the merchant refuses at its credit limit */
@@ -29,9 +30,11 @@ export class FlagError extends Error {
 export const USAGE = `usage: pnpm --filter @z402/agent demo [flags]
 
   --api <url>              merchant base URL, GET <url>/chunk is the paid call   (http://127.0.0.1:4021)
-  --calls <n>              number of paid calls                                  (150)
+  --url <url>              a paid GET URL; repeat it to call several in turn     (in place of --api)
+                           with one session per payee
+  --calls <n>              number of paid calls per target                       (150)
   --interval-ms <ms>       pause between calls                                   (1000)
-  --cheat                  deposit once, then let the merchant refuse at its credit limit
+  --cheat                  deposit once, then let the merchant refuse at its credit limit (one target)
   --network <id>           zcash:regtest | zcash:testnet | zcash:mainnet         (zcash:regtest)
   --wallet <kind>          zallet (zingo arrives in Phase 2)                     (zallet)
   --zallet-url <url>       Zallet JSON-RPC endpoint                              (http://127.0.0.1:50232)
@@ -40,8 +43,10 @@ export const USAGE = `usage: pnpm --filter @z402/agent demo [flags]
   --lightwalletd <url>     lightwalletd or Zaino gRPC, for deposit status        (http://127.0.0.1:28137)
   --help                   print this text`;
 
+const DEFAULT_API = "http://127.0.0.1:4021";
+
 export const FLAG_DEFAULTS: Flags = Object.freeze({
-  api: "http://127.0.0.1:4021",
+  targets: Object.freeze([`${DEFAULT_API}/chunk`]),
   calls: 150,
   intervalMs: 1000,
   cheat: false,
@@ -72,6 +77,28 @@ function httpUrl(flag: string, raw: string): string {
   return raw;
 }
 
+function targetUrl(flag: string, raw: string): URL {
+  const url = new URL(httpUrl(flag, raw));
+  if (url.username !== "" || url.password !== "") throw new FlagError(`${flag}: expected a URL without credentials, got ${JSON.stringify(raw)}`);
+  return url;
+}
+
+/** Every --url, in order, or else the /chunk of --api */
+function targetsOf(api: string | undefined, urls: readonly string[]): string[] {
+  if (urls.length === 0) {
+    if (api === undefined) return [...FLAG_DEFAULTS.targets];
+    targetUrl("--api", api);
+    return [`${api.replace(/\/+$/, "")}/chunk`];
+  }
+  const targets: string[] = [];
+  for (const raw of urls) {
+    const { href } = targetUrl("--url", raw);
+    if (targets.includes(href)) throw new FlagError(`--url: ${href} is a target twice`);
+    targets.push(href);
+  }
+  return targets;
+}
+
 export function parseFlags(argv: readonly string[]): Flags {
   // pnpm forwards the -- of pnpm demo -- --cheat
   const args = argv[0] === "--" ? argv.slice(1) : argv;
@@ -81,6 +108,7 @@ export function parseFlags(argv: readonly string[]): Flags {
       args: [...args],
       options: {
         api: { type: "string" },
+        url: { type: "string", multiple: true },
         calls: { type: "string" },
         "interval-ms": { type: "string" },
         cheat: { type: "boolean" },
@@ -109,11 +137,15 @@ export function parseFlags(argv: readonly string[]): Flags {
     throw new FlagError(`--wallet: expected zallet or zingo, got ${JSON.stringify(wallet)}`);
   }
 
+  const targets = targetsOf(values.api, values.url ?? []);
+  const cheat = values.cheat ?? d.cheat;
+  if (cheat && targets.length > 1) throw new FlagError(`--cheat: takes one target, got ${targets.length}`);
+
   return {
-    api: httpUrl("--api", values.api ?? d.api).replace(/\/+$/, ""),
+    targets,
     calls: values.calls === undefined ? d.calls : integer("--calls", values.calls, 1),
     intervalMs: values["interval-ms"] === undefined ? d.intervalMs : integer("--interval-ms", values["interval-ms"], 0),
-    cheat: values.cheat ?? d.cheat,
+    cheat,
     network,
     wallet,
     zalletUrl: values["zallet-url"] ?? d.zalletUrl,

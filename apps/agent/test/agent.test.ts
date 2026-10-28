@@ -119,16 +119,90 @@ describe("runAgent", () => {
     ]);
   });
 
-  it("calls the --api it is given", async () => {
+  it("calls the target it is given", async () => {
     const seen: string[] = [];
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       seen.push(new Request(input).url);
       return paid(500);
     });
 
-    await runAgent({ flags: flags({ calls: 1, api: "http://merchant.test:9000" }), zcashClientScheme: scheme, print: () => {} });
+    await runAgent({ flags: flags({ calls: 1, targets: ["http://merchant.test:9000/chunk"] }), zcashClientScheme: scheme, print: () => {} });
 
     expect(seen).toEqual(["http://merchant.test:9000/chunk"]);
+  });
+
+  describe("several targets", () => {
+    const A = "http://a.test:4021/chunk";
+    const B = "http://b.test:4023/chunk";
+
+    it("calls them in turn, --calls times each, and tags each line with its target", async () => {
+      const seen: string[] = [];
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+        const url = new Request(input).url;
+        seen.push(url);
+        return paid(seen.filter((u) => u === url).length * (url === A ? 500 : 800));
+      });
+      const { print, out } = lines();
+
+      const end = await runAgent({ flags: flags({ calls: 2, targets: [A, B] }), zcashClientScheme: scheme, print });
+
+      expect(end).toBe("finished");
+      expect(seen).toEqual([A, B, A, B]);
+      expect(out.map((l) => l.slice(0, l.indexOf("  limit")))).toEqual([
+        "#001 [1] 200  c=500",
+        "#002 [2] 200  c=800",
+        "#003 [1] 200  c=1,000",
+        "#004 [2] 200  c=1,600",
+      ]);
+    });
+
+    it("hands each outcome to onCall with its 0-based target", async () => {
+      let n = 0;
+      vi.stubGlobal("fetch", async () => paid(++n * 500));
+      const calls: Array<[number, string | undefined]> = [];
+
+      await runAgent({
+        flags: flags({ calls: 2, targets: [A, B] }),
+        zcashClientScheme: scheme,
+        print: () => {},
+        onCall: (target, outcome) => calls.push([target, outcome.snapshot?.cumulativeZat]),
+      });
+
+      expect(calls).toEqual([
+        [0, "500"],
+        [1, "1000"],
+        [0, "1500"],
+        [1, "2000"],
+      ]);
+    });
+
+    it("tags the line of a call that throws", async () => {
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+        if (new Request(input).url === B) throw new TypeError("fetch failed");
+        return paid(500);
+      });
+      const { print, out } = lines();
+
+      const end = await runAgent({ flags: flags({ calls: 3, targets: [A, B] }), zcashClientScheme: scheme, print });
+
+      expect(end).toBe("failed");
+      expect(out[1]).toBe("#002 [2] ERROR  fetch failed");
+    });
+
+    it("waits no interval after the very last call", async () => {
+      const starts: number[] = [];
+      vi.stubGlobal("fetch", async () => {
+        starts.push(Date.now());
+        return paid(500);
+      });
+
+      await runAgent({ flags: flags({ calls: 1, intervalMs: 150, targets: [A, B] }), zcashClientScheme: scheme, print: () => {} });
+      const finished = Date.now();
+
+      expect(starts).toHaveLength(2);
+      expect(starts[1]! - starts[0]!).toBeGreaterThanOrEqual(140);
+      expect(finished - starts[1]!).toBeLessThan(100);
+    });
   });
 
   it("paces the calls by --interval-ms, counted from the start of each call", async () => {

@@ -3,6 +3,7 @@ import type { SettleResponse } from "@x402/core/types";
 import { decodePaymentResponseHeader } from "@x402/fetch";
 import type { ClientEvent } from "@z402/client";
 import { parseSessionSnapshot, REASON, type SessionSnapshot } from "@z402/protocol";
+import type { Flags } from "./flags.js";
 
 export function formatZat(zat: string | bigint): string {
   return zat.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -17,13 +18,27 @@ export function shortHex(hex: string): string {
   return hex.length <= 8 ? hex : `${hex.slice(0, 4)}…${hex.slice(-2)}`;
 }
 
-function callHead(i: number, status: number | string): string {
-  return `#${String(i).padStart(3, "0")} ${status}`;
+/** First 12 and last 6 characters, uregtest1etw…35axkz */
+export function shortAddress(address: string): string {
+  return address.length <= 20 ? address : `${address.slice(0, 12)}…${address.slice(-6)}`;
+}
+
+/** `target` is the 1-based tag a run with several targets puts on each line */
+function callHead(i: number, status: number | string, target?: number): string {
+  return `#${String(i).padStart(3, "0")}${target === undefined ? "" : ` [${target}]`} ${status}`;
+}
+
+/** What the run is about to do, with one line per target when there are several */
+export function formatRunHeader(flags: Flags): string[] {
+  const { targets } = flags;
+  const what = targets.length === 1 ? `to ${targets[0]}` : `to each of ${targets.length} targets, in turn,`;
+  const head = `z402 demo: ${flags.calls} calls ${what} every ${flags.intervalMs} ms on ${flags.network}`;
+  return [head + (flags.cheat ? ", cheating after one deposit" : ""), ...(targets.length === 1 ? [] : targets.map((url, t) => `  [${t + 1}] ${url}`))];
 }
 
 /** One line per paid call, a refusal swaps limit= for the code and the limit */
-export function formatCallLine(i: number, status: number, snap?: SessionSnapshot, error?: string): string {
-  const head = callHead(i, status);
+export function formatCallLine(i: number, status: number, snap?: SessionSnapshot, error?: string, target?: number): string {
+  const head = callHead(i, status, target);
   if (snap === undefined) return error === undefined ? head : `${head}  REFUSED ${error}`;
   const stats = [
     `c=${formatZat(snap.cumulativeZat)}`,
@@ -46,8 +61,8 @@ function describe(error: unknown): string {
   return typeof code === "string" ? `${error.message}: ${code}` : error.message;
 }
 
-export function formatCallFailure(i: number, error: unknown): string {
-  return `${callHead(i, "ERROR")}  ${describe(error)}`;
+export function formatCallFailure(i: number, error: unknown, target?: number): string {
+  return `${callHead(i, "ERROR", target)}  ${describe(error)}`;
 }
 
 const EVENT_PREFIX = "  * ";
@@ -96,6 +111,35 @@ function eventText(e: ClientEvent): string | undefined {
 export interface CallOutcome {
   snapshot?: SessionSnapshot;
   error?: string;
+}
+
+/** What each target of a run came to, its payee found by the session key its snapshots carry */
+export class TargetTally {
+  readonly #paid: number[];
+  readonly #last: (SessionSnapshot | undefined)[];
+
+  constructor(targets: readonly string[]) {
+    this.#paid = targets.map(() => 0);
+    this.#last = targets.map(() => undefined);
+  }
+
+  /** `target` is 0-based */
+  record(target: number, outcome: CallOutcome): void {
+    if (outcome.snapshot === undefined) return;
+    this.#last[target] = outcome.snapshot;
+    if (outcome.error === undefined) this.#paid[target]! += 1;
+  }
+
+  lines(sessions: readonly { payTo: string; sessionKey: string }[]): string[] {
+    const rows = this.#last.map((snap, t) => {
+      const head = `  [${t + 1}] ${this.#paid[t]} paid`;
+      if (snap === undefined) return `${head}, no session seen`;
+      const payTo = sessions.find((s) => s.sessionKey === snap.sessionKey)?.payTo;
+      const payee = payTo === undefined ? "" : `  payTo ${shortAddress(payTo)}`;
+      return `${head}  c=${formatZat(snap.cumulativeZat)}  session ${shortHex(snap.sessionKey)}${payee}  deposits ${snap.deposits.length}`;
+    });
+    return ["per target:", ...rows];
+  }
 }
 
 /** The cheat agent cannot pay a second deposit, so this refusal ends the run */
