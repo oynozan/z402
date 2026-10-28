@@ -330,9 +330,9 @@ interface OpenLedger {
 }
 
 /** Locks the file, proves it can be written, then replays it, so a facilitator that says ready can record a settle */
-function openLedger(path: string | undefined): OpenLedger {
+async function openLedger(path: string | undefined): Promise<OpenLedger> {
   if (path === undefined) return { ledger: new Ledger(), state: new FacilitatorState(), release: () => undefined };
-  const release = lockLedger(path);
+  const release = await lockLedger(path);
   try {
     writable(path);
     return { ...replayed(path), release };
@@ -384,7 +384,7 @@ function listen(app: Express, host: string, port: number, log: Log): Promise<Ser
 /** Opens the ledger, polls the chain once, then listens, and a failed poll does not stop the start */
 export async function startFacilitator(o: FacilitatorOptions): Promise<FacilitatorHandle> {
   checkOptions(o);
-  const opened = openLedger(o.ledgerPath);
+  const opened = await openLedger(o.ledgerPath);
   try {
     return await serve(o, opened);
   } catch (e) {

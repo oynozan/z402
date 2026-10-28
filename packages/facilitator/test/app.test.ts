@@ -1,4 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -913,6 +922,17 @@ describe("startFacilitator", () => {
     // A start that got past the lock would write the confirmation in its first poll
     first.chain.mine(1);
     await expect(boot({ ledgerPath }, first.chain)).rejects.toThrow(/^ledgerPath: .*already open/);
+
+    expect(readFileSync(ledgerPath)).toEqual(before);
+  });
+
+  test("a refused start never touches the ledger it finds held, not even to cut a torn tail", async () => {
+    const ledgerPath = join(scratch, "held-torn.jsonl");
+    await boot({ ledgerPath });
+    appendFileSync(ledgerPath, '{"t":"voucher","sessionK');
+    const before = readFileSync(ledgerPath);
+
+    await expect(boot({ ledgerPath })).rejects.toThrow(/^ledgerPath: .*already open/);
 
     expect(readFileSync(ledgerPath)).toEqual(before);
   });
