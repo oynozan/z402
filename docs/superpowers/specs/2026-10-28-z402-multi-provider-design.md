@@ -86,7 +86,7 @@ Today's deployments and every existing caller of `startFacilitator` therefore ke
 
 ### 4.1 Providers and API keys
 
-**`POST /providers`.** Public unless `Z402_REGISTRATION_TOKEN` is set; then `Authorization: Bearer <registration token>` is required.
+**`POST /providers`.** Public unless `Z402_REGISTRATION_TOKEN` (at least 32 characters) is set; then `Authorization: Bearer <registration token>` is required. While registration is open, every start logs a warning. On mainnet, open registration is off unless `Z402_REGISTRATION_OPEN=1`; without a token or that opt-in, the operator still serves and `POST /providers` answers `403 registration_disabled` (R13).
 - Body: `{"payTo": "<UA>", "uivk": "<UIVK>", "network"?: "<network>"}`.
 - `payTo` must pass `isValidPayTo(payTo, network)`. `uivk` must match the network's UIVK pattern (config.ts). `network`, if given, must be the facilitator's network.
 - The UIVK must own `payTo`: zdecrypt `owns --address <payTo> --network <n>` with the key in `ZDECRYPT_KEY` must answer `ownedByKey: true` and `hasTransparent: false`.
@@ -146,7 +146,7 @@ The catalog is keyed by (`providerId`, canonical resource, HTTP method). The can
    - The kit re-declares every 30 s. That heartbeat is the liveness signal, and declaring one service never removes another service's items.
 2. **Settled payments.** On every successful settle, the item of that provider whose canonical resource and method match the payment gets `lastUpdated` = now and `paidCallsToday` + 1.
    - The resource comes from `paymentPayload.resource.url` and `extensions.bazaar.routeTemplate`. The method comes from `extensions.bazaar.info.input.method`.
-   - A provider that has never declared anything is listed from its payments, as standard Bazaar facilitators do. A matching item is created from `paymentRequirements` (the server's, not the client's `accepted`), the sanitized `resource` metadata, and the `bazaar` extension.
+   - A provider that has never declared anything is listed from its payments, as standard Bazaar facilitators do. A matching item is created from server-verified fields only: the canonical URL, `accepts` from `paymentRequirements` (the server's, not the client's `accepted`), a valid `mimeType`, and the sanitized `bazaar` extension. A payment never supplies `description`, `serviceName`, `tags` or `iconUrl`, and at most 8 payment-sourced items exist per provider (R11).
    - **Once a provider has declared anything, its settled payments only update matching declared items, and never create one.** In a payment, `resource.url` and `extensions.bazaar` are echoed by the client. Without this rule, any payer could add a listing with any URL and description under a declaring provider's `payTo`, for the price of one call.
    - **A provider's first declaration removes its payment-sourced items** that the declaration does not itself declare, and is written to disk (fsync, rename) before the answer. A declaring flag lost to a crash or a corrupt file then lets a payment-created item live only until the provider's next heartbeat.
    - Client-echoed data never overwrites a declared item.
@@ -160,6 +160,7 @@ The catalog is keyed by (`providerId`, canonical resource, HTTP method). The can
   - `tags` at most 5, each 1–32 printable ASCII, deduplicated without case;
   - `iconUrl`: the `@x402/extensions` `isValidIconUrl` rule (http(s), at most 2048, no userinfo, IP literal or loopback host).
 - `extensions`: a plain JSON object of at most 8 KB serialized. It is kept as declared (the kit sends `bazaar` and `z402`). `extensions.bazaar.info.input.method`, when present, must be one of GET, POST, PUT, PATCH, DELETE or HEAD; it is the item's method, GET when absent.
+- `payTo` is at most 1024 characters (registration, operator config, registry load), and the catalog holds at most 16 MiB of items (R12).
 - At most 128 items per provider and 4096 in all. Past either cap, a new item is refused (a declaration gets 400) or not created (a payment), and either way it is logged once.
 
 **`GET /discovery/resources`** (public). Exactly what `withBazaar(client).extensions.bazaar.listResources()` calls.
@@ -316,5 +317,7 @@ Until each step lands, the others build against this section's shapes.
 - **Failure scope.** A ledger write failure or a lost lock in one runtime restarts the whole process (§4.5).
 - **Duplicate listings.** Two providers can list the same URL. The catalog shows each with its own `payTo`, and the resource's 402 is authoritative.
 - **Rate limiting.** The public routes have none.
+- **Payment-sourced listings.** For a provider that never declares, a payer still chooses the listed URL, of up to 8 items. `accepts` and the price are the server's, and the 402 the URL returns stays authoritative. Providers that care declare.
+- **Removal.** A provider or an item is removed by hand (facilitator README, "Removing a provider").
 - **Growth.** Ledgers and state grow without bound, per provider, as before.
 - **Polling.** Each runtime polls the shared, cached tip every 5 s.
