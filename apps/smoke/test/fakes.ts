@@ -76,7 +76,7 @@ export class FakeServices {
     return this.#o.chunks ?? DEFAULT_CHUNKS;
   }
 
-  async build(env: ServiceEnv): Promise<Express> {
+  async build(env: ServiceEnv): Promise<{ app: Express; close(): Promise<void> }> {
     const paid = new Set<RouteKey>([...DEFAULT_PAID, ...(this.#o.paywalled ?? [])]);
     for (const key of this.#o.unpaid ?? []) paid.delete(key);
     const entries = this.entries().map((e) => {
@@ -85,7 +85,7 @@ export class FakeServices {
       return { ...e, checks: this.#o.prepare?.[e.key] ?? e.checks, handler };
     });
 
-    const { app } = await createPaidService({
+    const service = await createPaidService({
       env,
       service: {
         serviceName: "Fake starter services",
@@ -104,6 +104,7 @@ export class FakeServices {
           ),
       },
     });
+    const { app } = service;
     for (const e of entries) {
       // A route behind the paywall has its checks in front of the payment middleware already
       const chain = [...(paid.has(e.key) ? [] : e.checks), e.handler];
@@ -118,7 +119,7 @@ export class FakeServices {
       next();
     });
     root.use(app);
-    return root;
+    return { app: root, close: service.close };
   }
 
   private entries(): Entry[] {

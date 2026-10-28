@@ -1,8 +1,8 @@
 /**
  * The paying client, built the way the demo agent builds its own (apps/agent/src/zcash.ts and agent.ts): the
  * prepaid-voucher scheme over a Zallet wallet and a chain status read from lightwalletd, registered on the stock x402
- * client for one network, and the stock fetch wrapper over it. All the starter services share one merchant, so one
- * session, and one deposit, pays for every call.
+ * client for one network, and the stock fetch wrapper over it. The client keeps one session, and makes one deposit, for
+ * each merchant it pays, so the services that share a merchant share them.
  */
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
 import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet, type PrepaidVoucherSchemeOptions } from "@z402/client";
@@ -111,7 +111,7 @@ export async function createPayer(flags: Flags, warn: (line: string) => void, de
       const session = scheme.session(payTo, flags.network);
       return session === undefined ? [] : [{ payTo, cumulativeZat: session.cumulativeZat }];
     });
-    // The services share one merchant, so a voucher still out is that merchant's
+    // A voucher event does not name its merchant, so a voucher still out is counted only when there is one
     const [only] = lines;
     if (lines.length !== 1 || only === undefined || unanswered === undefined) return lines;
     return [{ ...only, cumulativeZat: only.cumulativeZat > unanswered ? only.cumulativeZat : unanswered }];

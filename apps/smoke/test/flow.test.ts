@@ -1,7 +1,8 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { decodePaymentSignatureHeader, encodePaymentSignatureHeader } from "@x402/core/http";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { startTestStack, TEST_PAY_TO, type TestStack, type TestStackOptions } from "@z402/service-kit/testing";
+import { startTestStack, TEST_NETWORK, TEST_PAY_TO, type TestStack } from "@z402/service-kit/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SERVICE_NAMES, type ServiceName } from "../src/flags.js";
 import { runFlow, type FlowOptions, type FlowResult } from "../src/flow.js";
@@ -26,7 +27,6 @@ interface Setup {
   only?: ServiceName[];
   page?: string;
   flow?: Partial<Omit<FlowOptions, "services" | "page" | "paidFetch" | "print">>;
-  stack?: Partial<TestStackOptions>;
   onLine?: (line: string) => void;
 }
 
@@ -41,7 +41,7 @@ interface Run {
 
 async function smoke(setup: Setup = {}): Promise<Run> {
   const fake = new FakeServices(setup.fake);
-  const stack = await startTestStack({ build: (env) => fake.build(env), ...setup.stack });
+  const stack = await startTestStack({ build: (env) => fake.build(env) });
   stacks.push(stack);
   const vouchered = (): bigint => stack.scheme.session(TEST_PAY_TO)?.cumulativeZat ?? 0n;
   const lines: string[] = [];
@@ -289,14 +289,79 @@ describe("a step that fails", () => {
     expect(fake.requests).toEqual(["GET /v1/markdown"]);
   });
 
-  it("a voucher the service refuses is shown with the reason from its 402", async () => {
-    // The service asks for 600 zat and the facilitator takes only 500
-    const { lines, result } = await smoke({ only: ["markdown"], stack: { env: { priceZat: 600n } } });
-    const line = find(lines, "markdown", "get");
-    expect(line.status).toBe("402");
-    expect(line.detail).toMatch(/^FAIL expected 200, got 402: /);
-    expect(line.detail.length).toBeGreaterThan("FAIL expected 200, got 402: ".length + 5);
+  it("a voucher the facilitator refuses is shown with the reason from its 402, and was not charged", async () => {
+    const fake = new FakeServices();
+    const stack = await startTestStack({ build: (env) => fake.build(env) });
+    stacks.push(stack);
+    // Every voucher leaves with a broken signature, which the facilitator refuses whatever the route costs
+    const breaking: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const header = request.headers.get("payment-signature");
+      if (header !== null) {
+        const payment = decodePaymentSignatureHeader(header);
+        const sig = String(payment.payload["sig"]);
+        payment.payload = { ...payment.payload, sig: `${sig.startsWith("0") ? "1" : "0"}${sig.slice(1)}` };
+        request.headers.set("payment-signature", encodePaymentSignatureHeader(payment));
+      }
+      return fetch(request);
+    };
+    const paidFetch = wrapFetchWithPayment(breaking, new x402Client().register(TEST_NETWORK, stack.scheme));
+    const lines: string[] = [];
+    const result = await runFlow({
+      services: { markdown: stack.url },
+      page: "https://example.com",
+      paidFetch,
+      print: (line) => lines.push(line),
+      spent: () => stack.scheme.session(TEST_PAY_TO)?.cumulativeZat ?? 0n,
+    });
+    expect(find(lines, "markdown", "get")).toMatchObject({
+      status: "402",
+      detail: "FAIL expected 200, got 402: payment refused: z402_invalid_signature (not charged)",
+    });
+    expect(fake.markdownUrls).toEqual([]);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("prices", () => {
+  it("each paid line shows what its own call cost, since every service sets its own price", async () => {
+    const fake = new FakeServices();
+    const stack = await startTestStack({ build: (env) => fake.build(env) });
+    stacks.push(stack);
+    // The stack's facilitator takes 500 zat a call, so the payer counts each call at its service's price instead
+    const prices: [RegExp, bigint][] = [
+      [/^\/v1\/generate$/, 200n],
+      [/^\/v1\/markdown$/, 1_000n],
+      [/^\/v1\/embeddings$/, 100n],
+      [/^\/v1\/drops/, 500n],
+    ];
+    let spent = 0n;
+    const paidFetch: typeof fetch = async (input, init) => {
+      const res = await stack.paidFetch(input, init);
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      if (res.headers.has("payment-response")) spent += prices.find(([route]) => route.test(path))?.[1] ?? 0n;
+      return res;
+    };
+    const lines: string[] = [];
+    const result = await runFlow({
+      services: Object.fromEntries(SERVICE_NAMES.map((name) => [name, stack.url])),
+      page: "https://example.com",
+      paidFetch,
+      print: (line) => lines.push(line),
+      spent: () => spent,
+    });
+    expect(result.ok).toBe(true);
+    expect(lines.map((l) => /\((\d+) zat\)$/.exec(parse(l).detail)?.[1] ?? "free")).toEqual([
+      "200",
+      "200",
+      "200",
+      "1000",
+      "100",
+      "500",
+      "500",
+      "free",
+      "free",
+    ]);
   });
 });
 
