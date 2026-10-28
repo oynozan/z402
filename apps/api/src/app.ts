@@ -62,6 +62,11 @@ const DEFAULT_HOST = "127.0.0.1";
 /** Covers verify's worst case, the 30 s deposit wait, the inspect and tip that end it, and the 5 s refresh bound */
 const FACILITATOR_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_SECONDS = 60;
+/** How the Bazaar and the website's catalog name the route: its service, category, line and unit of sale */
+const SERVICE_NAME = "Demo API";
+const SERVICE_TAGS = ["demo"];
+const CHUNK_DESCRIPTION = "One numbered chunk of demo data per paid call";
+const CHUNK_UNIT = "chunk";
 const X402_VERSION = 2;
 const MAX_CAUSES = 5;
 /** The longest delay setTimeout honours, past which Node fires it after 1 ms */
@@ -248,8 +253,12 @@ async function buildApi(o: ApiOptions): Promise<{ app: Express; http: x402HTTPRe
       },
       // The 402 names the resource that is declared, so that a settled payment matches its item
       ...(publicUrl !== undefined && { resource: `${publicUrl.replace(/\/+$/, "")}${CHUNK_PATH}` }),
+      description: CHUNK_DESCRIPTION,
       mimeType: "application/json",
-      extensions: { bazaar: bazaarExtension(priceZat) },
+      // The names and unit the website's catalog shows, in the shape the service kit gives its routes
+      serviceName: SERVICE_NAME,
+      tags: SERVICE_TAGS,
+      extensions: { bazaar: bazaarExtension(priceZat), z402: { unit: CHUNK_UNIT } },
     },
   };
   const http = new x402HTTPResourceServer(server, routes);
