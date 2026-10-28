@@ -155,7 +155,7 @@ function Endpoint({ routes }: { routes: RouteRow[] }) {
 function RouteDetail({ route, copyCall }: { route: RouteRow; copyCall: boolean }) {
   const name = `${route.method} ${route.path}`;
   return (
-    <div className="d-grid">
+    <div className="d-grid d-route">
       <section className="d-cell">
         <div className="d-head">
           <h3 className="d-label">About</h3>

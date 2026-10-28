@@ -1171,7 +1171,7 @@ pre {
   text-transform: none;
   white-space: normal;
 }
-/* ABOUT under SERVICE, REQUEST and RESPONSE split the rest on a column line, and the terms keep the same three cells */
+/* The first cell under SERVICE, and the terms split the rest on a column line */
 .d-grid {
   display: grid;
   grid-template-columns: var(--w-name) var(--w-request) minmax(0, 1fr);
@@ -1179,6 +1179,19 @@ pre {
 }
 .d-grid:last-child {
   border-bottom: 0;
+}
+/* A route stacks REQUEST over RESPONSE beside ABOUT, which gives code the width to keep its lines whole */
+@media (min-width: 1025px) {
+  .d-route {
+    grid-template-columns: var(--w-name) minmax(0, 1fr);
+  }
+  .d-route > .d-cell:first-child {
+    grid-row: span 2;
+  }
+  .d-route > .d-cell:nth-child(2) {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
 }
 .d-cell {
   min-width: 0;
@@ -1237,7 +1250,7 @@ pre {
   scrollbar-color: var(--strong) transparent;
   scrollbar-width: thin;
 }
-/* Wrapped hard at the edge, as a terminal wraps, so a long token never leaves a ragged stub */
+/* Never wrapped, since a wrap splits a token or strands a curl's closing backslash; a longer line scrolls */
 .d-code {
   max-height: 320px;
   margin: 8px 0 0;
@@ -1246,8 +1259,7 @@ pre {
   background: var(--card);
   font: 400 12px/16px var(--mono);
   letter-spacing: 0;
-  white-space: pre-wrap;
-  word-break: break-all;
+  white-space: pre;
 }
 .d-term {
   display: flex;
