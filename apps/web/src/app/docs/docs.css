@@ -62,7 +62,11 @@
 .side {
   padding-bottom: 48px;
 }
+/* The search bar stays at the top of the list when the list scrolls to the current page */
 .side-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   gap: 12px;
   width: 100%;
@@ -627,7 +631,8 @@
  */
 .md-table,
 .code-pre,
-.diagram-scroll {
+.diagram-scroll,
+.code-tablist {
   --scroll-bg: var(--page);
   background:
     linear-gradient(to right, var(--scroll-bg) 40%, #0000) left / 24px 100% no-repeat local,
@@ -637,7 +642,8 @@
     var(--scroll-bg);
 }
 .code-pre,
-.diagram-scroll {
+.diagram-scroll,
+.code-tablist {
   --scroll-bg: var(--alt);
 }
 .md-table {
@@ -652,9 +658,10 @@
   font: 400 14px/20px var(--sans);
   letter-spacing: 0;
 }
+/* One line of a header is 40px high; a long header wraps rather than push the table past the column */
 .md-table th {
   height: 40px;
-  padding: 0 16px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--alt);
   color: var(--subtle);
@@ -662,7 +669,6 @@
   letter-spacing: 1px;
   text-align: left;
   text-transform: uppercase;
-  white-space: nowrap;
 }
 .md-table td {
   padding: 12px 16px;
@@ -684,6 +690,17 @@
 .md-table .md-code {
   overflow-wrap: normal;
   white-space: nowrap;
+}
+/*
+ * Long code, such as an error's text, a path or a hash, breaks where InlineCode allows it rather than stretch the
+ * table past the column
+ */
+.md-table .md-code[data-wrap] {
+  white-space: normal;
+}
+/* A table of names and values whose header cells are all empty shows no header row */
+.md-table thead:not(:has(th:not(:empty))) {
+  display: none;
 }
 
 /* Callouts */

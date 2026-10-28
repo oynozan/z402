@@ -59,10 +59,38 @@ export function Anchor({ href = "", children, ...rest }: ComponentPropsWithoutRe
   );
 }
 
+/**
+ * Code longer than this may break inside a table cell, see docs.css: at its spaces, after a separator such as the
+ * slashes of a path or a URL, or every 16 characters of a hash. A shorter one, or a name such as an error code with
+ * only underscores, stays whole.
+ */
+const WRAP_AFTER = 24;
+const SEPARATOR = /[/.:?&=,@-]/;
+const HEX_RUN = 16;
+
+function breakable(text: string): ReactNode[] {
+  const chars = Array.from(text);
+  const parts: ReactNode[] = [];
+  let piece = "";
+  let hex = 0;
+  for (const [i, char] of chars.entries()) {
+    piece += char;
+    hex = /[\da-f]/i.test(char) ? hex + 1 : 0;
+    if (i < chars.length - 1 && (SEPARATOR.test(char) || hex === HEX_RUN)) {
+      parts.push(piece, <wbr key={parts.length} />);
+      piece = "";
+      hex = 0;
+    }
+  }
+  if (piece !== "") parts.push(piece);
+  return parts;
+}
+
 export function InlineCode({ children, className, ...rest }: ComponentPropsWithoutRef<"code">) {
+  const long = typeof children === "string" && children.length > WRAP_AFTER;
   return (
-    <code className={className === undefined ? "md-code" : `md-code ${className}`} {...rest}>
-      {children}
+    <code className={className === undefined ? "md-code" : `md-code ${className}`} data-wrap={long || undefined} {...rest}>
+      {long ? breakable(children) : children}
     </code>
   );
 }

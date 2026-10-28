@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { Source } from "../src/components/docs/blocks";
 import { fenceOf } from "../src/components/docs/code";
 import { Mermaid } from "../src/components/docs/mermaid";
+import { InlineCode } from "../src/components/docs/prose";
 import { codeLanguage } from "../src/lib/docs/highlight";
 import { manropeMeasurer } from "../src/lib/docs/manrope";
 
@@ -129,5 +130,24 @@ describe("Source", () => {
     vi.stubEnv("NEXT_PUBLIC_REPO_URL", "");
     const out = renderToStaticMarkup(createElement(Source, { path: "./compose.yaml" }));
     expect(out).toBe('<code class="md-code source">compose.yaml</code>');
+  });
+});
+
+describe("InlineCode", () => {
+  test("lets long code break at its spaces, after separators and inside a hash, and leaves short code and names whole", () => {
+    const render = (text: string) => renderToStaticMarkup(createElement(InlineCode, null, text));
+    expect(render("Failed to create payment payload: session halted by")).toBe(
+      '<code class="md-code" data-wrap="true">Failed to create payment payload:<wbr/> session halted by</code>',
+    );
+    expect(render(".data/facilitator-ledger.<network>.jsonl")).toBe(
+      '<code class="md-code" data-wrap="true">.<wbr/>data/<wbr/>facilitator-<wbr/>ledger.<wbr/>&lt;network&gt;.<wbr/>jsonl</code>',
+    );
+    expect(render("03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8")).toBe(
+      '<code class="md-code" data-wrap="true">03a107bff3ce10be<wbr/>1d70dd18e74bc099<wbr/>67e4d6309ba50d5f<wbr/>1ddc8664125531b8</code>',
+    );
+    expect(render("z402_deposit_required_while_presented")).toBe(
+      '<code class="md-code" data-wrap="true">z402_deposit_required_while_presented</code>',
+    );
+    expect(render("GET /discovery/resources")).toBe('<code class="md-code">GET /discovery/resources</code>');
   });
 });
