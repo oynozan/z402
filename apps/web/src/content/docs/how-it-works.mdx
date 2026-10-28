@@ -11,8 +11,8 @@ This page follows one session from the first call to the next hundreds. The numb
 
 | Part | What it is | Job |
 |---|---|---|
-| Agent | Your code: the stock x402 client plus `PrepaidVoucherScheme` from `@z402/client`, and a wallet | Makes deposits, signs vouchers, retries after a refusal |
-| Provider API | Any HTTP server with the x402 middleware and `PrepaidVoucherServerScheme` from `@z402/server` | Names a price per route, runs the handler once the facilitator says the payment is good |
+| Agent | Your code: the stock x402 client plus `PrepaidVoucherScheme` from `@z402-net/client`, and a wallet | Makes deposits, signs vouchers, retries after a refusal |
+| Provider API | Any HTTP server with the x402 middleware and `PrepaidVoucherServerScheme` from `@z402-net/server` | Names a price per route, runs the handler once the facilitator says the payment is good |
 | Facilitator | `@z402/facilitator`, shared by many providers | Verifies vouchers, finds and reads deposits, settles, keeps the ledger, hosts the catalog |
 | Zcash node | A lightwalletd-compatible endpoint (Zaino on the demo chain) | Shows transactions and blocks to the facilitator and to the agent |
 

@@ -68,7 +68,7 @@ describe("buildSearchIndex", () => {
 describe("queryTerms and fold", () => {
   test("splits on spaces and punctuation, lower case, without accents or repeats", () => {
     expect(queryTerms("  Trust RAMP, trust ")).toEqual(["trust", "ramp"]);
-    expect(queryTerms("@z402/client")).toEqual(["@z402/client"]);
+    expect(queryTerms("@z402-net/client")).toEqual(["@z402-net/client"]);
     expect(queryTerms("“quoted”")).toEqual(["“quoted”"]);
     expect(fold("Café ZCASH")).toBe("cafe zcash");
     expect(queryTerms("")).toEqual([]);

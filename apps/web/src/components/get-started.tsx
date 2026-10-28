@@ -3,7 +3,7 @@ import { CommandBox } from "./command-box";
 import { CopyCell } from "./copy";
 
 const AGENT_SOURCE = `import { x402Client, wrapFetchWithPayment } from "@x402/fetch";
-import { zcashClientScheme } from "./zcash"; // a PrepaidVoucherScheme from @z402/client
+import { zcashClientScheme } from "./zcash"; // a PrepaidVoucherScheme from @z402-net/client
 
 const client = new x402Client();
 client.register("zcash:mainnet", zcashClientScheme);
@@ -42,7 +42,7 @@ function AgentCode() {
           </span>
           <span className="ln ln-mark">
             <Key>import</Key> {"{ "}zcashClientScheme{" } "}
-            <Key>from</Key> <Str>&quot;./zcash&quot;</Str>; <Note>{"// a PrepaidVoucherScheme from @z402/client"}</Note>
+            <Key>from</Key> <Str>&quot;./zcash&quot;</Str>; <Note>{"// a PrepaidVoucherScheme from @z402-net/client"}</Note>
           </span>
           <span className="ln"> </span>
           <span className="ln">

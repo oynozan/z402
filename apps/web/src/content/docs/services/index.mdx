@@ -186,9 +186,9 @@ try {
 
 ```ts title="paid-fetch.ts"
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
-import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402/client";
-import { createLightwalletdClient } from "@z402/lightwalletd";
-import { NETWORK_REGTEST } from "@z402/protocol";
+import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402-net/client";
+import { createLightwalletdClient } from "@z402-net/lightwalletd";
+import { NETWORK_REGTEST } from "@z402-net/protocol";
 
 // Zallet pays the deposit and lightwalletd (Zaino) reports its status.
 // These are the Z3 regtest defaults.
@@ -219,7 +219,7 @@ export async function close(): Promise<void> {
 | `PrepaidVoucherScheme` | The client scheme: keeps the session, decides when to deposit and signs each voucher. |
 | `x402Client` and `wrapFetchWithPayment` | The stock x402 client and fetch wrapper. `register` is the only line that adds Zcash. |
 
-The first call to a provider makes a deposit, which can take tens of seconds. Later calls only sign a voucher. The wallet adapter today is Zallet over JSON-RPC, built and tested on the regtest stack. See [Pay from an agent](/docs/guides/pay-from-an-agent) and [`@z402/client`](/docs/reference/client).
+The first call to a provider makes a deposit, which can take tens of seconds. Later calls only sign a voucher. The wallet adapter today is Zallet over JSON-RPC, built and tested on the regtest stack. See [Pay from an agent](/docs/guides/pay-from-an-agent) and [`@z402-net/client`](/docs/reference/client).
 
 <Callout type="note" title="Which stack paid-fetch.ts reaches">
 
@@ -279,7 +279,7 @@ A service is its routes written as data. Describe each paid route and its price,
 <Cards>
 <Card title="Build with the service kit" href="/docs/guides/service-kit">Describe your routes as data and let the kit do the rest.</Card>
 <Card title="Sell an API" href="/docs/guides/sell-an-api">Add z402 to an existing Express API.</Card>
-<Card title="@z402/service-kit" href="/docs/reference/service-kit">The kit's exports and settings.</Card>
+<Card title="@z402-net/service-kit" href="/docs/reference/service-kit">The kit's exports and settings.</Card>
 </Cards>
 
 ## References

@@ -42,7 +42,7 @@ The demo runs a private Zcash chain with the Z3 stack, and the facilitator reads
 - [Zaino](https://github.com/zingolabs/zaino): The indexer in front of Zebra. The facilitator, the client and the drop box read deposits and the chain tip from it, over the lightwalletd gRPC protocol.
 - [Zallet](https://github.com/zcash/zallet): The wallet with a JSON-RPC interface. It holds the demo agent's funds and sends its deposits through `ZalletRpcWallet`.
 - [Z3](https://github.com/ZcashFoundation/z3): The Zcash Foundation's combination of Zebra, Zaino and Zallet. The Docker demo is built on it.
-- [lightwalletd](https://github.com/zcash/lightwalletd) and [lightwallet-protocol](https://github.com/zcash/lightwallet-protocol): The gRPC interface for compact blocks and transactions. `@z402/lightwalletd` speaks it to look up a deposit and read the tip.
+- [lightwalletd](https://github.com/zcash/lightwalletd) and [lightwallet-protocol](https://github.com/zcash/lightwallet-protocol): The gRPC interface for compact blocks and transactions. `@z402-net/lightwalletd` speaks it to look up a deposit and read the tip.
 
 See [Deploy with Docker](/docs/guides/deploy-with-docker) to run the whole stack.
 
@@ -91,4 +91,4 @@ These files are the sources of truth. The docs summarise them, and they carry th
 - <Source path="docs/research/decrypt-spike.md" />: Ironwood, trial decryption and the ZIP 317 fee of a deposit
 - <Source path="docs/spec/mvp-build-doc.md" />: the credits to Kage and Hanko, and the ZIP 315 wallet note
 - <Source path="docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md" />: the mention of ZIP 311 as future work
-- <Source path="packages/lightwalletd/src/index.ts" />: the lightwalletd client that `@z402/lightwalletd` exports
+- <Source path="packages/lightwalletd/src/index.ts" />: the lightwalletd client that `@z402-net/lightwalletd` exports
