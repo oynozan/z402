@@ -25,6 +25,14 @@ export class ZdecryptError extends Error {
   }
 }
 
+/** What zdecrypt printed with exit 2 when it refused its input, such as a key or an address that does not decode */
+export class ZdecryptRefused extends ZdecryptError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ZdecryptRefused";
+  }
+}
+
 export interface ZOutput {
   pool: "sapling" | "orchard" | "ironwood";
   scope: "external" | "internal";
@@ -48,6 +56,27 @@ export type ZdecryptAt = { tip: number } | { height: number };
 const DEFAULT_TIMEOUT_MS = 10_000;
 // zdecrypt exits with 2 and an error object on stdout when it refuses its input
 const EXIT_ERROR = 2;
+/** The most zdecrypt children alive at once in this process, whichever provider's chain view asks */
+const MAX_CONCURRENT = 8;
+
+let running = 0;
+const waiting: Array<() => void> = [];
+
+/** Takes one of the slots, waiting in line for it when all are taken */
+function acquire(): Promise<void> {
+  if (running < MAX_CONCURRENT) {
+    running++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => waiting.push(resolve));
+}
+
+function release(): void {
+  const next = waiting.shift();
+  // The slot passes straight to the next in line, so the count stays put
+  if (next === undefined) running--;
+  else next();
+}
 
 const POOLS = ["sapling", "orchard", "ironwood"] as const;
 const SCOPES = ["external", "internal"] as const;
@@ -87,7 +116,17 @@ function start(bin: string, args: string[], key: string) {
   return spawn(bin, args, { env, stdio: ["pipe", "pipe", "ignore"] });
 }
 
-function spawnZdecrypt({ bin, args, key, stdin, timeoutMs }: Invocation): Promise<Exited> {
+async function spawnZdecrypt(invocation: Invocation): Promise<Exited> {
+  await acquire();
+  try {
+    return await run(invocation);
+  } finally {
+    release();
+  }
+}
+
+// The timeout starts here, once the child is spawned, so time spent waiting for a slot never counts against it
+function run({ bin, args, key, stdin, timeoutMs }: Invocation): Promise<Exited> {
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof start>;
     try {
@@ -140,7 +179,7 @@ async function call(invocation: Invocation): Promise<unknown> {
   }
   if (code === null) throw new ZdecryptError(`zdecrypt was killed by ${signal}`);
   if (code === EXIT_ERROR && isRecord(printed) && typeof printed.error === "string") {
-    throw new ZdecryptError(printed.error);
+    throw new ZdecryptRefused(printed.error);
   }
   throw new ZdecryptError(`zdecrypt exited with code ${code}`);
 }
@@ -220,4 +259,21 @@ export async function zdecryptOwns(o: {
     throw malformed("owns");
   }
   return { hasTransparent: printed.hasTransparent, ownedByKey: printed.ownedByKey };
+}
+
+/** Whether `key` is the viewing key of `address`, and `address` takes no transparent deposit */
+export async function zdecryptOwnsShielded(o: {
+  bin: string;
+  key: string;
+  address: string;
+  network: ZdecryptNetwork;
+}): Promise<boolean> {
+  try {
+    const found = await zdecryptOwns(o);
+    return found.ownedByKey && !found.hasTransparent;
+  } catch (e) {
+    // A key or an address that does not decode owns nothing, while a failure to run zdecrypt stays a failure
+    if (e instanceof ZdecryptRefused) return false;
+    throw e;
+  }
 }

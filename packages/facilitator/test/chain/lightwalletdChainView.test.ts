@@ -7,7 +7,7 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import { afterAll, describe, expect, test, vi } from "vitest";
-import { LightwalletdChainView } from "../../src/chain/lightwalletdChainView.js";
+import { cachedTip, LightwalletdChainView } from "../../src/chain/lightwalletdChainView.js";
 import { ZdecryptError } from "../../src/chain/zdecrypt.js";
 import { FakeBinaries } from "../support/fakeZdecrypt.js";
 import { failure } from "../support/failure.js";
@@ -411,5 +411,129 @@ describe("LightwalletdChainView tip", () => {
     const zd = fakes.recording(ZDECRYPT_BIN);
     await expect(merchantView(lwd, zd.bin).inspect(keys.deposit.txid)).rejects.toBeInstanceOf(ChainUnavailableError);
     expect(zd.calls()).toEqual([]);
+  });
+});
+
+describe("a tip shared between views", () => {
+  const viewOver = (tip: () => Promise<number>, lwd: Lwd, zdecryptBin = ZDECRYPT_BIN) =>
+    new LightwalletdChainView({
+      lwd,
+      zdecryptBin,
+      uivk: keys.merchant.uivk,
+      payTo: keys.merchant.address,
+      network: NETWORK_TESTNET,
+      tip,
+    });
+
+  test("a view given a tip reads it there and never asks lightwalletd", async () => {
+    const lwd = fakeLwd({ found: false }, 111);
+    await expect(viewOver(async () => 4_547_000, lwd).tip()).resolves.toBe(4_547_000);
+    expect(lwd.tipCalls).toBe(0);
+  });
+
+  test("a mempool deposit is read at the tip the view was given", async () => {
+    const lwd = fakeLwd(inMempool(keys.deposit.hex), 111);
+    const zd = fakes.recording(ZDECRYPT_BIN);
+    await viewOver(async () => DEPOSIT_TIP, lwd, zd.bin).inspect(keys.deposit.txid);
+    expect(zd.calls().map((c) => c.argv.slice(0, 3))).toEqual([["decrypt", "--tip", String(DEPOSIT_TIP)]]);
+    expect(lwd.tipCalls).toBe(0);
+  });
+
+  test("a tip that fails is the view's failure too", async () => {
+    const outage = new ChainUnavailableError("lightwalletd GetLatestBlock failed: unavailable");
+    const view = viewOver(async () => Promise.reject(outage), fakeLwd({ found: false }));
+    await expect(view.tip()).rejects.toBe(outage);
+  });
+
+  test("views over one cachedTip cost lightwalletd one GetLatestBlock between them", async () => {
+    const lwd = fakeLwd({ found: false }, 4_547_999);
+    const shared = cachedTip(lwd, () => 0);
+    const views = Array.from({ length: 5 }, () => viewOver(shared, lwd));
+    const tips = await Promise.all(views.map((v) => v.tip()));
+    expect(tips).toEqual(Array(5).fill(4_547_999));
+    expect(lwd.tipCalls).toBe(1);
+  });
+});
+
+describe("cachedTip", () => {
+  test("reads at 0 ms and again at 1000 ms, and not in between", async () => {
+    let ms = 0;
+    const lwd = fakeLwd({ found: false }, 4_547_999);
+    const tip = cachedTip(lwd, () => ms);
+
+    await tip();
+    ms = 999;
+    await tip();
+    expect(lwd.tipCalls).toBe(1);
+    ms = 1000;
+    await tip();
+    expect(lwd.tipCalls).toBe(2);
+  });
+
+  test("callers that ask while a read is under way share it", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const lwd = {
+      async getTip() {
+        calls++;
+        await gate;
+        return 4_547_999;
+      },
+    };
+    const tip = cachedTip(lwd, () => 0);
+
+    const pending = [tip(), tip(), tip()];
+    await Promise.resolve();
+    release();
+    await expect(Promise.all(pending)).resolves.toEqual([4_547_999, 4_547_999, 4_547_999]);
+    expect(calls).toBe(1);
+  });
+
+  test("a failed read fails every caller that shared it and is not kept", async () => {
+    const outage = new ChainUnavailableError("lightwalletd GetLatestBlock failed: unavailable");
+    let fail = true;
+    let calls = 0;
+    const lwd = {
+      async getTip() {
+        calls++;
+        if (fail) throw outage;
+        return 4_547_999;
+      },
+    };
+    const tip = cachedTip(lwd, () => 0);
+
+    const both = await Promise.allSettled([tip(), tip()]);
+    expect(both.map((r) => (r.status === "rejected" ? r.reason : r.value))).toEqual([outage, outage]);
+    expect(calls).toBe(1);
+
+    fail = false;
+    await expect(tip()).resolves.toBe(4_547_999);
+    expect(calls).toBe(2);
+  });
+
+  test.each([2 ** 53, 2 ** 32, -1, 1.5, Number.NaN])("a tip of %d is no block height and is refused", async (value) => {
+    const tip = cachedTip(fakeLwd({ found: false }, value), () => 0);
+    const error = await failure(tip());
+    expect(error).toBeInstanceOf(ChainUnavailableError);
+    expect(error.message).toBe(`lightwalletd reported tip ${value}, which is not a block height`);
+  });
+
+  test("a tip whose age comes out negative or unreadable is read again", async () => {
+    let ms = 3_600_000;
+    const lwd = fakeLwd({ found: false }, 4_547_999);
+    const tip = cachedTip(lwd, () => ms);
+    await tip();
+    ms = 0;
+    await tip();
+    expect(lwd.tipCalls).toBe(2);
+
+    const lost = fakeLwd({ found: false }, 4_547_999);
+    const unreadable = cachedTip(lost, () => Number.NaN);
+    await unreadable();
+    await unreadable();
+    expect(lost.tipCalls).toBe(2);
   });
 });

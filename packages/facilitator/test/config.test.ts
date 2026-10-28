@@ -4,7 +4,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NETWORK_MAINNET, NETWORK_REGTEST, NETWORK_TESTNET } from "@z402/protocol";
 import { afterAll, describe, expect, test } from "vitest";
-import { ConfigError, loadConfig } from "../src/config.js";
+import { ConfigError, isValidUivk, loadConfig } from "../src/config.js";
 
 /** The repository root, taken from this file's own place in the tree and never from the working directory */
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -54,6 +54,9 @@ describe("defaults", () => {
       expectedBranchId: "37a5165b",
       zdecryptBin: join(ROOT, "crates", "zdecrypt", "target", "release", "zdecrypt"),
       ledgerPath: join(ROOT, ".data", "facilitator-ledger.regtest.jsonl"),
+      providersDir: join(ROOT, ".data", "providers.regtest"),
+      maxProviders: 32,
+      registrationToken: undefined,
       host: "127.0.0.1",
       port: 4022,
       priceZat: 500n,
@@ -71,6 +74,7 @@ describe("defaults", () => {
       lwdUrl: "https://testnet.zec.rocks:443",
       expectedBranchId: "77190ad9",
       ledgerPath: join(ROOT, ".data", "facilitator-ledger.testnet.jsonl"),
+      providersDir: join(ROOT, ".data", "providers.testnet"),
     });
   });
 
@@ -84,6 +88,7 @@ describe("defaults", () => {
       lwdUrl: "https://mainnet.example:443",
       expectedBranchId: undefined,
       ledgerPath: join(ROOT, ".data", "facilitator-ledger.mainnet.jsonl"),
+      providersDir: join(ROOT, ".data", "providers.mainnet"),
     });
   });
 
@@ -338,16 +343,123 @@ describe("Z402_MERCHANT_KEYS_FILE", () => {
 
 describe("paths", () => {
   test("absolute values are used as they are", () => {
-    const config = loadConfig(env({ Z402_LEDGER: "/var/z402/ledger.jsonl", Z402_ZDECRYPT_BIN: "/opt/zdecrypt" }));
-    expect(config).toMatchObject({ ledgerPath: "/var/z402/ledger.jsonl", zdecryptBin: "/opt/zdecrypt" });
+    const config = loadConfig(
+      env({
+        Z402_LEDGER: "/var/z402/ledger.jsonl",
+        Z402_ZDECRYPT_BIN: "/opt/zdecrypt",
+        Z402_PROVIDERS_DIR: "/var/z402/providers",
+      }),
+    );
+    expect(config).toMatchObject({
+      ledgerPath: "/var/z402/ledger.jsonl",
+      zdecryptBin: "/opt/zdecrypt",
+      providersDir: "/var/z402/providers",
+    });
   });
 
   test("relative values resolve against the repository root", () => {
-    const config = loadConfig(env({ Z402_LEDGER: ".data/other.jsonl", Z402_ZDECRYPT_BIN: "bin/zdecrypt" }));
+    const config = loadConfig(
+      env({ Z402_LEDGER: ".data/other.jsonl", Z402_ZDECRYPT_BIN: "bin/zdecrypt", Z402_PROVIDERS_DIR: ".data/p" }),
+    );
     expect(config).toMatchObject({
       ledgerPath: join(ROOT, ".data", "other.jsonl"),
       zdecryptBin: join(ROOT, "bin", "zdecrypt"),
+      providersDir: join(ROOT, ".data", "p"),
     });
+  });
+});
+
+describe("Z402_MAX_PROVIDERS", () => {
+  test.each([
+    ["0", 0],
+    ["1", 1],
+    ["32", 32],
+    ["1000", 1000],
+  ])("%j is %d", (value, expected) => {
+    expect(loadConfig(env({ Z402_MAX_PROVIDERS: value })).maxProviders).toBe(expected);
+  });
+
+  test("an empty variable counts as unset, which is 32", () => {
+    expect(loadConfig(env({ Z402_MAX_PROVIDERS: "" })).maxProviders).toBe(32);
+  });
+
+  test.each(["1001", "-1", "1.5", "abc", "1e2", "0x10", " 5", "05", "99999999999"])("%j is refused", (value) => {
+    const message = refusal(env({ Z402_MAX_PROVIDERS: value })).message;
+    expect(message).toBe("Z402_MAX_PROVIDERS: expected a whole number from 0 to 1000");
+  });
+});
+
+describe("Z402_REGISTRATION_TOKEN", () => {
+  test("is left out unless it is set, which leaves registration open", () => {
+    expect(loadConfig(env()).registrationToken).toBeUndefined();
+    expect(loadConfig(env({ Z402_REGISTRATION_TOKEN: "" })).registrationToken).toBeUndefined();
+  });
+
+  test.each(["r-3f9a1c-secret", "dGhlIHRva2Vu==", "a.b_c~d+e/f"])("%j is kept exactly as given", (token) => {
+    expect(loadConfig(env({ Z402_REGISTRATION_TOKEN: token })).registrationToken).toBe(token);
+  });
+
+  test.each([" a b ", "s3cret\n", "a b", "tab\there", "a=b"])("%j, which no header can match, is refused", (token) => {
+    const error = refusal(env({ Z402_REGISTRATION_TOKEN: token }));
+    expect(error.message).toBe(
+      "Z402_REGISTRATION_TOKEN: must be one token of letters, digits and -._~+/ (no spaces or control characters)",
+    );
+    expect(error.message).not.toContain(token);
+  });
+
+  test("can be the same as the facilitator token", () => {
+    expect(loadConfig(env({ Z402_REGISTRATION_TOKEN: "token" })).registrationToken).toBe("token");
+  });
+});
+
+describe("isValidUivk", () => {
+  const hrps = {
+    [NETWORK_REGTEST]: ["uivkregtest", "uviregtest"],
+    [NETWORK_TESTNET]: ["uivktest", "uvitest"],
+    [NETWORK_MAINNET]: ["uivk", "uvi"],
+  } as const;
+  const networks = [NETWORK_REGTEST, NETWORK_TESTNET, NETWORK_MAINNET] as const;
+
+  test.each(networks.flatMap((network) => hrps[network].map((hrp) => [network, hrp] as const)))(
+    "on %s a %s key is valid",
+    (network, hrp) => {
+      expect(isValidUivk(bech32(hrp, 100), network)).toBe(true);
+    },
+  );
+
+  test.each(
+    networks.flatMap((network) =>
+      networks.filter((n) => n !== network).flatMap((n) => hrps[n].map((hrp) => [network, hrp] as const)),
+    ),
+  )("on %s a %s key of another network is not", (network, hrp) => {
+    expect(isValidUivk(bech32(hrp, 100), network)).toBe(false);
+  });
+
+  test.each([
+    ["an address", bech32("uregtest")],
+    ["a full viewing key", bech32("uviewregtest", 100)],
+    ["an empty string", ""],
+    ["a key with a space", `${bech32("uivkregtest", 100)} `],
+    ["a key with a newline", `${bech32("uivkregtest", 100)}\n`],
+    ["a character outside bech32", `uivkregtest1${"b".repeat(100)}`],
+    ["only the prefix", "uivkregtest1"],
+    ["a key of 1025 characters", `uivkregtest1${"q".repeat(1025 - "uivkregtest1".length)}`],
+  ])("%s is not valid on regtest", (_, uivk) => {
+    expect(isValidUivk(uivk, NETWORK_REGTEST)).toBe(false);
+  });
+
+  test("a key of 1024 characters is valid, since the registry holds no more", () => {
+    expect(isValidUivk(`uivkregtest1${"q".repeat(1024 - "uivkregtest1".length)}`, NETWORK_REGTEST)).toBe(true);
+  });
+
+  test("a network that is none of the three is valid for no key", () => {
+    expect(isValidUivk(bech32("uivkregtest", 100), "zcash:signet")).toBe(false);
+  });
+
+  test("agrees with the key Z402_UIVK takes", () => {
+    const uivk = bech32("uivkregtest", 100);
+    expect(isValidUivk(uivk, NETWORK_REGTEST)).toBe(true);
+    expect(loadConfig(env({ Z402_UIVK: uivk })).uivk).toBe(uivk);
   });
 });
 

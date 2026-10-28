@@ -2,7 +2,13 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test, vi } from "vitest";
-import { zdecryptDecrypt, zdecryptOwns, ZdecryptError } from "../../src/chain/zdecrypt.js";
+import {
+  zdecryptDecrypt,
+  zdecryptOwns,
+  zdecryptOwnsShielded,
+  ZdecryptError,
+  ZdecryptRefused,
+} from "../../src/chain/zdecrypt.js";
 import { FakeBinaries } from "../support/fakeZdecrypt.js";
 import { failure } from "../support/failure.js";
 
@@ -27,6 +33,7 @@ const decrypt = (bin: string, o: { timeoutMs?: number; rawHex?: string } = {}) =
   zdecryptDecrypt({ bin, key: KEY, rawHex: o.rawHex ?? "00", at: { tip: 1 }, network: "testnet", ...o });
 
 const owns = (bin: string) => zdecryptOwns({ bin, key: KEY, address: "utest1x", network: "testnet" });
+const shielded = (bin: string) => zdecryptOwnsShielded({ bin, key: KEY, address: "utest1x", network: "testnet" });
 
 function alive(pid: number): boolean {
   try {
@@ -100,6 +107,42 @@ describe("zdecryptOwns report", () => {
   });
 });
 
+describe("zdecryptOwnsShielded", () => {
+  test.each([
+    ["the key owns an address that takes only shielded deposits", { hasTransparent: false, ownedByKey: true }, true],
+    ["the key does not own the address", { hasTransparent: false, ownedByKey: false }, false],
+    ["the address has a transparent receiver", { hasTransparent: true, ownedByKey: true }, false],
+    ["the key owns nothing and the address is transparent", { hasTransparent: true, ownedByKey: false }, false],
+  ])("answers for the registration when %s", async (_name, printed, expected) => {
+    await expect(shielded(fakes.canned(JSON.stringify(printed)).bin)).resolves.toBe(expected);
+  });
+
+  test("answers false when zdecrypt refuses the key or the address, since that is no key of that address", async () => {
+    const refused = JSON.stringify({ error: "not a testnet unified address" });
+    await expect(shielded(fakes.canned(refused, 2).bin)).resolves.toBe(false);
+  });
+
+  // Every one of these is a failure to ask, which the caller must see as one and never as a "no"
+  test.each([
+    ["exit 2 with nothing readable", () => fakes.canned("not json", 2).bin, /exited with code 2/],
+    ["an exit code of 1", () => fakes.canned(JSON.stringify({ error: "x" }), 1).bin, /exited with code 1/],
+    ["a crash", () => fakes.script("process.stdout.write('x'); process.exitCode = 101;").bin, /exited with code 101/],
+    ["a kill by a signal", () => fakes.script(`process.kill(process.pid, "SIGKILL");`).bin, /killed by SIGKILL/],
+    [
+      "a binary that is not there",
+      () => join(tmpdir(), "z402-no-such-dir", "zdecrypt"),
+      /could not be started \(ENOENT\)/,
+    ],
+    ["output that is no JSON", () => fakes.canned("this is not json").bin, /printed no JSON report/],
+    ["a report with the wrong shape", () => fakes.canned(JSON.stringify({ hasTransparent: "no" })).bin, /malformed/],
+  ])("still rejects, as a ZdecryptError that is no refusal, for %s", async (_name, bin, message) => {
+    const error = await failure(shielded(bin()));
+    expect(error).toBeInstanceOf(ZdecryptError);
+    expect(error).not.toBeInstanceOf(ZdecryptRefused);
+    expect(error.message).toMatch(message);
+  });
+});
+
 describe("zdecrypt process", () => {
   test("a child past timeoutMs is killed with SIGKILL", async () => {
     const hang = fakes.script(
@@ -116,6 +159,7 @@ describe("zdecrypt process", () => {
     await expect.poll(() => hang.calls().length, { timeout: 5000 }).toBeGreaterThan(warmed);
     const error = await outcome;
     expect(error).toBeInstanceOf(ZdecryptError);
+    expect(error).not.toBeInstanceOf(ZdecryptRefused);
     expect(error.message).toMatch(/timed out after 2000 ms/);
     await expect.poll(() => alive(hang.calls().at(-1)!.pid), { timeout: 5000 }).toBe(false);
   }, 20000);
@@ -150,16 +194,19 @@ describe("zdecrypt process", () => {
     expect(error.message).toMatch(/killed by SIGKILL/);
   });
 
-  test("exit 2 without an error object has no message to forward", async () => {
+  test("exit 2 without an error object has no message to forward, and is no refusal", async () => {
     const error = await failure(decrypt(fakes.canned("not json", 2).bin));
     expect(error).toBeInstanceOf(ZdecryptError);
+    expect(error).not.toBeInstanceOf(ZdecryptRefused);
     expect(error.message).toMatch(/exited with code 2/);
   });
 
-  test("exit 2 forwards the error text the binary printed", async () => {
+  test("exit 2 forwards the error text the binary printed, as a refusal", async () => {
     const printed = JSON.stringify({ error: "transaction does not parse: x" });
     const error = await failure(decrypt(fakes.canned(printed, 2).bin));
     expect(error).toBeInstanceOf(ZdecryptError);
+    expect(error).toBeInstanceOf(ZdecryptRefused);
+    expect(error.name).toBe("ZdecryptRefused");
     expect(error.message).toBe("transaction does not parse: x");
   });
 
