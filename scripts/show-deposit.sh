@@ -66,10 +66,18 @@ need() {
   done
 }
 
-# Text safe to print, with tab, CR and LF as spaces, no other controls, no invalid UTF-8 and at most 200 characters
+# Text safe to print, with tab, CR and LF as spaces, no control, format or separator characters and at most 200 characters
 plain() {
-  perl -e 'use Encode qw(decode encode); local $/; my $s = decode("UTF-8", scalar(<STDIN>) // "", sub { "" });
-    $s =~ tr/\t\r\n/ /; $s =~ s/[\x00-\x1f\x7f-\x9f]//g; print encode("UTF-8", substr($s, 0, 200))'
+  # PERL5OPT, PERL_UNICODE and PERL5LIB change how perl reads, writes and loads, so they are unset and -C0 is given
+  env -u PERL5OPT -u PERL_UNICODE -u PERL5LIB -u PERLLIB -u PERLIO perl -C0 -e '
+    use Encode ();
+    binmode STDIN, ":raw";
+    binmode STDOUT, ":raw";
+    local $/;
+    my $s = Encode::decode("UTF-8", scalar(<STDIN>) // "", Encode::FB_DEFAULT);
+    $s =~ tr/\t\r\n/ /;
+    $s =~ s/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]//g;
+    print Encode::encode("UTF-8", substr($s, 0, 200));'
 }
 
 # Calls Zebra and prints the result as JSON, or dies with the reason
@@ -145,7 +153,7 @@ case "$KEYS" in
   *) KEYS="$ROOT/$KEYS" ;;
 esac
 
-need curl jq base64 perl
+need curl jq base64 perl env
 [ -x "$ZDECRYPT" ] || die "$(shown "$ZDECRYPT") is not built (pnpm --filter @z402/facilitator build:native)"
 if [ ! -f "$KEYS" ]; then
   die "$(shown "$KEYS") not found (create it with: node scripts/merchant-keygen.mjs --network $NETWORK, or pass --keys)"
@@ -203,7 +211,12 @@ info "That hex is all a block explorer has. Its shielded outputs hold no plainte
 step "Decrypted with the merchant's viewing key (UIVK, not printed)"
 report="$(ZDECRYPT_KEY="$uivk" "$ZDECRYPT" decrypt --network "$NETWORK" "$at_flag" "$at_value" \
   --pay-to "$pay_to" <<<"$hex")" || die "zdecrypt could not decrypt the transaction"
-reported="$(jq -r '.txid // empty' 2>/dev/null <<<"$report")"
+reported="$(jq -r '.txid // empty' 2>/dev/null <<<"$report")" || {
+  status=$?
+  printf 'ERROR: zdecrypt did not print a JSON report\n' >&2
+  exit "$status"
+}
+[ -n "$reported" ] || die "zdecrypt printed a report with no txid"
 [ "$reported" = "$TXID" ] || die "Zebra returned a transaction that is not $TXID"
 # The memo is chosen by the sender, so ASCII only keeps its control and bidirectional characters off the terminal
 jq -a . <<<"$report"
