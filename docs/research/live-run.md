@@ -349,3 +349,18 @@ Session `147a…3e`, started at 20:49:34Z with the tip at 128, by z402-08's acco
 - **Live ledger:** 447 lines in all: 4 deposit, 23 status and 420 voucher. Vouchers record only the cumulative amount, never a signature.
 - **The third session** `bfa3…` was z402-08's Ctrl-C test: SIGINT after #020, cumulative 10,000. Its D1 `5b58fc43…` (first seen at tip 131, expiry 171) was still pending when the stack went down. The next facilitator start resolves it, as mined or as dead after height 171.
 - **Shutdown:** Ctrl-C ends the agent on "interrupted", and `demo.sh down` stopped the clock, the API and the facilitator cleanly.
+
+### 8.6 Dry run 2 on the final-fix Wave A code
+
+z402-08 repeated the honest, cheat, show and Ctrl-C runs on dev `7d171e2` from 03:08 to 03:13 UTC on 2026-10-28. That commit includes the final review's Wave A fixes, among them the ledger lock, no credit from stale or expired lookups, the bounded refresh and resolver queue, and the single `z402_deposit_memo_mismatch` answer. Both servers were ready in 1 s, `<ledger>.lock` was created, and the §6 snapshot table matched at every step. The ledger records agree:
+
+| Run | Session | Vouchers | Deposits (first seen at tip, expiry, mined) |
+|---|---|---|---|
+| Honest | `1a4a…0f` | 150, ending at 75,000, all 200 | D1 `070e87b9…`: 133, 174, mined 134 (final). D2 `a3fff839…`: 135, 176, mined 136. |
+| Cheat | `cccb…1b` | 250, ending at 125,000. #251 is refused `z402_deposit_required`, with no early `deposit_required`. | D1 `0867c384…`: 140, 181, mined 141 |
+| Ctrl-C | `dc14…ff` | 15, ending at 7,500, then "interrupted" | D1 `4ad13178…`: 142, 183, mined 143 |
+
+- On this start, the facilitator resolved dry run 1's leftover pending deposit `5b58fc43…` (mined at 132, now final) with no client call.
+- `demo.sh down` removed the lock.
+- The ledger now has 905 lines (8 deposit, 62 status, 835 voucher), at tip 143.
+- The local tag `recording-2026-10-28` marks this commit.
