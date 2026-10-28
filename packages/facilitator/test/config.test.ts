@@ -192,8 +192,14 @@ describe("Z402_FACILITATOR_TOKEN", () => {
     expect(refusal(env({ Z402_FACILITATOR_TOKEN: token })).message).toMatch(/Z402_FACILITATOR_TOKEN/);
   });
 
-  test("the token is kept exactly as given", () => {
-    expect(loadConfig(env({ Z402_FACILITATOR_TOKEN: " a b " })).authToken).toBe(" a b ");
+  test.each([" a b ", "s3cret\n", "a b", "tab\there"])("%j, which no header can match, is refused", (token) => {
+    const error = refusal(env({ Z402_FACILITATOR_TOKEN: token }));
+    expect(error.message).toMatch(/^Z402_FACILITATOR_TOKEN: /);
+    expect(error.message).not.toContain(token);
+  });
+
+  test.each(["t-7c2e91-secret", "dGhlIHRva2Vu==", "a.b_c~d+e/f"])("%j is kept exactly as given", (token) => {
+    expect(loadConfig(env({ Z402_FACILITATOR_TOKEN: token })).authToken).toBe(token);
   });
 });
 

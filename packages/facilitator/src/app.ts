@@ -81,8 +81,16 @@ const BODY_LIMIT = "64kb";
 const MAX_LOGGED_PATH = 120;
 /** CAIP-2 ids are at most 41 characters, so anything longer is not worth echoing back */
 const MAX_NETWORK_LENGTH = 64;
-const BEARER = /^bearer (.+)$/i;
+/** One or more spaces after the scheme, as RFC 7235 allows */
+const BEARER = /^bearer +(.+)$/i;
+/** An RFC 6750 b64token, the only token an Authorization header can carry and match */
+const B64TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
 const EMPTY_TOKEN = "authToken: must not be empty (leave it out to run without a token)";
+const BAD_TOKEN = "authToken: must be one token of letters, digits and -._~+/ (no spaces or control characters)";
+/** The longest delay setInterval honours, past which Node fires it after 1 ms */
+const MAX_TIMER_MS = 2_147_483_647;
+/** The scheme's own ceiling, within the API's 60 s for a verify */
+const MAX_DEPOSIT_WAIT_MS = 60_000;
 
 const BAD_VERSION: Refusal = { code: REASON.invalidX402Version, message: "x402Version must be 2" };
 const UNSUPPORTED: Refusal = {
@@ -198,7 +206,7 @@ function jsonBody(): RequestHandler {
 
 export function createFacilitatorApp(o: { facilitator: x402Facilitator; authToken?: string; log?: Log }): Express {
   const { facilitator, authToken, log } = o;
-  if (authToken === "") throw new Error(EMPTY_TOKEN);
+  checkToken(authToken);
   const diagnose = log ?? stderr;
 
   /** The network a failed settle names when the request gave no usable one, which is the one registered here */
@@ -285,6 +293,14 @@ function wholeNumber(name: string, value: number | undefined, min: number, max =
   }
 }
 
+function checkToken(token: string | undefined): void {
+  if (token === undefined) return;
+  if (token === "") throw new Error(EMPTY_TOKEN);
+  if (typeof token !== "string" || !B64TOKEN.test(token)) throw new Error(BAD_TOKEN);
+}
+
+const isBlank = (v: unknown): boolean => typeof v !== "string" || v.trim() === "";
+
 /** Refuses a bad option before anything is opened, naming the field */
 function checkOptions(o: FacilitatorOptions): void {
   if (!isZcashNetwork(o.network)) throw new Error(`network: expected one of ${ZCASH_NETWORKS.join(", ")}`);
@@ -296,10 +312,14 @@ function checkOptions(o: FacilitatorOptions): void {
   } catch (e) {
     throw new Error(`terms: ${text(e)}`);
   }
-  if (o.authToken === "") throw new Error(EMPTY_TOKEN);
+  checkToken(o.authToken);
   wholeNumber("port", o.port, 0, 65535);
-  wholeNumber("pollIntervalMs", o.pollIntervalMs, 1);
-  wholeNumber("depositWaitMs", o.depositWaitMs, 0);
+  wholeNumber("pollIntervalMs", o.pollIntervalMs, 1, MAX_TIMER_MS);
+  wholeNumber("depositWaitMs", o.depositWaitMs, 0, MAX_DEPOSIT_WAIT_MS);
+  if (o.host !== undefined && isBlank(o.host)) throw new Error("host: must not be blank");
+  if (o.ledgerPath !== undefined && isBlank(o.ledgerPath)) {
+    throw new Error("ledgerPath: must not be blank (leave it out for an in-memory ledger)");
+  }
 }
 
 interface OpenLedger {
@@ -349,7 +369,8 @@ function listen(app: Express, host: string, port: number, log: Log): Promise<Ser
   return new Promise((resolve, reject) => {
     const server = createServer(app);
     const refuse = (e: NodeJS.ErrnoException): void => {
-      reject(new Error(`port: cannot listen on ${host}:${port} (${e.code ?? e.message})`));
+      const field = e.code === "EADDRINUSE" || e.code === "EACCES" ? "port" : "host";
+      reject(new Error(`${field}: cannot listen on ${host}:${port} (${e.code ?? e.message})`));
     };
     server.once("error", refuse);
     server.listen(port, host, () => {

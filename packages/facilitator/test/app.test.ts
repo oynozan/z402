@@ -293,6 +293,24 @@ describe("the bearer token", () => {
   test("an empty token is refused at start instead of switching the check off", async () => {
     await expect(boot({ authToken: "" })).rejects.toThrow(/^authToken:/);
   });
+
+  test("a token no header could carry is refused without quoting it", async () => {
+    const attempt = boot({ authToken: "s3cret\nmore" });
+    await expect(attempt).rejects.toThrow(
+      "authToken: must be one token of letters, digits and -._~+/ (no spaces or control characters)",
+    );
+  });
+
+  test("more than one space after Bearer is accepted", async () => {
+    const { url } = await boot();
+    const res = await call(url, "/supported", { token: null, headers: { authorization: `Bearer   ${TOKEN}` } });
+    expect(res.status).toBe(200);
+  });
+
+  test("createFacilitatorApp refuses a token no header could carry", () => {
+    const facilitator = new x402Facilitator();
+    expect(() => createFacilitatorApp({ facilitator, authToken: "s3cret " })).toThrow(/^authToken:/);
+  });
 });
 
 describe("invalid bodies answer invalid_payload with HTTP 200", () => {
@@ -345,6 +363,7 @@ describe("invalid bodies answer invalid_payload with HTTP 200", () => {
       const res = await call(url, path, { raw: raw() });
       expect(res.status).toBe(200);
       expect(reason(res.json)).toBe("invalid_payload");
+      if (path === "/settle") expect(res.json).toMatchObject({ success: false, transaction: "", network: NETWORK });
     });
 
     test("a body over 64 KB", async () => {
@@ -353,6 +372,7 @@ describe("invalid bodies answer invalid_payload with HTTP 200", () => {
       const res = await call(url, path, { body: padded });
       expect(res.status).toBe(200);
       expect(reason(res.json)).toBe("invalid_payload");
+      if (path === "/settle") expect(res.json).toMatchObject({ success: false, transaction: "", network: NETWORK });
     });
 
     test("a valid body that is not sent as JSON", async () => {
@@ -835,9 +855,16 @@ describe("startFacilitator", () => {
     ["terms", { terms: { ...DEMO_TERMS, creditRatioBps: 20000 } }],
     ["terms", { terms: { ...DEMO_TERMS, windowZat: 0n } }],
     ["authToken", { authToken: "" }],
+    ["authToken", { authToken: "s3cret " }],
+    ["authToken", { authToken: "two words" }],
     ["port", { port: 70000 }],
     ["pollIntervalMs", { pollIntervalMs: 0 }],
+    ["pollIntervalMs", { pollIntervalMs: 2 ** 31 }],
     ["depositWaitMs", { depositWaitMs: -1 }],
+    ["depositWaitMs", { depositWaitMs: 60_001 }],
+    ["host", { host: "" }],
+    ["host", { host: " " }],
+    ["ledgerPath", { ledgerPath: "" }],
   ] as Array<[string, Partial<FacilitatorOptions>]>)(
     "a bad %s rejects naming the field before anything is written",
     async (field, over) => {
@@ -867,6 +894,11 @@ describe("startFacilitator", () => {
     const { handle } = await boot();
     const port = Number(new URL(handle.url).port);
     await expect(boot({ port })).rejects.toThrow(/^port:/);
+  });
+
+  test("a host this machine does not have rejects naming the host", async () => {
+    // TEST-NET-1, reserved for documentation, so no interface carries it
+    await expect(boot({ host: "192.0.2.1" })).rejects.toThrow(/^host:/);
   });
 
   test("a second facilitator on a ledger that another one holds is refused, and the ledger is untouched", async () => {

@@ -89,6 +89,8 @@ const DEFAULT_ZDECRYPT_BIN = "crates/zdecrypt/target/release/zdecrypt";
 const BRANCH_ID_RE = /^[0-9a-f]{8}$/i;
 const PORT_RE = /^(0|[1-9][0-9]{0,4})$/;
 const COUNT_RE = /^(0|[1-9][0-9]{0,9})$/;
+/** An RFC 6750 b64token, the only token an Authorization header can carry and match */
+const B64TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
 
 const TERM_VARIABLES = [
   { variable: "Z402_WINDOW_ZAT", key: "windowZat", whole: false },
@@ -238,6 +240,11 @@ export function loadConfig(env: Env): FacilitatorEnv {
   const authToken = read(env, "Z402_FACILITATOR_TOKEN");
   if (authToken === undefined)
     throw new ConfigError("Z402_FACILITATOR_TOKEN is required (the bearer token callers present)");
+  if (!B64TOKEN.test(authToken)) {
+    throw new ConfigError(
+      "Z402_FACILITATOR_TOKEN: must be one token of letters, digits and -._~+/ (no spaces or control characters)",
+    );
+  }
 
   const lwdUrl = lwdUrlOf(env, profile);
   const expectedBranchId = branchIdOf(env, profile);
