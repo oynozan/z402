@@ -54,19 +54,29 @@ const FACILITATOR_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_SECONDS = 60;
 const X402_VERSION = 2;
 const MAX_CAUSES = 5;
+/** An RFC 6750 b64token, the only token an Authorization header can carry and match */
+const B64TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
 
 function text(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** Refuses a bad option before the facilitator is contacted, naming the field */
+/** Refuses a bad option before the facilitator is contacted, naming the field and never quoting its value */
 function checkOptions(o: ApiOptions): void {
   const url = o.facilitatorUrl;
-  const protocol = typeof url === "string" && URL.canParse(url) ? new URL(url).protocol : "";
-  if (protocol !== "http:" && protocol !== "https:") {
+  const parsed = typeof url === "string" && URL.canParse(url) ? new URL(url) : undefined;
+  if (parsed === undefined || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
     throw new Error("facilitatorUrl: expected an http:// or https:// URL (an empty one would fall back to x402.org)");
   }
-  if (o.facilitatorToken === "") throw new Error("facilitatorToken: must not be empty (leave it out to send none)");
+  // Every startup error names the facilitator by its URL, so a password in it would be printed
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Error("facilitatorUrl: must not carry credentials (use facilitatorToken)");
+  }
+  const token = o.facilitatorToken;
+  if (token === "") throw new Error("facilitatorToken: must not be empty (leave it out to send none)");
+  if (token !== undefined && (typeof token !== "string" || !B64TOKEN.test(token))) {
+    throw new Error("facilitatorToken: must be one token of letters, digits and -._~+/");
+  }
   if (!isZcashNetwork(o.network)) throw new Error(`network: expected one of ${ZCASH_NETWORKS.join(", ")}`);
   if (!isValidPayTo(o.payTo, o.network)) throw new Error(`payTo: not a shielded-only unified address for ${o.network}`);
   // initialize() never prices the route, so a bad price would otherwise fail every request instead of the start
@@ -152,7 +162,7 @@ export async function createApiApp(o: ApiOptions): Promise<Express> {
     new PrepaidVoucherServerScheme({ payTo, network }),
   );
   const routes: RoutesConfig = {
-    // Keyed without a verb so that HEAD, which Express hands to the GET handler, must pay too
+    // Keyed without a verb, so a request of any method must pay before it reaches a handler
     "/chunk": {
       accepts: {
         scheme: SCHEME,
@@ -175,8 +185,16 @@ export async function createApiApp(o: ApiOptions): Promise<Express> {
   app.disable("x-powered-by");
   // The support is loaded above, and false keeps the middleware from loading it again or exiting the process
   app.use(paymentMiddlewareFromHTTPServer(http, undefined, undefined, false));
+  // Registered before the GET route, which Express would otherwise also run for HEAD
+  app.head("/chunk", notAllowed);
   app.get("/chunk", chunk(priceZat));
+  app.all("/chunk", notAllowed);
   return app;
+}
+
+/** Only GET is served, and the middleware never settles a 405, so the voucher sent with it still buys a GET */
+function notAllowed(_req: Request, res: Response): void {
+  res.set("Allow", "GET").status(405).json({ error: "method_not_allowed" });
 }
 
 function listen(app: Express, host: string, port: number): Promise<Server> {

@@ -1,6 +1,6 @@
 /**
- * The API's environment for `main`. Every problem names the variable at fault. The merchant keys file is opened only
- * for its orchardOnlyAddress, so the viewing key in it is never read, and no message quotes the file.
+ * The API's environment for `main`. Every problem names the variable at fault. The merchant keys file is parsed whole,
+ * but only its orchardOnlyAddress is used, so the viewing key in it is never used. No message quotes the file.
  */
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";

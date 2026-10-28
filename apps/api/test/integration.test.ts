@@ -7,7 +7,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decodePaymentRequiredHeader, encodePaymentSignatureHeader } from "@x402/core/http";
+import {
+  decodePaymentRequiredHeader,
+  decodePaymentResponseHeader,
+  encodePaymentSignatureHeader,
+} from "@x402/core/http";
 import { FacilitatorCapabilityError } from "@x402/core/server";
 import type { PaymentRequired } from "@x402/core/types";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
@@ -124,6 +128,21 @@ async function refusalOf(res: Response): Promise<PaymentRequired> {
 
 const sessionOf = (required: PaymentRequired) => parseSessionSnapshot(required.accepts[0]?.extra.session);
 
+/** A PAYMENT-SIGNATURE for one voucher of the session of `seed`, built from the API's own requirements */
+async function voucherHeader(apiUrl: string, seed: Uint8Array, cumulativeZat: string, depositTxid?: string) {
+  const unpaid = await refusalOf(await fetch(`${apiUrl}/chunk`));
+  const accepted = unpaid.accepts[0];
+  if (accepted === undefined) throw new Error("no accepts entry");
+  const sessionKey = publicKeyFromSeed(seed);
+  const { scheme, network, payTo } = accepted;
+  const sig = signVoucher(seed, { scheme, network, payTo, sessionKey, cumulativeZat });
+  const payload = { sessionKey, cumulativeZat, sig, ...(depositTxid === undefined ? {} : { depositTxid }) };
+  return encodePaymentSignatureHeader({ x402Version: 2, resource: unpaid.resource, accepted, payload });
+}
+
+/** A seed of its own for each test that pays by hand */
+const seedOf = (n: number): Uint8Array => Uint8Array.from({ length: 32 }, (_, i) => (i * 7 + n) % 256);
+
 /** The values in order with repeats collapsed */
 const runs = (values: string[]): string[] => values.filter((v, i) => i === 0 || values[i - 1] !== v);
 
@@ -205,6 +224,57 @@ describe("paid /chunk through the whole stack", () => {
     const res = await fetch(`${s.api.url}/chunk`, { method: "HEAD" });
     expect(res.status).toBe(402);
     expect(res.headers.get("payment-required")).not.toBeNull();
+  });
+
+  test("a paid request by another method than GET gets 405 and is not charged, so the voucher buys a GET", async () => {
+    const s = await fullStack();
+    const seed = seedOf(1);
+    const d1 = deposit(s.chain, publicKeyFromSeed(seed), 1);
+    const header = await voucherHeader(s.api.url, seed, "500", d1);
+
+    for (const method of ["HEAD", "OPTIONS", "POST"]) {
+      const res = await fetch(`${s.api.url}/chunk`, { method, headers: { "payment-signature": header } });
+      await res.text();
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow"), method).toBe("GET");
+      const settled = res.headers.get("payment-response");
+      expect(settled === null || decodePaymentResponseHeader(settled).success === false, method).toBe(true);
+    }
+
+    const res = await fetch(`${s.api.url}/chunk`, { headers: { "payment-signature": header } });
+    expect(await paidChunk(res)).toEqual({ chunk: 1, cumulativeZat: "500", data: "chunk-1" });
+  });
+
+  test("concurrent requests that carry one voucher get the chunk exactly once", async () => {
+    const s = await fullStack();
+    const seed = seedOf(2);
+    const d1 = deposit(s.chain, publicKeyFromSeed(seed), 1);
+    const first = await voucherHeader(s.api.url, seed, "500", d1);
+    await paidChunk(await fetch(`${s.api.url}/chunk`, { headers: { "payment-signature": first } }));
+    const header = await voucherHeader(s.api.url, seed, "1000");
+
+    const results = await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        const res = await fetch(`${s.api.url}/chunk`, { headers: { "payment-signature": header } });
+        const body = await res.text();
+        const settled = res.headers.get("payment-response");
+        return {
+          status: res.status,
+          body,
+          refusedSettle: settled !== null && decodePaymentResponseHeader(settled).success === false,
+          corrective: res.headers.get("payment-required") !== null,
+        };
+      }),
+    );
+
+    const served = results.filter((r) => r.status === 200);
+    expect(served).toHaveLength(1);
+    expect(JSON.parse(served[0]?.body ?? "")).toEqual({ chunk: 2, cumulativeZat: "1000", data: "chunk-2" });
+    for (const other of results.filter((r) => r.status !== 200)) {
+      expect(other.status).toBe(402);
+      expect(other.body).not.toMatch(/"data":"chunk-/);
+      expect(other.refusedSettle || other.corrective).toBe(true);
+    }
   });
 
   test("the requirements and the chunk number follow priceZat", async () => {
@@ -437,6 +507,10 @@ describe("startApi", () => {
     ["priceZat", { priceZat: -500n }],
     ["priceZat", { priceZat: 500 as unknown as bigint }],
     ["facilitatorToken", { facilitatorToken: "" }],
+    ["facilitatorUrl", { facilitatorUrl: "http://op:pw@127.0.0.1:9" }],
+    ["facilitatorUrl", { facilitatorUrl: "http://op@127.0.0.1:9" }],
+    ["facilitatorToken", { facilitatorToken: "abc\nSECRET" }],
+    ["facilitatorToken", { facilitatorToken: "two words" }],
     ["host", { host: " " }],
     ["port", { port: 70000 }],
     ["port", { port: 1.5 }],
@@ -444,6 +518,21 @@ describe("startApi", () => {
     const requests = vi.spyOn(globalThis, "fetch");
     await expect(startApi(apiOptions("http://127.0.0.1:9", over))).rejects.toThrow(new RegExp(`^${field}:`));
     expect(requests).not.toHaveBeenCalled();
+  });
+
+  test.each<[string, Partial<ApiOptions>, string]>([
+    ["facilitatorUrl", { facilitatorUrl: "http://op:pw@127.0.0.1:9" }, "pw@"],
+    ["facilitatorToken", { facilitatorToken: "abc\nSECRET" }, "SECRET"],
+  ])("a %s that carries a secret is refused without quoting it anywhere", async (field, over, secret) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = await startApi(apiOptions("http://127.0.0.1:9", over)).then(
+      () => new Error("expected startApi to reject"),
+      (e: unknown) => e as Error,
+    );
+    expect(error.message).toMatch(new RegExp(`^${field}:`));
+    expect(error.message).not.toContain(secret);
+    expect(String(error.cause ?? "")).not.toContain(secret);
+    expect(warn.mock.calls.flat().map(String).join(" ")).not.toContain(secret);
   });
 
   test("a facilitator that pays another address fails naming payTo", async () => {
