@@ -833,12 +833,11 @@ describe("a delivery that does not happen", () => {
       abort.abort();
       return stored;
     });
+    // The signal goes to each request itself, since the payment wrapper's clones of one lose it once collected
+    const hangingUp: typeof fetch = (input, init) => fetch(new Request(input, init), { signal: abort.signal });
+    const paidFetch = wrapFetchWithPayment(hangingUp, new x402Client().register(TEST_NETWORK, h.stack.scheme));
     await expect(
-      h.stack.paidFetch(drops(h), {
-        method: "POST",
-        body: raw(ageFile({ payload: randomBytes(300) })),
-        signal: abort.signal,
-      }),
+      paidFetch(drops(h), { method: "POST", body: raw(ageFile({ payload: randomBytes(300) })) }),
     ).rejects.toThrow();
     await vi.waitFor(() => expect(h.store.count).toBe(0));
     expect(readdirSync(h.dir)).toEqual([]);
