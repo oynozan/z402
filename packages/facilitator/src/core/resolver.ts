@@ -15,6 +15,7 @@ export class DepositResolver {
   readonly #resultTtlMs: number;
   readonly #now: () => number;
   readonly #sleep: (ms: number) => Promise<void>;
+  readonly #log: (msg: string, err?: unknown) => void;
   readonly #flights = new Map<string, Promise<Lookup>>();
   readonly #results = new Map<string, { lookup: Lookup; at: number }>();
   readonly #queue: Array<() => void> = [];
@@ -30,6 +31,7 @@ export class DepositResolver {
     resultTtlMs?: number;
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
+    log?: (msg: string, err?: unknown) => void;
   }) {
     this.#chain = o.chain;
     this.#maxConcurrent = o.maxConcurrent ?? 4;
@@ -40,6 +42,7 @@ export class DepositResolver {
     this.#resultTtlMs = o.resultTtlMs ?? 30_000;
     this.#now = o.now ?? (() => Date.now());
     this.#sleep = o.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.#log = o.log ?? ((msg, err) => console.error(msg, err));
   }
 
   /** Settles within the longest budget in use plus one inspect and one tip, and joins a flight already under way */
@@ -56,8 +59,13 @@ export class DepositResolver {
 
   /** Runs a lookup nobody waits for, so `peek` can answer once it resolves */
   startBackground(txid: string, budgetMs: number): void {
-    // A failure has no caller to go to, and the next lookup runs afresh
-    this.lookup(txid, budgetMs).catch(() => undefined);
+    // A failure has no caller to go to, so it is logged, and the next lookup runs afresh
+    this.lookup(txid, budgetMs).catch((e: unknown) => {
+      if (e instanceof ChainUnavailableError) return;
+      try {
+        this.#log("background deposit lookup failed", e);
+      } catch {}
+    });
   }
 
   /** The latest result for the txid, until it expires or is forgotten */

@@ -388,7 +388,7 @@ async function serve(o: FacilitatorOptions, { ledger, state, release }: OpenLedg
 
   // Not gated on closed, since a settle in flight must still be recorded and the server closes before it ends
   const write = (events: LedgerEvent[]): void => commit(ledger, state, events);
-  const resolver = new DepositResolver({ chain: o.chain });
+  const resolver = new DepositResolver({ chain: o.chain, log: o.log });
   const watcher = new ChainWatcher({
     chain: o.chain,
     state,

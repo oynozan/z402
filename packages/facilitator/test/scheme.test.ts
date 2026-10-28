@@ -112,9 +112,8 @@ function wire(view: ChainView, o: { fakeTime?: boolean; config?: Partial<SchemeC
   const ledger = new Ledger();
   const state = new FacilitatorState();
   const write = (events: LedgerEvent[]) => commit(ledger, state, events);
-  const resolver = new DepositResolver(
-    fake ? { chain: view, pollMs: 1, now: clock.now, sleep: clock.sleep } : { chain: view, pollMs: 1 },
-  );
+  const quiet = { chain: view, pollMs: 1, log: () => undefined };
+  const resolver = new DepositResolver(fake ? { ...quiet, now: clock.now, sleep: clock.sleep } : quiet);
   const watcher = new ChainWatcher({
     chain: view,
     state,

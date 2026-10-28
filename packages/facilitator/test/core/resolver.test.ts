@@ -443,7 +443,7 @@ describe("startBackground and peek", () => {
   });
 
   test("a background lookup that fails unexpectedly leaves nothing to peek and rejects nobody", async () => {
-    const { chain, resolver } = rig();
+    const { chain, resolver } = rig({ log: () => undefined });
     chain.script(T, [new TypeError("boom")]);
 
     resolver.startBackground(T, 0);
@@ -451,6 +451,30 @@ describe("startBackground and peek", () => {
 
     expect(chain.calls.get(T)).toBe(1);
     expect(resolver.peek(T)).toBeUndefined();
+  });
+
+  test("a background lookup that fails unexpectedly is logged once, with its error", async () => {
+    const log = vi.fn<(msg: string, err?: unknown) => void>();
+    const { chain, resolver } = rig({ log });
+    const error = new TypeError("boom");
+    chain.script(T, [error]);
+
+    resolver.startBackground(T, 0);
+    await nextTick();
+
+    expect(log.mock.calls).toEqual([["background deposit lookup failed", error]]);
+  });
+
+  test("a background lookup that ends in an outage is not logged, since peek reports it", async () => {
+    const log = vi.fn<(msg: string, err?: unknown) => void>();
+    const { chain, resolver } = rig({ log });
+    chain.script(T, [outage()]);
+
+    resolver.startBackground(T, 0);
+    await nextTick();
+
+    expect(resolver.peek(T)).toMatchObject({ kind: "unavailable" });
+    expect(log).not.toHaveBeenCalled();
   });
 });
 
