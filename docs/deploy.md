@@ -175,9 +175,12 @@ The facilitator's port is never published. The services, the API and the website
 and the website passes on only the public catalog reads (`/discovery/*`). While that holds, no one outside reaches
 `POST /providers`, which is open by default. Before outside providers connect, put the facilitator behind TLS (a
 reverse proxy that terminates HTTPS in front of port 4022) and set `Z402_REGISTRATION_TOKEN` in `.env` to a random
-token, for example `openssl rand -hex 32`, then run `docker compose up -d`. A provider then registers with
-`Authorization: Bearer <token>`, and `markdown-register` sends it for provider 2. With open registration, anyone who
-reaches the facilitator can take its provider slots (32 by default) and list resources on the website.
+token of at least 32 characters (the facilitator refuses to start with a shorter one), for example
+`openssl rand -hex 32`, then run `docker compose up -d`. A provider then registers with `Authorization: Bearer <token>`,
+and `markdown-register` sends it for provider 2. With open registration, anyone who reaches the facilitator can take
+its provider slots (32 by default) and list resources on the website, so every start warns while it is open. On
+mainnet, registration stays closed unless a token is set or `Z402_REGISTRATION_OPEN=1`. To remove a provider, follow
+"Removing a provider" in `packages/facilitator/README.md`.
 
 ## The agent
 

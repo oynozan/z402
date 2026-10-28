@@ -164,7 +164,9 @@ const REFUSED = {
       : "the facilitator refused the registration token in Z402_REGISTRATION_TOKEN",
   "403 not_owner": "the UIVK in the keys file does not own its payTo",
   "403 provider_limit": "the facilitator has no provider slot left (Z402_MAX_PROVIDERS)",
-  "403 registration_disabled": "the facilitator takes no registrations, as it has no providers directory",
+  "403 registration_disabled":
+    "the facilitator takes no registrations: it has no providers directory, or it runs on mainnet with registration " +
+    "neither opened (Z402_REGISTRATION_OPEN=1) nor gated by Z402_REGISTRATION_TOKEN",
   "409 operator": "the payTo is the facilitator operator's own, and a provider needs keys of its own",
 };
 
