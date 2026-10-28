@@ -23,7 +23,7 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
-import { Ledger, type LedgerEvent } from "./core/ledger.js";
+import { Ledger, LedgerRefusal, type LedgerEvent } from "./core/ledger.js";
 import { DepositResolver } from "./core/resolver.js";
 import { commit, FacilitatorState } from "./core/state.js";
 import { ChainWatcher } from "./core/watcher.js";
@@ -61,7 +61,7 @@ export interface FacilitatorHandle {
   url: string;
   /** One best effort pass over every live deposit, which does nothing once closed */
   pollNow(): Promise<void>;
-  /** Stops the watcher and the server, and a pass still in flight no longer writes to the ledger */
+  /** Stops the watcher and the server, and a watcher pass still in flight does not write to the ledger */
   close(): Promise<void>;
 }
 
@@ -343,18 +343,19 @@ export async function startFacilitator(o: FacilitatorOptions): Promise<Facilitat
   // A watcher pass already in flight when close() runs must not write once it resumes
   let closed = false;
 
+  // Not gated on closed, since a settle in flight must still be recorded and the server closes before it ends
   const write = (events: LedgerEvent[]): void => commit(ledger, state, events);
   const resolver = new DepositResolver({ chain: o.chain });
   const watcher = new ChainWatcher({
     chain: o.chain,
     state,
-    // The scheme reports its own failed writes to fatal, so the watcher's writes are the ones reported here
+    // The scheme reports its own failed writes, and a refused batch wrote nothing, so only these failures are fatal
     commit: (events) => {
       if (closed) return;
       try {
         write(events);
       } catch (err) {
-        fatal(err);
+        if (!(err instanceof LedgerRefusal)) fatal(err);
         throw err;
       }
     },

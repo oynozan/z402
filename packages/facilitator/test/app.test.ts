@@ -190,7 +190,7 @@ async function heldPass(name: string) {
   gate.shut();
   const pass = handle.pollNow();
   await gate.reached;
-  return { handle, gate, pass, ledgerPath, onFatal, log };
+  return { handle, url, r, gate, pass, ledgerPath, onFatal, log };
 }
 
 /** Serves an app from createFacilitatorApp alone, for the tests that do not need a whole facilitator */
@@ -584,6 +584,47 @@ describe("failures inside the facilitator answer unexpected_* with HTTP 200", ()
     await handle.pollNow();
     expect(onFatal).toHaveBeenCalledTimes(1);
     expect(onFatal.mock.calls[0]?.[0]).toMatchObject({ code: "EISDIR" });
+  });
+
+  test("after the watcher's write fails, a settle writes nothing either", async () => {
+    const held = await heldPass("latched");
+    const before = readFileSync(held.ledgerPath);
+    rmSync(held.ledgerPath);
+    mkdirSync(held.ledgerPath);
+    held.gate.open();
+    await held.pass;
+    expect(held.onFatal).toHaveBeenCalledTimes(1);
+
+    // The disk is back, yet the file may hold a torn prefix the live state never saw
+    rmSync(held.ledgerPath, { recursive: true });
+    writeFileSync(held.ledgerPath, before);
+    const res = await settle(held.url, pay(held.r, 1000n), held.r);
+
+    expect(res.json).toMatchObject({ success: false, errorReason: "unexpected_settle_error", transaction: "" });
+    expect(readFileSync(held.ledgerPath)).toEqual(before);
+    expect(held.onFatal).toHaveBeenCalledTimes(1);
+  });
+
+  test("a status batch the ledger refuses is not fatal and writes nothing", async () => {
+    const ledgerPath = join(scratch, "refused-status.jsonl");
+    const chain = new FakeChain({ expiryDelta: 40 });
+    const view = chain.viewFor(PAY_TO);
+    let tip: number | undefined;
+    const misreporting: ChainView = { tip: async () => tip ?? view.tip(), inspect: (txid) => view.inspect(txid) };
+    const onFatal = vi.fn<(err: unknown) => void>();
+    const { handle, url } = await boot({ chain: misreporting, ledgerPath, onFatal }, chain);
+    const r = await requirementsOf(url);
+    const d1 = deposit(chain);
+    await verify(url, pay(r, 500n, d1), r);
+    expect((await settle(url, pay(r, 500n, d1), r)).json.success).toBe(true);
+    const before = readFileSync(ledgerPath, "utf8");
+
+    // Past 2^53 the dead deposit's deadAtTip is no safe integer, so the shape check refuses the batch
+    tip = 2 ** 53 + 10;
+    await handle.pollNow();
+
+    expect(onFatal).not.toHaveBeenCalled();
+    expect(readFileSync(ledgerPath, "utf8")).toBe(before);
   });
 
   test("two failed watcher commits and a failed settle call onFatal once between them", async () => {

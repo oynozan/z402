@@ -2,8 +2,16 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { Ledger, type LedgerEvent } from "../../src/core/ledger.js";
+import { Ledger, LedgerRefusal, type LedgerEvent } from "../../src/core/ledger.js";
 import { depositEvent, statusEvent, unreadableEvents, voucherEvent } from "./events.js";
+
+// The ledger imports appendFileSync by name, so only a module mock can make one write fail part-way
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return { ...fs, appendFileSync: vi.fn(fs.appendFileSync) };
+});
+
+const SHAPE_REFUSAL = /^event 2( \((deposit|voucher|status)\))? is not a ledger event$/;
 
 let dir: string;
 beforeEach(() => {
@@ -165,8 +173,88 @@ describe.each<[string, () => Ledger]>([
   test.each(unreadableEvents)("%s is refused and nothing from its batch is written", (_what, bad) => {
     const ledger = makeLedger();
     ledger.appendSync([depositEvent()]);
-    expect(() => ledger.appendSync([voucherEvent(), bad as LedgerEvent])).toThrow(/event 2 is not a ledger event/);
+    expect(() => ledger.appendSync([voucherEvent(), bad as LedgerEvent])).toThrow(LedgerRefusal);
+    expect(() => ledger.appendSync([voucherEvent(), bad as LedgerEvent])).toThrow(SHAPE_REFUSAL);
     expect(ledger.replay()).toEqual([depositEvent()]);
+  });
+
+  test("a refused event is named by its type, and the next good batch is still taken", () => {
+    const ledger = makeLedger();
+    const unsafe = { ...statusEvent(), confirmations: 2 ** 53 };
+    expect(() => ledger.appendSync([unsafe])).toThrow("event 1 (status) is not a ledger event");
+    expect(() => ledger.appendSync([unsafe])).toThrow(LedgerRefusal);
+    expect(ledger.replay()).toEqual([]);
+
+    ledger.appendSync([voucherEvent()]);
+    expect(ledger.replay()).toEqual([voucherEvent()]);
+  });
+
+  test("an event of an unknown type is named by its place only", () => {
+    expect(() => makeLedger().appendSync([{ t: "secret-value" } as unknown as LedgerEvent])).toThrow(
+      /^event 1 is not a ledger event$/,
+    );
+  });
+});
+
+describe("Ledger after a failed write", () => {
+  /** Makes the next append write its first 37 bytes and then fail, as a full disk can */
+  async function tearNextAppend(): Promise<void> {
+    const real = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(appendFileSync).mockImplementationOnce((path, data, options) => {
+      real.appendFileSync(path, String(data).slice(0, 37), options);
+      throw Object.assign(new Error("EIO: i/o error, write"), { code: "EIO" });
+    });
+  }
+
+  test("a torn write is cut back off, so the file is byte for byte what it was", async () => {
+    const ledger = new Ledger(file());
+    ledger.appendSync([depositEvent()]);
+    const before = readFileSync(file());
+
+    await tearNextAppend();
+    expect(() => ledger.appendSync([voucherEvent(), statusEvent()])).toThrow(/EIO/);
+
+    expect(readFileSync(file())).toEqual(before);
+    expect(new Ledger(file()).replay()).toEqual([depositEvent()]);
+  });
+
+  test("every later write is refused without touching the file", async () => {
+    const ledger = new Ledger(file());
+    ledger.appendSync([depositEvent()]);
+    const before = readFileSync(file());
+    await tearNextAppend();
+    expect(() => ledger.appendSync([voucherEvent()])).toThrow(/EIO/);
+    const writes = vi.mocked(appendFileSync).mock.calls.length;
+
+    const refused = (() => {
+      try {
+        ledger.appendSync([statusEvent()]);
+      } catch (e) {
+        return e as Error;
+      }
+      throw new Error("expected the append to be refused");
+    })();
+    expect(refused.message).toBe("the ledger refuses writes after a failed write; restart the facilitator to replay it");
+    expect(refused.cause).toMatchObject({ code: "EIO" });
+    expect(refused).not.toBeInstanceOf(LedgerRefusal);
+    expect(vi.mocked(appendFileSync).mock.calls.length).toBe(writes);
+    expect(readFileSync(file())).toEqual(before);
+    expect(new Ledger(file()).replay()).toEqual([depositEvent()]);
+  });
+
+  test("a torn first write leaves an empty file that replays nothing", async () => {
+    const ledger = new Ledger(file());
+    await tearNextAppend();
+    expect(() => ledger.appendSync([depositEvent()])).toThrow(/EIO/);
+    expect(readFileSync(file(), "utf8")).toBe("");
+    expect(new Ledger(file()).replay()).toEqual([]);
+  });
+
+  test("a refused batch does not stop the ledger", () => {
+    const ledger = new Ledger(file());
+    expect(() => ledger.appendSync([{ ...depositEvent(), valueZat: "-1" }])).toThrow(LedgerRefusal);
+    ledger.appendSync([depositEvent()]);
+    expect(new Ledger(file()).replay()).toEqual([depositEvent()]);
   });
 });
 

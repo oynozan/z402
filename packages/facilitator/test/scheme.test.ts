@@ -15,7 +15,7 @@ import {
 } from "@z402/protocol";
 import { FakeChain } from "@z402/testkit";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { Ledger, type LedgerEvent } from "../src/core/ledger.js";
+import { Ledger, LedgerRefusal, type LedgerEvent } from "../src/core/ledger.js";
 import { DepositResolver } from "../src/core/resolver.js";
 import { commit, FacilitatorState } from "../src/core/state.js";
 import { ChainWatcher } from "../src/core/watcher.js";
@@ -992,6 +992,30 @@ describe("unexpected failures", () => {
     });
     expect(r.ledger.replay()).toEqual([]);
     expect(r.onFatal).toHaveBeenCalledTimes(1);
+  });
+
+  test("a batch the ledger refuses → unexpected_settle_error, never fatal, and the next calls succeed", async () => {
+    const r = rig();
+    const d1 = send(r.chain);
+    expect((await r.s.verify(pay(500n, { txid: d1 }), req())).isValid).toBe(true);
+    const refusal = new LedgerRefusal("event 1 (deposit) is not a ledger event");
+    vi.spyOn(r.ledger, "appendSync").mockImplementationOnce(() => {
+      throw refusal;
+    });
+
+    expect(await r.s.settle(pay(500n, { txid: d1 }), req())).toStrictEqual({
+      success: false,
+      errorReason: REASON.unexpectedSettleError,
+      errorMessage: expect.any(String),
+      transaction: "",
+      network: NETWORK,
+    });
+    expect(r.onFatal).not.toHaveBeenCalled();
+    expect(r.log.mock.calls).toEqual([["settle batch refused", refusal]]);
+    expect(r.ledger.replay()).toEqual([]);
+
+    expect((await r.s.verify(pay(500n, { txid: d1 }), req())).isValid).toBe(true);
+    expect(await r.s.settle(pay(500n, { txid: d1 }), req())).toMatchObject({ success: true, transaction: d1 });
   });
 
   test("a verify still waiting on the chain when the ledger fails is refused as well", async () => {

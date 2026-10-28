@@ -1,4 +1,4 @@
-import { isEvent, type Ledger, type LedgerEvent } from "./ledger.js";
+import { isEvent, LedgerRefusal, nth, type Ledger, type LedgerEvent } from "./ledger.js";
 import { DEAD_RECHECK_BLOCKS, type DepositRecord } from "./types.js";
 
 type Of<T extends LedgerEvent["t"]> = Extract<LedgerEvent, { t: T }>;
@@ -25,7 +25,7 @@ export class FacilitatorState {
   check(events: readonly LedgerEvent[]): void {
     const scratch = new FacilitatorState();
     for (const [i, e] of events.entries()) {
-      if (!isEvent(e)) throw new Error(`event ${i + 1} is not a ledger event`);
+      if (!isEvent(e)) throw new Error(`${nth(e, i)} is not a ledger event`);
       this.#lend(scratch, e);
       scratch.apply(e);
     }
@@ -120,7 +120,11 @@ function isLive(deposit: DepositRecord, tip: number): boolean {
 
 /** Refuses a bad batch before writing a byte, and stays synchronous so a settle commits with no await between */
 export function commit(ledger: Ledger, state: FacilitatorState, events: LedgerEvent[]): void {
-  state.check(events);
+  try {
+    state.check(events);
+  } catch (e) {
+    throw new LedgerRefusal(`the ledger refused the batch: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
+  }
   ledger.appendSync(events);
   for (const e of events) state.apply(e);
 }

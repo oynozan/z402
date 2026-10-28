@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEMO_TERMS, type DepositStatus, type FoundInspection, type TxInspection } from "@z402/protocol";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { Ledger, type LedgerEvent } from "../../src/core/ledger.js";
+import { Ledger, LedgerRefusal, type LedgerEvent } from "../../src/core/ledger.js";
 import { buildSnapshot } from "../../src/core/snapshot.js";
 import { commit, FacilitatorState } from "../../src/core/state.js";
 import { observe } from "../../src/core/transitions.js";
@@ -41,6 +41,17 @@ function view(state: FacilitatorState) {
     credited: KEYS.map((key) => state.depositsOf(key).map((d) => d.txid)),
     live: state.liveDeposits(TIP).map((d) => d.txid),
   };
+}
+
+/** The error `run` throws, failing the test when it does not throw */
+function thrown(run: () => void): Error {
+  try {
+    run();
+  } catch (e) {
+    if (e instanceof Error) return e;
+    throw e;
+  }
+  throw new Error("expected a throw");
 }
 
 /** The message `run` throws, or null when it does not throw */
@@ -354,7 +365,8 @@ describe.each<[string, () => Ledger]>([
     const ledger = makeLedger();
     const state = new FacilitatorState();
     const batch = [voucherEvent(), bad as LedgerEvent];
-    expect(() => commit(ledger, state, batch)).toThrow(/event 2 is not a ledger event/);
+    expect(() => commit(ledger, state, batch)).toThrow(LedgerRefusal);
+    expect(() => commit(ledger, state, batch)).toThrow(/event 2( \(\w+\))? is not a ledger event/);
     expect(ledger.replay()).toEqual([]);
     expect(state.session(K)).toBeUndefined();
   });
@@ -369,12 +381,26 @@ describe("commit and the ledger file", () => {
     expect(existsSync(path())).toBe(false);
   });
 
-  test("a refused batch leaves the file byte for byte as it was", () => {
+  test("a refused batch is a LedgerRefusal and leaves the file byte for byte as it was", () => {
     const ledger = new Ledger(path());
     const state = new FacilitatorState();
     commit(ledger, state, [voucherEvent({ cumulativeZat: "5000" })]);
     const before = readFileSync(path(), "utf8");
-    expect(() => commit(ledger, state, [depositEvent(), voucherEvent({ cumulativeZat: "100" })])).toThrow(/below/);
+    const refused = thrown(() => commit(ledger, state, [depositEvent(), voucherEvent({ cumulativeZat: "100" })]));
+    expect(refused).toBeInstanceOf(LedgerRefusal);
+    expect(refused.message).toMatch(/^the ledger refused the batch: .*below/);
+    expect(refused.cause).toBeInstanceOf(Error);
+    expect(readFileSync(path(), "utf8")).toBe(before);
+  });
+
+  test("a deposit credited twice is a LedgerRefusal and leaves the file byte for byte as it was", () => {
+    const ledger = new Ledger(path());
+    const state = new FacilitatorState();
+    commit(ledger, state, [depositEvent(), voucherEvent({ cumulativeZat: "5000" })]);
+    const before = readFileSync(path(), "utf8");
+    const refused = thrown(() => commit(ledger, state, [depositEvent()]));
+    expect(refused).toBeInstanceOf(LedgerRefusal);
+    expect(refused.message).toMatch(/^the ledger refused the batch: .*already credited/);
     expect(readFileSync(path(), "utf8")).toBe(before);
   });
 
@@ -431,7 +457,13 @@ describe("FacilitatorState.check", () => {
 
   test.each(unreadableEvents)("%s is refused with its position in the batch", (_what, bad) => {
     expect(() => new FacilitatorState().check([voucherEvent(), bad as LedgerEvent])).toThrow(
-      /event 2 is not a ledger event/,
+      /^event 2( \((deposit|voucher|status)\))? is not a ledger event$/,
+    );
+  });
+
+  test("a refused event is named by its type when it has a known one", () => {
+    expect(() => new FacilitatorState().check([{ ...statusEvent(), confirmations: 2 ** 53 }])).toThrow(
+      "event 1 (status) is not a ledger event",
     );
   });
 

@@ -35,7 +35,7 @@ import {
   type ZcashNetwork,
 } from "@z402/protocol";
 import { evaluateDeposit } from "./core/evaluate.js";
-import type { LedgerEvent } from "./core/ledger.js";
+import { LedgerRefusal, type LedgerEvent } from "./core/ledger.js";
 import type { DepositResolver, Lookup } from "./core/resolver.js";
 import { buildSnapshot } from "./core/snapshot.js";
 import type { FacilitatorState } from "./core/state.js";
@@ -178,6 +178,11 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       try {
         this.#commit(verdict.events);
       } catch (e) {
+        // A refused batch wrote nothing, so only a failed write puts the file in doubt
+        if (e instanceof LedgerRefusal) {
+          this.#log("settle batch refused", e);
+          return settleRefused(UNEXPECTED_SETTLE, network);
+        }
         return this.#fatal(e, network);
       }
       if (verdict.credits && v.depositTxid !== undefined) this.#resolver.forget(v.depositTxid);
