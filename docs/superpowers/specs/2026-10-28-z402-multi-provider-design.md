@@ -13,9 +13,15 @@ The client wire contract does not change. Payload, voucher, memo, snapshot and r
 The user's requirement: "I should be able to monetize my any service and set custom price … independent service providers will set their prices, we are also technically independent service providers. So both of them. Also, they won't deploy their own facilitator, they will connect our facilitator because we are handling the payment rails." Follow the standard x402 integration; do not invent a z402-specific one.
 
 Done means all of these hold on the live Z3 regtest stack:
-1. Two providers with different `payTo` addresses and different per-route prices are both served by our one facilitator. Provider 1 is us (the starter services); provider 2 registers itself through `POST /providers`.
-2. One agent process pays both in one run, and each provider's deposits and vouchers are credited only to that provider.
-3. Both providers' resources are listed by the facilitator's public `GET /discovery/resources`, with liveness (`lastSeen`) and today's paid calls (`paidCallsToday`).
+1. Two providers with different `payTo` addresses and different per-route prices are both served by our one facilitator.
+   - Provider 1 is us: the operator, with `apps/api` `GET /chunk` at 500 zat on `127.0.0.1:4021`, and the starter services.
+   - Provider 2 registers itself through `POST /providers`. It is a second `apps/api` instance, `GET /chunk` at 800 zat on `127.0.0.1:4023`, with its own view-only keys and its own API key.
+2. One agent process pays both in one run (`apps/agent --url …4021/chunk --url …4023/chunk`). Each provider's deposits and vouchers are credited only to that provider.
+3. Both providers' resources are listed by the facilitator's public `GET /discovery/resources`, by both standard sources:
+   - the starter services by declaration, with liveness (`lastSeen`);
+   - provider 2's `GET /chunk` from its paid calls, through the static bazaar extension that `apps/api` gains.
+
+   Each item shows today's paid calls (`paidCallsToday`).
 4. Every test suite is green: root vitest, cargo, typecheck and shellcheck.
 
 Out of scope (section 9): per-provider trust terms, provider accounts and dashboards, revocation beyond key rotation, and sender-disclosed decryption.
@@ -206,7 +212,7 @@ Any failure releases everything and refuses startup, as today.
   `apps/api` calls it at startup, before `initialize()`; so does the kit (§6).
 - `apps/api` keeps its one route (`GET /chunk`) and its one price.
 
-## 5. Protocol v2.0 (draft for the client agent to co-sign)
+## 5. Protocol v2.0 (ACKed by the client agent with no changes, 2026-10-28)
 
 v2.0 changes nothing the client sends or signs. It is a major version because `/supported` drops `extra.payTo` and the facilitator accepts any per-route amount, which breaks our own API's startup check.
 
@@ -232,9 +238,9 @@ Kept byte-for-byte: §3 payload, §4 voucher (its message already binds `payTo`,
 
 | Who | Work |
 |---|---|
-| Facilitator agent (`z402-b1`) | `packages/facilitator`: amount rule, `termsVersion` v2, `/supported`, registry, runtimes, auth, `/providers`, catalog and discovery routes, the zdecrypt limit and shared tip. `packages/server`: `validateFacilitatorSupport`, `checkProvider`. `apps/api`: its startup check. The protocol v2.0 edit after co-signing, the READMEs, and the live run record |
+| Facilitator agent (`z402-b1`) | `packages/facilitator`: amount rule, `termsVersion` v2, `/supported`, registry, runtimes, auth, `/providers`, catalog and discovery routes, the zdecrypt limit and shared tip. `packages/server`: `validateFacilitatorSupport`, `checkProvider`. `apps/api`: its startup check, and a static bazaar extension on `GET /chunk`, hand-written JSON (`info.input` `{type:"http", method:"GET"}`, an output example, the matching schema), so no new dependency. `scripts/register-provider.mjs`: a view-only keys file → `POST /providers` → API key file written under umask 077, never printed. The protocol v2.0 edit after co-signing, the READMEs, and the live run record |
 | Services agent (`z402-f9`) | `service-kit`: `priceZat?` per route; `checkProvider` at startup; a declaration heartbeat (`POST /discovery/resources` every 30 s, built from the same `accepts` and `extensions` as its 402). Starter services get prices that fit their cost. compose: provider 2, with its own view-only keys, a one-shot registration job writing its API key to a volume, and its own `Z402_PAY_TO`/token. `apps/web`: proxy `/discovery/*` to the facilitator and derive status from `lastSeen`. Retire `apps/discovery`. Update the smoke test that relied on a 600 vs 500 price refusal |
-| Client agent (`z402-08`) | Co-sign v2.0. Point the agent's `--discovery` default at the facilitator. Make the one-agent, two-provider live run possible (its call how) |
+| Client agent (`z402-08`) | Co-signed v2.0 (ACK, no changes). The agent's `--discovery` default becomes the facilitator (`http://127.0.0.1:4022`), committed once the routes are on `dev`. `--url` becomes repeatable: targets are called round-robin, with a summary per target; `--api` stays as shorthand, and `--cheat` stays single-target |
 
 The facilitator lands first behind an unchanged operator path, so the other two can integrate against it at any time. Until then they build against this section's shapes.
 
@@ -276,10 +282,10 @@ The facilitator lands first behind an unchanged operator path, so the other two 
   - `withBazaar(HTTPFacilitatorClient)` against our routes.
 - **Server and API:** `checkProvider` (match, 401, other `payTo`, unreachable), and `validateFacilitatorSupport` without `payTo`.
 - **Live (Z3 regtest, compose):**
-  - provider 2 registers through `POST /providers`;
-  - one agent pays a provider-1 route and a provider-2 route at different prices;
+  - provider 2 registers through `scripts/register-provider.mjs` and starts as a second `apps/api` instance at 800 zat on 4023;
+  - one agent pays `4021/chunk` (500) and `4023/chunk` (800) in one run;
   - each provider's ledger holds only its own deposits and vouchers;
-  - `GET /discovery/resources` lists both providers with fresh `lastSeen` and non-zero `paidCallsToday`.
+  - `GET /discovery/resources` lists the declared starter services (fresh `lastSeen`) and provider 2's `/chunk` (payment-sourced), each with a non-zero `paidCallsToday` once paid.
 
   The result is recorded in `docs/research/live-run.md`.
 
