@@ -1523,6 +1523,22 @@ describe("session view and close", () => {
     expect(scheme.session(PAY_TO)?.snapshot?.cumulativeZat).toBe("500");
   });
 
+  it("sessions() lists every session in the order it started, as copies", async () => {
+    const { scheme, hook, pay } = setup();
+    expect(scheme.sessions()).toEqual([]);
+    const other = "uregtest1" + "p".repeat(60);
+    const R = makeReq();
+    await hook(paid(R, await pay(R), { session: snap(500n, 125_000n) }));
+    await pay(makeReq({ payTo: other, amount: "800" }));
+
+    const views = scheme.sessions();
+    expect(views.map((v) => v.payTo)).toEqual([PAY_TO, other]);
+    expect(views.map((v) => v.cumulativeZat)).toEqual([500n, 0n]);
+    expect(views[0]).toEqual(scheme.session(PAY_TO));
+    (views[0]!.deposits as unknown[]).length = 0;
+    expect(scheme.sessions()[0]!.deposits).toHaveLength(1);
+  });
+
   it("close() closes the wallet", async () => {
     let closed = 0;
     const chain = new FakeChain();

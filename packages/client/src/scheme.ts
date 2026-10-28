@@ -91,6 +91,19 @@ function haltedError(halt: { code: string; txid: string | undefined }): Error {
   return new Error(`session halted by ${halt.code} on deposit ${halt.txid ?? "(none presented)"}`);
 }
 
+function viewOf(session: Session): SessionView {
+  return {
+    network: session.network,
+    payTo: session.payTo,
+    sessionKey: session.sessionKey,
+    cumulativeZat: session.cumulative,
+    snapshot: session.snapshot === undefined ? undefined : structuredClone(session.snapshot),
+    deposits: session.deposits.map((d) => ({ ...d })),
+    nextIndex: session.nextIndex,
+    depositsMade: session.depositsMade,
+  };
+}
+
 /** Parses one field and prefixes any failure with the field's name */
 function field<T>(name: string, parse: () => T): T {
   try {
@@ -204,18 +217,14 @@ export class PrepaidVoucherScheme implements SchemeNetworkClient {
   session(payTo: string, network?: string): SessionView | undefined {
     for (const { session } of this.#states.values()) {
       if (session.payTo !== payTo || (network !== undefined && session.network !== network)) continue;
-      return {
-        network: session.network,
-        payTo: session.payTo,
-        sessionKey: session.sessionKey,
-        cumulativeZat: session.cumulative,
-        snapshot: session.snapshot === undefined ? undefined : structuredClone(session.snapshot),
-        deposits: session.deposits.map((d) => ({ ...d })),
-        nextIndex: session.nextIndex,
-        depositsMade: session.depositsMade,
-      };
+      return viewOf(session);
     }
     return undefined;
+  }
+
+  /** Every session, one per payee, in the order they started */
+  sessions(): SessionView[] {
+    return [...this.#states.values()].map(({ session }) => viewOf(session));
   }
 
   /** Cancels safety timers, lets in-flight deposits finish, then closes the wallet */
