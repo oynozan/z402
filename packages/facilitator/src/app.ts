@@ -96,8 +96,8 @@ const EMPTY_TOKEN = "authToken: must not be empty (leave it out to run without a
 const BAD_TOKEN = "authToken: must be one token of letters, digits and -._~+/ (no spaces or control characters)";
 /** The longest delay setInterval honours, past which Node fires it after 1 ms */
 const MAX_TIMER_MS = 2_147_483_647;
-/** The scheme's own ceiling, within the API's 60 s for a verify */
-const MAX_DEPOSIT_WAIT_MS = 60_000;
+/** The scheme's own ceiling, the wait the API's 60 s for a verify was sized for */
+const MAX_DEPOSIT_WAIT_MS = 30_000;
 
 const BAD_VERSION: Refusal = { code: REASON.invalidX402Version, message: "x402Version must be 2" };
 const UNSUPPORTED: Refusal = {

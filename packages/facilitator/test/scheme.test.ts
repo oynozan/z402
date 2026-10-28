@@ -976,6 +976,42 @@ describe("a credited pending deposit past its expiry while its lookups fail", ()
     expect(counted.isValid).toBe(true);
     expect(sessionOf(counted)).toMatchObject({ confirmedZat: "100000", limitZat: "125000" });
   });
+
+  test("is listed dead in the snapshot of a settle that succeeds on another deposit", async () => {
+    let d1 = "";
+    let failing = false;
+    const r = rig((view) => ({
+      tip: () => view.tip(),
+      inspect: async (txid) => {
+        if (txid === d1 && failing) throw new ChainUnavailableError("lightwalletd is unreachable");
+        return view.inspect(txid);
+      },
+    }));
+    d1 = await opened(r);
+    r.chain.hold(d1);
+    const d2 = send(r.chain, { memo: `${K}:2` });
+    r.chain.mine();
+    await r.s.verify(pay(1000n, { txid: d2 }), req());
+    await until(() => r.resolver.peek(d2) !== undefined);
+    expect(await r.s.settle(pay(1000n, { txid: d2 }), req())).toMatchObject({ success: true, transaction: d2 });
+    failing = true;
+    r.chain.mine(40);
+    await r.watcher.pollNow();
+    expect(r.state.deposit(d1)?.status).toBe("pending");
+    expect(r.state.deposit(d2)?.status).toBe("final");
+
+    const settled = await r.s.settle(pay(1500n), req());
+    expect(settled).toMatchObject({ success: true });
+    const snapshot = sessionOf(settled);
+    expect(snapshot.limitZat).toBe("125000");
+    expect(snapshot.deposits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ txid: d1, status: "dead" }),
+        expect.objectContaining({ txid: d2, status: "final" }),
+      ]),
+    );
+    expect(r.state.deposit(d1)?.status).toBe("pending");
+  });
 });
 
 describe("the refresh before a refusal", () => {
@@ -1477,9 +1513,9 @@ describe("advertised terms and configuration", () => {
     ["terms the wire cannot carry", { terms: { ...DEMO_TERMS, creditRatioBps: 10001 } }, /terms/],
     ["a deposit wait of Infinity, which would poll forever", { depositWaitMs: Infinity }, /^depositWaitMs:/],
     ["a deposit wait below zero", { depositWaitMs: -1 }, /^depositWaitMs:/],
-    ["a deposit wait past 60 s", { depositWaitMs: 60_001 }, /^depositWaitMs:/],
+    ["a deposit wait past 30 s", { depositWaitMs: 30_001 }, /^depositWaitMs: expected a whole number from 0 to 30000$/],
     ["a refresh wait below zero", { refreshWaitMs: -1 }, /^refreshWaitMs:/],
-    ["a refresh wait past 60 s", { refreshWaitMs: 60_001 }, /^refreshWaitMs:/],
+    ["a refresh wait past 5 s", { refreshWaitMs: 5001 }, /^refreshWaitMs: expected a whole number from 0 to 5000$/],
   ])("the constructor refuses %s", (_, over, field) => {
     const { state, resolver, watcher } = rig();
 
@@ -1493,5 +1529,13 @@ describe("advertised terms and configuration", () => {
           commit: () => undefined,
         }),
     ).toThrow(field);
+  });
+
+  test("takes the longest waits whose worst case the API's 60 s for a verify was sized for", () => {
+    const { state, resolver, watcher } = rig();
+    const config = { ...CONFIG, depositWaitMs: 30_000, refreshWaitMs: 5000 };
+    expect(
+      () => new PrepaidVoucherFacilitatorScheme({ config, state, resolver, watcher, commit: () => undefined }),
+    ).not.toThrow();
   });
 });

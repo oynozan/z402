@@ -114,8 +114,9 @@ type Authenticated = { ok: true; voucher: Voucher } | { ok: false; refusal: Refu
 
 const FATAL_LOG = "ledger write failed — facilitator must restart";
 const DEFAULT_REFRESH_WAIT_MS = 5000;
-/** The API gives the facilitator 60 s, so no wait of verify may be longer */
-const MAX_WAIT_MS = 60_000;
+// The API's 60 s for a verify is sized for these two waits and the read that ends the first, 25 s at default deadlines
+const MAX_DEPOSIT_WAIT_MS = 30_000;
+const MAX_REFRESH_WAIT_MS = 5000;
 const UNEXPECTED_VERIFY: Refusal = { code: REASON.unexpectedVerifyError, message: "the facilitator failed to verify" };
 const UNEXPECTED_SETTLE: Refusal = { code: REASON.unexpectedSettleError, message: "the facilitator failed to settle" };
 const POISONED_VERIFY: Refusal = { code: REASON.unexpectedVerifyError, message: "the facilitator must restart" };
@@ -512,13 +513,11 @@ function checkedConfig(c: SchemeConfig): Required<SchemeConfig> {
   } catch (e) {
     throw new Error(`terms: ${e instanceof Error ? e.message : String(e)}`);
   }
-  waitOf("depositWaitMs", c.depositWaitMs);
-  if (c.refreshWaitMs !== undefined) waitOf("refreshWaitMs", c.refreshWaitMs);
+  waitOf("depositWaitMs", c.depositWaitMs, MAX_DEPOSIT_WAIT_MS);
+  if (c.refreshWaitMs !== undefined) waitOf("refreshWaitMs", c.refreshWaitMs, MAX_REFRESH_WAIT_MS);
   return { ...c, terms: { ...c.terms }, refreshWaitMs: c.refreshWaitMs ?? DEFAULT_REFRESH_WAIT_MS };
 }
 
-function waitOf(name: string, ms: number): void {
-  if (!Number.isInteger(ms) || ms < 0 || ms > MAX_WAIT_MS) {
-    throw new Error(`${name}: expected a whole number from 0 to ${MAX_WAIT_MS}`);
-  }
+function waitOf(name: string, ms: number, max: number): void {
+  if (!Number.isInteger(ms) || ms < 0 || ms > max) throw new Error(`${name}: expected a whole number from 0 to ${max}`);
 }

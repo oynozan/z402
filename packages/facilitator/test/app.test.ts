@@ -872,7 +872,7 @@ describe("startFacilitator", () => {
     ["pollIntervalMs", { pollIntervalMs: 0 }],
     ["pollIntervalMs", { pollIntervalMs: 2 ** 31 }],
     ["depositWaitMs", { depositWaitMs: -1 }],
-    ["depositWaitMs", { depositWaitMs: 60_001 }],
+    ["depositWaitMs", { depositWaitMs: 30_001 }],
     ["host", { host: "" }],
     ["host", { host: " " }],
     ["ledgerPath", { ledgerPath: "" }],
