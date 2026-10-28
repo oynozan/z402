@@ -3,12 +3,23 @@
  *
  * Items are keyed by provider, canonical resource and method, and come from two sources. A provider's declaration is
  * validated whole and upserts its items, which is also its liveness signal. A settled payment bumps the matching item,
- * and lists a new one only for a provider that never declared, since the resource and extension of a payment are
- * echoed by the payer. All of it is synchronous and in memory, and when given a file the catalog writes it out after
- * a short delay (temp file, then rename), so a lost or corrupt file costs only the listing until the next heartbeat.
+ * and lists a new one only for a provider that has never declared, since the resource and extension of a payment are
+ * echoed by the payer. A provider's first declaration removes the payment-sourced items it does not declare itself,
+ * and is written to the file before declare returns, so that a crash cannot reopen a declaring provider to payment
+ * listings. Every other change is written after a short delay (temp file, fsync, rename). If the file is lost, a
+ * provider can be listed from payments only until its next declaration, which removes those items again.
  */
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import {
   CatalogError,
@@ -206,7 +217,11 @@ export class Catalog {
   /** Upserts the declared items of a provider, all or none, and answers them as served */
   declare(p: CatalogProvider, body: unknown): ServedResource[] {
     const declared = parseDeclaration(p, body);
-    this.#checkRoom(p, declared);
+    const entering = !this.#declaring.has(p.id);
+    // A provider that enters the declaring set loses the payment-sourced items it does not declare itself
+    const dropped = entering ? this.#unclaimed(p, declared) : [];
+    this.#checkRoom(p, declared, dropped.length);
+    for (const key of dropped) this.#items.delete(key);
     const at = this.#now().toISOString();
     const touched = new Map<string, Stored>();
     for (const d of declared) {
@@ -228,6 +243,8 @@ export class Catalog {
     this.#sorted = undefined;
     this.#declaring.add(p.id);
     this.#changed();
+    // The flag and the removals are on disk before the answer, since a crash would reopen the provider to payments
+    if (entering && !this.#closed) this.#write();
     const day = at.slice(0, 10);
     return [...touched.values()].map((item) => serve(item, day));
   }
@@ -341,9 +358,21 @@ export class Catalog {
     return all >= this.#maxTotal ? "total" : undefined;
   }
 
-  /** Refuses a declaration whose new items do not fit, naming the first that does not */
-  #checkRoom(p: CatalogProvider, declared: Declared[]): void {
-    let [own, all] = this.#counts(p);
+  /** The keys of this provider's payment-sourced items that a declaration does not declare itself */
+  #unclaimed(p: CatalogProvider, declared: Declared[]): string[] {
+    const claimed = new Set(declared.map((d) => keyOf(p.id, d.resource, d.method)));
+    const keys: string[] = [];
+    for (const [key, item] of this.#items) {
+      if (item.providerId === p.id && item.source === "payment" && !claimed.has(key)) keys.push(key);
+    }
+    return keys;
+  }
+
+  /** Refuses a declaration whose new items do not fit once `freed` items are gone, naming the first that does not */
+  #checkRoom(p: CatalogProvider, declared: Declared[], freed: number): void {
+    const [listed, total] = this.#counts(p);
+    let own = listed - freed;
+    let all = total - freed;
     const added = new Set<string>();
     for (const [index, d] of declared.entries()) {
       const key = keyOf(p.id, d.resource, d.method);
@@ -441,7 +470,14 @@ export class Catalog {
       mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
       const store = { version: STORE_VERSION, declared: [...this.#declaring].sort(), items: this.#order() };
       // Exclusive create, so a leftover file of the same name is never written through
-      writeFileSync(temp, JSON.stringify(store), { flag: "wx", mode: 0o600 });
+      const fd = openSync(temp, "wx", 0o600);
+      try {
+        writeFileSync(fd, JSON.stringify(store));
+        // On disk before the rename, so that a power loss cannot leave the name pointing at an empty file
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
       renameSync(temp, file);
       this.#dirty = false;
     } catch (e) {

@@ -1,10 +1,13 @@
 import {
   chmodSync,
   existsSync,
+  fsyncSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -23,6 +26,12 @@ import {
   type CatalogProvider,
   type ServedResource,
 } from "../src/discovery/catalog.js";
+
+// The catalog imports fs functions by name, so only a module mock can show that an fsync precedes a rename
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return { ...fs, fsyncSync: vi.fn(fs.fsyncSync), renameSync: vi.fn(fs.renameSync) };
+});
 
 const PAY_TO = `uregtest1${"q".repeat(60)}`;
 const OTHER_PAY_TO = `uregtest1${"p".repeat(60)}`;
@@ -1125,12 +1134,120 @@ describe("recordPaid: a provider that declared is never listed from payments", (
     expect(everything(c)).toHaveLength(1);
   });
 
-  test("a payment before the declaration lists an item, but none after it", () => {
-    const c = make();
-    c.recordPaid(P1, injected("http://h/before"), accept());
-    c.declare(P1, body(decl()));
-    c.recordPaid(P1, injected("http://h/after"), accept());
-    expect(resources(c)).toStrictEqual(["http://127.0.0.1:4021/chunk", "http://h/before"]);
+  describe("its first declaration removes the items its payments listed", () => {
+    /** P1 listed from payments, as a provider that has never declared is */
+    const listed = (urls: string[], o: CatalogOptions = {}): Catalog => {
+      const c = make(o);
+      for (const url of urls) c.recordPaid(P1, injected(url), accept());
+      expect(resources(c)).toStrictEqual([...urls].sort());
+      return c;
+    };
+
+    test("removes every payment-sourced item of the provider, in the call that marks it as declaring", () => {
+      const c = listed(["http://h/one", "http://h/two"]);
+      c.declare(P1, body(decl()));
+      expect(resources(c)).toStrictEqual(["http://127.0.0.1:4021/chunk"]);
+    });
+
+    test("leaves the items that another provider's payments listed", () => {
+      const c = listed(["http://h/before"]);
+      c.recordPaid(P2, injected("http://h/other"), accept({}, P2));
+      c.declare(P1, body(decl()));
+      expect(resources(c)).toStrictEqual(["http://127.0.0.1:4021/chunk", "http://h/other"]);
+    });
+
+    test("keeps the item it declares itself, with its payment history, and removes the others", () => {
+      const c = listed(["http://127.0.0.1:4021/chunk", "http://h/before"]);
+      c.declare(P1, body(decl({ description: "now declared" })));
+      expect(everything(c)).toMatchObject([
+        { resource: "http://127.0.0.1:4021/chunk", description: "now declared", paidCallsToday: 1 },
+      ]);
+    });
+
+    test("a payment for a removed item's URL then lists nothing and counts nothing", () => {
+      const c = listed(["http://h/before"]);
+      c.declare(P1, body(decl()));
+      c.recordPaid(P1, injected("http://h/before"), accept());
+      expect(everything(c)).toMatchObject([{ resource: "http://127.0.0.1:4021/chunk", paidCallsToday: 0 }]);
+    });
+
+    test("a payment for a declared item counts it, and lists nothing else", () => {
+      const c = listed(["http://h/before"]);
+      c.declare(P1, body(decl()));
+      c.recordPaid(P1, pay(), accept());
+      c.recordPaid(P1, injected("http://h/after"), accept());
+      expect(everything(c)).toMatchObject([{ resource: "http://127.0.0.1:4021/chunk", paidCallsToday: 1 }]);
+    });
+
+    test("a first declaration that is refused removes nothing, and the provider stays open to payments", () => {
+      const c = listed(["http://h/before"]);
+      refusal(() => c.declare(P1, body(decl(), decl({ type: "x" }))));
+      c.recordPaid(P1, injected("http://h/more"), accept());
+      expect(resources(c)).toStrictEqual(["http://h/before", "http://h/more"]);
+    });
+
+    test("a first declaration refused at a cap removes nothing either", () => {
+      const c = listed(["http://h/before"], { maxPerProvider: 2 });
+      const items = ["x", "y", "z"].map((n) => decl({ resource: `http://h/${n}` }));
+      expect(refusal(() => c.declare(P1, body(...items))).index).toBe(2);
+      expect(resources(c)).toStrictEqual(["http://h/before"]);
+    });
+
+    test("the items it removes do not count against the per-provider cap", () => {
+      const c = listed(["http://h/a", "http://h/b"], { maxPerProvider: 2 });
+      c.declare(P1, body(decl({ resource: "http://h/x" }), decl({ resource: "http://h/y" })));
+      expect(resources(c)).toStrictEqual(["http://h/x", "http://h/y"]);
+    });
+
+    test("nor against the total cap", () => {
+      const c = listed(["http://h/a"], { maxTotal: 2 });
+      c.recordPaid(P2, injected("http://h/b"), accept({}, P2));
+      c.declare(P1, body(decl({ resource: "http://h/x" })));
+      expect(resources(c)).toStrictEqual(["http://h/b", "http://h/x"]);
+    });
+
+    test("an item it declares itself is not freed as well, so it still counts against the cap", () => {
+      const c = listed(["http://h/a", "http://h/b"], { maxPerProvider: 2 });
+      const items = ["a", "x", "y"].map((n) => decl({ resource: `http://h/${n}` }));
+      expect(refusal(() => c.declare(P1, body(...items))).index).toBe(2);
+      expect(resources(c)).toStrictEqual(["http://h/a", "http://h/b"]);
+    });
+
+    test("never removes a declared item, even of a provider whose declaring flag was lost", () => {
+      const declaredItem = {
+        providerId: P1.id,
+        resource: "http://h/old",
+        method: "GET",
+        accepts: [ACCEPT_500],
+        source: "declared",
+        firstListed: ISO0,
+        lastSeen: ISO0,
+        paidCount: 0,
+      };
+      writeFileSync(file(), JSON.stringify({ version: 1, declared: [], items: [declaredItem] }));
+      const c = make({ file: file() });
+      c.recordPaid(P1, injected("http://h/before"), accept());
+      expect(resources(c)).toStrictEqual(["http://h/before", "http://h/old"]);
+      c.declare(P1, body(decl()));
+      expect(resources(c)).toStrictEqual(["http://127.0.0.1:4021/chunk", "http://h/old"]);
+    });
+
+    test("a provider whose declaring flag was lost is cleaned by its next declaration", async () => {
+      const first = make({ file: file() });
+      first.declare(P1, body(decl()));
+      await first.close();
+      writeFileSync(file(), "garbage");
+      const second = make({ file: file() });
+      second.recordPaid(P1, injected("http://evil.example/steal"), accept());
+      expect(resources(second)).toStrictEqual(["http://evil.example/steal"]);
+      second.declare(P1, body(decl()));
+      expect(resources(second)).toStrictEqual(["http://127.0.0.1:4021/chunk"]);
+      second.recordPaid(P1, injected("http://evil.example/again"), accept());
+      expect(resources(second)).toStrictEqual(["http://127.0.0.1:4021/chunk"]);
+      const third = make({ file: file() });
+      third.recordPaid(P1, injected("http://evil.example/again"), accept());
+      expect(resources(third)).toStrictEqual(["http://127.0.0.1:4021/chunk"]);
+    });
   });
 
   test("another provider's declaration does not stop this provider's payments from listing", () => {
@@ -1816,17 +1933,74 @@ describe("persistence", () => {
     expect(existsSync(file())).toBe(false);
   });
 
+  test("the declaring flag is on disk before declare returns, so a crash cannot reopen the provider", () => {
+    make({ file: file() }).declare(P1, body(decl()));
+    const restarted = make({ file: file() });
+    restarted.recordPaid(P1, pay({ resource: { url: "http://evil.example/x" } }), accept());
+    expect(resources(restarted)).toStrictEqual(["http://127.0.0.1:4021/chunk"]);
+  });
+
+  test("a first declaration is on disk with its removals before declare returns, so a crash loses none", async () => {
+    const a = make({ file: file() });
+    a.recordPaid(P1, pay({ resource: { url: "http://h/before" } }), accept());
+    await a.flush();
+    expect(resources(make({ file: file() }))).toStrictEqual(["http://h/before"]);
+    a.declare(P1, body(decl()));
+    const restarted = make({ file: file() });
+    expect(resources(restarted)).toStrictEqual(["http://127.0.0.1:4021/chunk"]);
+    restarted.recordPaid(P1, pay({ resource: { url: "http://evil.example/x" } }), accept());
+    expect(resources(restarted)).toStrictEqual(["http://127.0.0.1:4021/chunk"]);
+  });
+
+  test("writes through a temp file and a rename, so the file a reader holds is never rewritten", async () => {
+    const c = make({ file: file() });
+    c.declare(P1, body(decl({ resource: "http://h/1" })));
+    await c.flush();
+    const held = join(dir, "held.json");
+    linkSync(file(), held);
+    c.declare(P1, body(decl({ resource: "http://h/2" })));
+    await c.flush();
+    expect((JSON.parse(readFileSync(held, "utf8")) as { items: unknown[] }).items).toHaveLength(1);
+    expect(readFile().items).toHaveLength(2);
+  });
+
+  test("fsyncs the temp file before renaming it over the catalog file", () => {
+    const c = make({ file: file() });
+    vi.mocked(fsyncSync).mockClear();
+    vi.mocked(renameSync).mockClear();
+    c.declare(P1, body(decl()));
+    const fsync = vi.mocked(fsyncSync).mock;
+    const rename = vi.mocked(renameSync).mock;
+    expect(fsync.calls).toHaveLength(1);
+    expect(rename.calls).toHaveLength(1);
+    expect(fsync.invocationCallOrder[0]).toBeLessThan(rename.invocationCallOrder[0]!);
+  });
+
   describe("timing", () => {
     const fake = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
+    /** A catalog where P1 has declared, which is written at once, so that what a test changes next follows the delay */
+    const declared = (o: CatalogOptions = {}): Catalog => {
+      const c = make({ file: file(), ...o });
+      c.declare(P1, body(decl({ resource: "http://h/first" })));
+      return c;
+    };
+
     test("a change is written within writeDelayMs, and not before", () => {
+      fake();
+      const c = declared({ writeDelayMs: 2000 });
+      c.declare(P1, body(decl({ resource: "http://h/second" })));
+      vi.advanceTimersByTime(1999);
+      expect(readFile().items).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(readFile().items).toHaveLength(2);
+    });
+
+    test("a provider's first declaration is written at once, before any delay", () => {
       fake();
       const c = make({ file: file(), writeDelayMs: 2000 });
       c.declare(P1, body(decl()));
-      vi.advanceTimersByTime(1999);
-      expect(existsSync(file())).toBe(false);
-      vi.advanceTimersByTime(1);
-      expect(readFile().items).toHaveLength(1);
+      expect(readFile()).toMatchObject({ declared: [P1.id], items: [{ resource: "http://127.0.0.1:4021/chunk" }] });
     });
 
     test("changes inside the window share one write", () => {
@@ -1888,12 +2062,12 @@ describe("persistence", () => {
 
     test("the write delay defaults to 2000 ms", () => {
       fake();
-      const c = make({ file: file() });
-      c.declare(P1, body(decl()));
+      const c = declared();
+      c.declare(P1, body(decl({ resource: "http://h/second" })));
       vi.advanceTimersByTime(1999);
-      expect(existsSync(file())).toBe(false);
+      expect(readFile().items).toHaveLength(1);
       vi.advanceTimersByTime(1);
-      expect(existsSync(file())).toBe(true);
+      expect(readFile().items).toHaveLength(2);
     });
 
     test("the timer is unref'd, so it never keeps the process alive", () => {
@@ -1915,18 +2089,18 @@ describe("persistence", () => {
 
     test("flush writes at once, before the delay", async () => {
       fake();
-      const c = make({ file: file(), writeDelayMs: 2000 });
-      c.declare(P1, body(decl()));
+      const c = declared({ writeDelayMs: 2000 });
+      c.declare(P1, body(decl({ resource: "http://h/second" })));
       await c.flush();
-      expect(readFile().items).toHaveLength(1);
+      expect(readFile().items).toHaveLength(2);
     });
 
     test("close flushes the pending change at once", async () => {
       fake();
-      const c = make({ file: file(), writeDelayMs: 2000 });
-      c.declare(P1, body(decl()));
+      const c = declared({ writeDelayMs: 2000 });
+      c.declare(P1, body(decl({ resource: "http://h/second" })));
       await c.close();
-      expect(readFile().items).toHaveLength(1);
+      expect(readFile().items).toHaveLength(2);
     });
 
     test("close leaves no timer behind, so a change after it is never written", async () => {
@@ -1938,6 +2112,14 @@ describe("persistence", () => {
       vi.advanceTimersByTime(10_000);
       expect(readFile().items).toHaveLength(1);
       expect(c.list(ALL).pagination.total).toBe(2);
+    });
+
+    test("a first declaration after close is not written either", async () => {
+      const c = make({ file: file() });
+      await c.close();
+      c.declare(P1, body(decl()));
+      expect(existsSync(file())).toBe(false);
+      expect(c.list(ALL).pagination.total).toBe(1);
     });
 
     test("close can be called twice", async () => {
@@ -1952,12 +2134,23 @@ describe("persistence", () => {
     test("is logged, never thrown, and leaves no temp file", async () => {
       const c = make({ file: file() });
       mkdirSync(file());
-      c.declare(P1, body(decl()));
-      await expect(c.flush()).resolves.toBeUndefined();
+      expect(() => c.declare(P1, body(decl()))).not.toThrow();
       expect(log).toHaveBeenCalledTimes(1);
+      await expect(c.flush()).resolves.toBeUndefined();
+      expect(log).toHaveBeenCalledTimes(2);
       expect(readdirSync(dir)).toStrictEqual(["discovery.json"]);
       expect(statSync(file()).isDirectory()).toBe(true);
       expect(c.list(ALL).pagination.total).toBe(1);
+    });
+
+    test("is written again by the timer after a first declaration whose write failed", () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const c = make({ file: file(), writeDelayMs: 2000 });
+      mkdirSync(file());
+      c.declare(P1, body(decl()));
+      rmSync(file(), { recursive: true });
+      vi.advanceTimersByTime(2000);
+      expect(readFile().declared).toStrictEqual([P1.id]);
     });
 
     test("is tried again at the next flush", async () => {
