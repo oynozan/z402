@@ -63,7 +63,7 @@ export class PrepaidVoucherServerScheme implements SchemeNetworkServer {
     },
   };
 
-  // Core calls this once per accept, so the stash is kept for the next call
+  // Kept after use, since core calls this once per accept with the same per-request payload, and the entry dies with it
   enrichPaymentRequiredResponse = async (ctx: SchemePaymentRequiredContext): Promise<void> => {
     if (ctx.paymentPayload === undefined) return;
     const session = this.#refusedSessions.get(ctx.paymentPayload);

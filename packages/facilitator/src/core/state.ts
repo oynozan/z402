@@ -57,7 +57,7 @@ export class FacilitatorState {
     return [...this.#deposits.values()].filter((d) => isLive(d, tip));
   }
 
-  // Copies what apply reads for this event, unless an earlier event of the batch already put it there
+  // Lends the live objects apply reads, which is safe as records are frozen and sessions are replaced, never changed
   #lend(scratch: FacilitatorState, e: LedgerEvent): void {
     if (e.t === "voucher") {
       const session = this.#sessions.get(e.sessionKey);
@@ -93,7 +93,7 @@ export class FacilitatorState {
     const cumulative = BigInt(e.cumulativeZat);
     const settled = this.#sessions.get(e.sessionKey)?.cLast ?? 0n;
     if (cumulative < settled) throw new Error(`voucher ${cumulative} is below the settled cumulative ${settled}`);
-    this.#sessions.set(e.sessionKey, { sessionKey: e.sessionKey, cLast: cumulative });
+    this.#sessions.set(e.sessionKey, Object.freeze({ sessionKey: e.sessionKey, cLast: cumulative }));
   }
 
   #move(e: Of<"status">): void {
