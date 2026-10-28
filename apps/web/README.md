@@ -100,6 +100,9 @@ its references so a clean checkout type-checks without it.
   `src/app/fonts`, cut to Basic Latin, under the SIL Open Font License (`OFL.txt` there).
 - `public/coin.png` is drawn by `scripts/render-coin.mjs` (no dependencies, about 20 s), rerun it after changing it.
 - `src/components/dither-veil/` is React Bits' Dither Veil, vendored under its own license (`LICENSE.md` there).
+- `src/components/light-rays/` is React Bits' Light Rays, vendored the same way; `src/components/services-rays.tsx`
+  sets faint white rays behind the head of the landing page's services section, with no pointer listeners, starts
+  them once the section nears, and leaves a static glow without WebGL2.
 - `src/components/live/catalog.tsx` is the services catalog the landing and `/services` share; `src/lib/catalog.ts`
   and `src/lib/calls.ts` hold its search, filters and the curl and `paidFetch` snippets it copies.
 - `src/app/docs/` holds the docs' layout, page template, stylesheet and search index route; `src/lib/docs/` the IA,

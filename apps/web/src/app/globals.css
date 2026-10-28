@@ -833,6 +833,23 @@ pre {
 
 /* Services catalog */
 
+/* The rays sit inside the head, under its lines and words, and fade out before its bottom line */
+.head-rays {
+  position: relative;
+  isolation: isolate;
+}
+.rays {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  mask-image: linear-gradient(to bottom, #000 25%, #0000 100%);
+}
+/* Without WebGL2, the glow the rays leave at the top */
+.rays[data-fallback] {
+  background: radial-gradient(50% 100% at 50% 0%, #ffffff14, #0000);
+}
 .catalog-pending {
   height: 520px;
 }

@@ -7,6 +7,7 @@ import { HeroVeil } from "@/components/hero-veil";
 import { HowItWorks } from "@/components/how-it-works";
 import { Catalog } from "@/components/live/catalog";
 import { DiscoveryProvider } from "@/components/live/discovery-provider";
+import { ServicesRays } from "@/components/services-rays";
 import { loadDiscovery } from "@/lib/discovery";
 import { siteOrigin } from "@/lib/origin";
 
@@ -51,7 +52,8 @@ export default function Home() {
 
       <section className="section" id="services" aria-labelledby="services-title">
         <div className="frame">
-          <div className="head">
+          <div className="head head-rays">
+            <ServicesRays />
             <div className="head-main">
               <Badge index="03" label="Services" />
               <h2 className="title" id="services-title">
