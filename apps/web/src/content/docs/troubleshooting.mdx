@@ -1,0 +1,328 @@
+export const meta = {
+  title: "Troubleshooting",
+  description: "What to check when the stack will not start, a deposit keeps waiting, a call returns 402 after payment, or a provider's API key stops working.",
+};
+
+Most problems show up in one of three places: the container list, a service's log, or the agent's own log. Start with these commands, then find your symptom below.
+
+## Start here
+
+```bash
+docker compose ps -a                     # health of every service; finished jobs show Exited (0)
+docker compose logs -f facilitator       # one service's log; leave the name out for all of them
+curl -s http://localhost:4031/health     # a starter service says whether it is ready
+```
+
+The demo API has no `/health`. It is up when an unpaid call gets its offer: `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:4021/chunk` prints `402`. The facilitator's port is not published, so read its health from `docker compose ps` and its log.
+
+<Callout type="tip" title="Read the agent's log first">
+
+The agent prints one line for each paid call. A refusal says `REFUSED` and names the reason code, for example `#126 402  REFUSED z402_deposit_required at limit 125,000`. Lines that start with `  * ` are events of the payment client: deposits, confirmations, waits and refusals it recovers from. The reason code tells you the cause, and [A 402 after paying](#a-402-after-paying) lists what each one means.
+
+</Callout>
+
+| Symptom | Go to |
+|---|---|
+| `docker compose up -d` stops during the build | [The build fails on the network](#the-build-fails-on-the-network) |
+| A port is in use, a container is killed, the disk is full | [Ports, memory and disk](#ports-memory-and-disk) |
+| `llm` or `embeddings` stays `starting` | [A model keeps llm or embeddings unready](#a-model-keeps-llm-or-embeddings-unready) |
+| Services wait for the facilitator, or the facilitator exits | [The facilitator is not ready](#the-facilitator-is-not-ready) |
+| `waiting for deposit … to confirm` never ends | [The agent waits for a deposit to confirm](#the-agent-waits-for-a-deposit-to-confirm) |
+| A call returns 402 after the agent paid | [A 402 after paying](#a-402-after-paying) |
+| A call failed after the voucher was sent | [A call failed after I paid](#a-call-failed-after-i-paid) |
+| The agent stops because the wallet is too small | [The wallet has too little](#the-wallet-has-too-little) |
+| A service refuses a call with a 4xx or 503 | [A service refuses a call](#a-service-refuses-a-call) |
+| A service will not start and names its API key, address or URL | [A service will not start](#a-service-will-not-start) |
+| A provider's API key stopped working | [Rotating an API key](#rotating-an-api-key) |
+| The facilitator forgot its providers | [A lost registry](#a-lost-registry) |
+| The facilitator will not start after a reset | [Wiping the chain](#wiping-the-chain) |
+| `discover` is empty, or a service shows `stale` or `down` | [The catalog is empty or a service is down](#the-catalog-is-empty-or-a-service-is-down) |
+| `smoke FAILED` | [smoke FAILED](#smoke-failed) |
+
+## Starting the stack
+
+### The build fails on the network
+
+The first start downloads images from Docker Hub and ghcr.io, npm packages and Rust crates for the build, the website's fonts from Google Fonts, and the two models from Hugging Face. A build step that fails on the network stops `up -d` before any container starts. Run it again: the steps that finished are reused. The website build already tries three times, 30 seconds apart.
+
+```bash
+docker compose up -d
+```
+
+### Ports, memory and disk
+
+- **A port is in use.** Docker refuses to publish a port that another program holds. The defaults are 3000, 4021 and 4031 to 4034. Change the host port in `.env` (`Z402_WEB_PORT`, `Z402_API_PORT`, `Z402_LLM_PORT`, `Z402_MARKDOWN_PORT`, `Z402_EMBEDDINGS_PORT`, `Z402_DROPBOX_PORT`) and run `docker compose up -d`. A service's `PUBLIC_URL` in `services/<name>/.env` names the port agents use, so change both together.
+- **Memory.** The stack needs at least 4 GB. Every container has its own memory limit. If Docker has less than that to give, containers can be killed or fail to start: `docker compose ps -a` shows which one exited.
+- **Disk.** Allow about 8 GB. `docker system df` shows what Docker uses. The models, about 580 MB, live in the `models` volume, and `docker compose down -v` deletes them.
+- **Logs have no limit.** Docker keeps container logs without limit unless the daemon rotates them. In `/etc/docker/daemon.json`, set `"log-opts": {"max-size": "10m", "max-file": "3"}`.
+- **The drop box is full.** `dropbox` answers `507 storage_full` when the stored drops would pass `DROPBOX_MAX_TOTAL_BYTES`, 256 MiB by default. The upload is refused before payment. Drops expire by block height, so they leave as blocks are mined.
+- **Zaino does not start on arm64.** Zaino exists for amd64 only. Docker Desktop on Apple silicon emulates it. A Linux arm64 host needs `docker run --privileged --rm tonistiigi/binfmt --install amd64` first.
+
+### A model keeps llm or embeddings unready
+
+`llm-model` and `embed-model` download their models on the first start, about 580 MB in all, into the `models` volume. `llm` and `embeddings` show `health: starting` until the model is loaded, and answer `503 not_ready` before payment until then, so nothing is charged. Nothing else waits for them. `smoke` does wait.
+
+```bash
+docker compose logs -f llm-model embed-model
+curl -i http://localhost:4031/health        # 503 until the model is listed, then 200
+```
+
+If the log shows that the download fails, Hugging Face is not reachable from the container. Fix the network and run `docker compose up -d` again. To skip the local models, point the services at a hosted OpenAI-compatible API. In `services/llm/.env` set `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL`, set `LLM_MAX_PROMPT_CHARS=` to an empty value, and in `.env` set `Z402_LLM_MODEL_SCALE=0`. The embeddings service has matching `EMBEDDINGS_*` settings and `Z402_EMBED_MODEL_SCALE=0`. A service is ready, and charges, once its provider lists the model.
+
+### The facilitator is not ready
+
+Everything that charges depends on the facilitator, so the stack starts it early and makes the rest wait:
+
+1. `facilitator` waits until Zaino answers `GetLightdInfo`, for up to 10 minutes. It then runs its start-up checks and exits with status 1 at the first one that fails.
+2. `api` waits for the facilitator before it starts, for up to 15 minutes.
+3. The starter services retry every 2 seconds for up to 2 minutes (`Z402_FACILITATOR_WAIT_MS`, 120,000 by default), then fail with a line that names the variable at fault.
+
+`docker compose ps` shows the facilitator as `health: starting` for as long as it waits. After a reboot every container starts at once, and the services and the API wait for the facilitator. All were healthy again after 20 to 27 seconds in the measured run.
+
+```bash
+docker compose logs facilitator
+```
+
+| Log line | Cause and fix |
+|---|---|
+| `wait-lightwalletd: http://zaino:8137 did not answer GetLightdInfo within 600 s (…)` | Zaino is not answering. Read `docker compose logs zaino zebra`. On a Linux arm64 host, install the amd64 emulation above. |
+| `startup check failed (network): lightwalletd did not answer GetLightdInfo (…); check Z402_LWD_URL` | The same, after the wait. |
+| `startup check failed (network): lightwalletd reports Sapling activation at …, which is not zcash:regtest's; Z402_LWD_URL serves another network` | `Z402_NETWORK` and the node disagree about the network. |
+| `startup check failed (consensusBranchId): …` | The node follows another network upgrade. Check `Z402_LWD_URL`, `Z402_NETWORK` and `Z402_EXPECTED_BRANCH_ID`. |
+| `startup check failed (self-test): …` | `zdecrypt`, the decryptor, is missing or outdated. The Docker image builds it, so run `docker compose up -d --build`. |
+| `startup check failed (ownedByKey): Z402_UIVK is not the viewing key of Z402_PAY_TO …` | The viewing key and the address do not belong together. |
+| `ledgerPath: … is the ledger of <network> <payTo>, not of this facilitator` | The ledger was written for other keys or another network. See [Wiping the chain](#wiping-the-chain). |
+| `ledgerPath: … is in use by pid … on … since …; stop that facilitator, or delete <ledger>.lock if none is running` | Another facilitator holds the ledger, or one crashed and left its lock. A lock that nobody has touched for 15 seconds is taken over by the next start, so a restart after a crash can wait that long. |
+| `facilitator: the ledger cannot be written, exiting so that a restart replays it` | A ledger write failed, for example on a full disk. The facilitator exits on purpose, and its restart replays the ledger. Fix the disk, then let it restart. |
+
+## Paying
+
+### The agent waits for a deposit to confirm
+
+```text
+  * refused z402_awaiting_confirmation, recovering
+  * waiting for deposit 3f2a…c1 to confirm
+```
+
+The agent has used up its limit, and its deposit is still in the mempool. The facilitator answers `z402_awaiting_confirmation`, and the agent, by design, never makes another deposit while one is pending. It waits until its own check of the chain shows one confirmation, pauses a few seconds so that the facilitator sees the block too, and retries.
+
+- **No blocks are being mined.** On the compose chain, the `clock` service mines a block every 25 seconds. Without blocks nothing confirms and nothing expires. Check it:
+
+  ```bash
+  docker compose ps clock
+  docker compose logs --tail 5 clock
+  docker compose up -d clock
+  ```
+
+- **It is only slow.** After a block, the node can lag by a few seconds and the facilitator polls the tip every 5 seconds, so a confirmation shows up to about 7 seconds late. A block takes 25 seconds on the compose chain, and about 75 seconds on mainnet.
+- **The agent gave up.** It waits at most 10 minutes. After that the call comes back as `REFUSED z402_awaiting_confirmation`.
+
+A deposit that is never mined expires about 40 blocks after it was built. The facilitator then answers `z402_deposit_dead`, and the agent makes a new deposit.
+
+### A 402 after paying
+
+A 402 after the agent sent a voucher is a refusal. The reason is in the log line, and the code carries the action. Most refusals are recovered from without you noticing. You see a `REFUSED` line only when the agent gave up.
+
+| Reason | Cause | What to do |
+|---|---|---|
+| `z402_deposit_required` | The total reached the limit and nothing is pending. An honest agent deposits and retries by itself. | Look above the line for `deposit D2 failed: …`. The wallet may be empty ([The wallet has too little](#the-wallet-has-too-little)), or the run is a `--cheat` run, which makes one deposit only. |
+| `z402_awaiting_confirmation` | Over the limit, and a deposit is still pending. | See [The agent waits for a deposit to confirm](#the-agent-waits-for-a-deposit-to-confirm). |
+| `z402_cumulative_mismatch` | The total did not grow by the price. Rare. The refusal carries the facilitator's total, and the agent takes it over and retries once. | If it persists, restart the agent. A new run is a new session. |
+| `z402_deposit_not_found` | For 30 seconds the facilitator could not see the deposit. The agent keeps the txid and retries. | Both must read the same node. In compose both read Zaino: `docker compose logs zaino`. |
+| `z402_chain_unavailable` | The facilitator's node did not answer. The agent waits 5 seconds and retries once. | `docker compose ps zaino`, then its log. |
+| `z402_deposit_memo_mismatch` | The deposit was found but cannot be credited to this session. Either no output pays this provider's `payTo`, or none carries this session's memo, or the txid is already credited to another session. One code covers all three. | The agent stops with `FATAL`. Check that it paid the `payTo` in the offer, since each provider has its own, and that the chain and the ledger match ([Wiping the chain](#wiping-the-chain)). |
+| `z402_deposit_transparent` | The deposit had a transparent input or output. Deposits must be fully shielded. | Pay from a shielded balance. |
+| `z402_deposit_dead` | The deposit expired, was dropped, or sits on a side chain. The agent drops it and makes a new one. | If it repeats, check that blocks are being mined. |
+| `z402_invalid_signature` | The voucher's signature does not verify. The agent stops. | This means a bug. Report it with the log. |
+| `invalid_payment_requirements` | The provider's requirements are not acceptable for the API key it presented: its `payTo` is not the one registered to the key, its price is outside 1 to `windowZat`, or its terms differ from the facilitator's. | Check the provider's `Z402_PAY_TO` and `Z402_PRICE_ZAT`, and ask the facilitator who the key belongs to (below). |
+| `invalid_network`, `invalid_scheme`, `unsupported_scheme`, `invalid_x402_version`, `invalid_payload` | Configuration drift or a bug. The agent stops. | Check that the provider and the facilitator use the same `Z402_NETWORK`. |
+| `unexpected_verify_error`, `unexpected_settle_error` | The facilitator failed. The agent waits 1 second and retries once. | Read `docker compose logs facilitator`. |
+
+To see which provider an API key belongs to, ask the facilitator from wherever your resource server can reach it. It answers `401` for a key it does not know. `Z402_API_KEY` stands for your key, which you should not paste into a shell history:
+
+```bash
+curl -s -H "Authorization: Bearer $Z402_API_KEY" https://facilitator.example/providers/me
+```
+
+```json
+{ "providerId": "<16 hex>", "network": "zcash:regtest", "payTo": "uregtest1..." }
+```
+
+Three messages come from the x402 SDK and not from the facilitator. The agent treats them as fatal:
+
+- `Payment required`: the `PAYMENT-SIGNATURE` header was missing or unreadable.
+- `No matching payment requirements`: the offer the agent echoed differs from the provider's current offer, because the price or the terms changed between the 402 and the paid call.
+- `Facilitator … failed (401)`: the provider's API key was refused. See [Rotating an API key](#rotating-an-api-key).
+
+`REFUSED unspecified` means the 402 carried no readable reason at all.
+
+### A call failed after I paid
+
+```text
+  * outcome unknown, voucher of 1,500 zat may or may not have been accepted
+```
+
+If a call fails after the voucher was sent, for example with a 5xx or a broken connection, the client cannot tell whether the provider charged it. It counts the call as paid and advances its running total, so the next voucher pays for that call too. A facilitator timeout reaches the agent as a 502 with neither header, which is the same case.
+
+Services refuse everything they can before the agent sends a voucher: bad input, a wrong method, a service that is not ready, rate limits. A call refused that way is never charged. A service that fails after payment instead of refusing earlier is a bug worth reporting. If the facilitator refuses to settle after the handler ran, the held response is thrown away, the agent gets a 402 with the failure, and the call is not counted.
+
+### The wallet has too little
+
+```text
+the wallet has 120,000 zat spendable, the demo needs at least 250,000 zat (two deposits of 100,000 zat plus up to 25,000 zat of fee each)
+```
+
+The agent checks its wallet before it starts. Under compose, `docker compose run --rm agent` runs `wallet-fund` first, which tops the wallet up when it holds less than 1 ZEC. Using `--no-deps` skips that check.
+
+A deposit's change is not spendable until a block confirms it. With the clock stopped, a second deposit can fail for lack of spendable funds: the wallet waits 25 seconds and retries up to 3 times before it gives up. Keep the `clock` service running.
+
+### A service refuses a call
+
+Every starter service refuses what it can before payment, so these answers never cost anything.
+
+| Status | Typical cause |
+|---|---|
+| 400, 413, 415 | The input is invalid, too large or of the wrong type. The body names the reason. |
+| 404, 405, 409, 410 | An unknown id, a wrong method, a stream or request already in flight, or a finished stream. |
+| 429 `rate_limited` | Too many attempts from one client. `markdown` allows 30 fetches a minute and `dropbox` 30 upload attempts, each with `Retry-After`. |
+| 503 `not_ready` | The service's provider (the model) is not ready yet, or `dropbox` does not know the chain tip yet. |
+| 507 `storage_full` | The drop box is full. |
+
+Behind a reverse proxy, every client looks like the proxy to the rate limit. Set `MARKDOWN_TRUST_PROXY=uniquelocal` in `services/markdown/.env`. Each service's own page lists its answers in full.
+
+## Providers and keys
+
+### A service will not start
+
+A service checks its provider setup before it listens: `GET /providers/me` proves that its API key and its `Z402_PAY_TO` belong together. A failure names the variable to fix. It keeps retrying only while the cause could be temporary.
+
+| The service prints | Cause | What to do |
+|---|---|---|
+| `Z402_FACILITATOR_URL: cannot reach the facilitator at … (ECONNREFUSED)`, a timeout, or a 5xx | The facilitator is starting or down. The service waits for `Z402_FACILITATOR_WAIT_MS` and logs `…; waiting for it` once. | Start the facilitator and read its log. |
+| `Z402_FACILITATOR_URL: the facilitator at … has no /providers/me (404)` | The URL points at something that is not a facilitator of the multi-provider rail. It fails at once. | Fix the URL, or upgrade the facilitator. |
+| `Z402_FACILITATOR_TOKEN: the facilitator at … refused the API key (401)` | The key is wrong, was rotated, or the facilitator lost its registry. | [Rotating an API key](#rotating-an-api-key) or [A lost registry](#a-lost-registry). |
+| `Z402_FACILITATOR_TOKEN: the facilitator at … wants an API key (401) and none is set` | No key is configured. | Set `Z402_FACILITATOR_TOKEN` or `Z402_FACILITATOR_TOKEN_FILE`. |
+| `Z402_PAY_TO: the facilitator at … has this API key for another payTo than …` | The key and the address belong to different providers. | Use the address the key was registered with. |
+| `Z402_PAY_TO: the facilitator at … serves …, not …` | The key's network is not the service's. | Set `Z402_NETWORK` to match. |
+| `Z402_PRICE_ZAT: …` | A price outside 1 to `windowZat`. | Fix the price. |
+
+### Rotating an API key
+
+Rotating means registering the same address again with its view-only key. The facilitator answers with a new API key, and the old key stops working at once, on every route. This is also how you recover a lost key.
+
+<Callout type="warning" title="Stop the server first">
+
+From the moment of rotation, a server that still runs on the old key can verify and settle nothing. A resource server reads its key only when it starts. So stop it, rotate, and start it again.
+
+</Callout>
+
+Under compose, only `markdown` runs as an independent provider with a key of its own:
+
+```bash
+docker compose stop markdown
+docker compose run --rm markdown-register --rotate
+docker compose start markdown
+```
+
+The new key goes to `/run/markdown/api-key` in the `markdown-runtime` volume, mode 0600, and the job never prints it. For a provider outside compose, `scripts/register-provider.mjs` registers the view-only keys file and saves the key to a file you name:
+
+```bash
+node scripts/register-provider.mjs --keys .secrets/merchant-regtest.view.json \
+  --facilitator https://facilitator.example --out .secrets/api-key --force
+```
+
+Whoever holds a provider's viewing key can rotate its API key, so keep the viewing key private. A refused registration says why:
+
+| Answer | Meaning |
+|---|---|
+| `400 invalid_request` | A field is missing or invalid. The message names it. |
+| `401 unauthorized` | The facilitator wants its registration token (`Z402_REGISTRATION_TOKEN`), and none was sent. |
+| `403 not_owner` | The viewing key does not own the address, or the address has a transparent receiver. |
+| `403 provider_limit` | The facilitator reached `Z402_MAX_PROVIDERS` (32 by default). `0` turns registration off. |
+| `403 registration_disabled` | The facilitator has no providers directory. |
+| `409 operator` | The address is the operator's own, which needs no registration. |
+
+### A lost registry
+
+The facilitator keeps its providers in a directory (`Z402_PROVIDERS_DIR`, `/data/providers.regtest` on the `facilitator-data` volume in compose). `registry.json` holds each provider's address, viewing key and the hash of its API key. Each provider's ledger is `ledgers/<providerId>.jsonl` beside it.
+
+If the directory is gone, for example because the `facilitator-data` volume was deleted, the facilitator does not know its providers and refuses their keys with a 401. Under compose, `markdown-register` runs on every `up`. It asks the facilitator whether the stored key still works, and when the answer is 401 it says so and registers again, with a new key:
+
+```text
+register-provider: the facilitator no longer takes the stored API key; registering again
+register-provider: registered provider <provider id>
+register-provider: the old API key no longer works; restart the server that reads /run/markdown/api-key
+```
+
+Run `docker compose restart markdown` if it was running. The provider id comes from the address, so registering the same address again finds the ledger file the old registration wrote, if that file survived.
+
+A registry that is malformed, written for another network, or has an entry whose viewing key no longer owns its address makes the facilitator refuse to start, naming the provider id when it can. Restore the file from a backup. Moving the directory aside instead starts the facilitator with no providers, and takes their ledgers with it, so sessions that still hold unspent deposits lose their credit.
+
+### Wiping the chain
+
+The chain, the wallet and the facilitator's ledgers go together. A ledger records sessions and deposits by transaction id and height on one chain. A new chain reuses the heights and has none of those transactions, so a ledger kept from the old chain credits deposits that do not exist. The wallet is tied to the chain the same way.
+
+- `docker compose down -v` deletes every volume, so all of it goes at once.
+- To start a new chain and keep the models and the merchant keys, remove the chain volumes and the ledger volume together:
+
+  ```bash
+  docker compose down
+  docker volume rm z402_chain z402_zallet z402_zaino z402_chain-info z402_facilitator-data z402_dropbox-data
+  ```
+
+  The facilitator then no longer knows provider 2, so the next `up -d` registers it again, with a new API key.
+- If you delete the `keys` volume, delete `facilitator-data` too. A ledger's header names its `payTo`, so a facilitator with new keys refuses the old ledger with `is the ledger of …, not of this facilitator`.
+
+## Discovery and smoke
+
+### The catalog is empty or a service is down
+
+`discover` prints `no resources listed at …` when nothing has declared itself yet. A service declares its routes to the facilitator's catalog as soon as it is ready, and again every 30 seconds, but only while it is ready:
+
+- `llm` and `embeddings` are listed once their model is loaded.
+- `dropbox` is listed while it knows the chain tip.
+- A facilitator without a catalog answers the declaration with 404. The service logs `discovery: …` once for each change of outcome and keeps serving.
+
+The status comes from the age of a service's last declaration, `lastSeen`: `up` under 90 seconds, `stale` under 10 minutes, `down` after that. A service that shows `stale` or `down` stopped declaring. Read `docker compose logs <service>` for `discovery:` lines.
+
+The listed URLs are the services' public addresses, `http://localhost:<port>` in compose. Reach them from your machine. Inside the compose network, use the service names, such as `http://markdown:4032`.
+
+The demo API's `GET /chunk` is not in the list. It does not declare itself, and its provider, the operator, already declares the other starter services, so its payments do not create catalog items.
+
+### smoke FAILED
+
+`smoke` exits 0 when every step passed, 1 when a step failed or the wallet could not be used, and 2 for a flag error. A failed step prints `FAIL`, the reason, and whether the call was charged:
+
+```text
+embeddings embed 413 12 ms FAIL expected 200, got 413: too_many_tokens (not charged)
+dropbox hold 502 75 ms FAIL expected 200, got 502: provider_failed (charged 500 zat)
+smoke FAILED: 2 of 9 steps failed (embeddings embed, dropbox hold)
+```
+
+`not charged` means the service refused before the voucher, which is what a service should do. `charged` means the failure came after the voucher, and the client counts that call, so the service should have refused earlier.
+
+- **`markdown get` answers `502 fetch_failed`.** The `markdown` container cannot reach the page, usually because it has no internet. Nothing is charged. Try another page with `--page`.
+- **A step answers `503 not_ready`.** The service's model is still loading. `smoke` waits for healthy services before it starts, so check `docker compose ps`.
+- **The run ends before any step with a wallet message.** The wallet could not be read, or holds less than 125,000 zat for one deposit. See [The wallet has too little](#the-wallet-has-too-little).
+- **Ctrl-C.** The run ends with status 130, or 143 on SIGTERM. A drop that was uploaded is left to expire.
+
+## References
+
+- <Source path="docs/deploy.md" />: first start, ports, settings, wiping, and what is downloaded.
+- <Source path="docs/demo.md" />: the troubleshooting of the demo run, including the clock and the funding check.
+- <Source path="compose.yaml" />: start order, health checks, restart policies and the one-shot jobs.
+- <Source path="docker/wait-lightwalletd.mjs" />: the facilitator's wait for Zaino.
+- <Source path="docker/wait-facilitator.mjs" />: the API's wait for the facilitator.
+- <Source path="docker/register-provider.mjs" />: `markdown-register`, key rotation and re-registration.
+- <Source path="scripts/register-provider.mjs" />: registering a provider outside compose.
+- <Source path="packages/facilitator/README.md" />: start-up checks, the ledger and its lock, and every `Z402_*` variable.
+- <Source path="packages/facilitator/src/startup.ts" />: the start-up check messages.
+- <Source path="packages/server/src/provider.ts" />: `checkProvider` and its outcomes.
+- <Source path="packages/service-kit/src/service.ts" />: how a service waits for the facilitator and reports its configuration errors.
+- <Source path="packages/client/src/respond.ts" />: what the agent does for each reason.
+- <Source path="apps/agent/src/log.ts" />: the agent's log lines.
+- <Source path="apps/agent/src/zcash.ts" />: the wallet check at start.
+- <Source path="apps/smoke/README.md" />: the smoke steps, output and exit codes.
+- <Source path="services/README.md" />: how services list themselves, and their limits.
+- <Source path="docs/spec/protocol.md" />: the reason codes and the client action for each (section 8).
+- <Source path="docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md" />: registration, rotation, the registry on disk and the catalog.

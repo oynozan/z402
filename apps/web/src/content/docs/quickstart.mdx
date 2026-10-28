@@ -1,0 +1,262 @@
+export const meta = {
+  title: "Quickstart",
+  description: "Start the whole z402 stack with Docker Compose, pay every starter service, run an agent against two providers and list the catalog.",
+};
+
+This page starts the whole z402 stack on one machine, then pays for real: an agent makes shielded deposits on a private Zcash chain and signs a voucher for each call. The chain is private to your machine, so the coins are not real money.
+
+<Video src="/docs/videos/quickstart.mp4" poster="/docs/videos/quickstart.jpg" title="docker compose up and a paid smoke run" />
+
+## Before you start
+
+<Callout type="note" title="What you need">
+
+Docker Engine 25 or later with Compose v2.24 or later, at least 4 GB of memory, about 8 GB of free disk, and internet access on the first start. Linux amd64 is the target. macOS on Apple silicon works too, with Zaino (amd64 only) emulated. A Linux arm64 host needs amd64 emulation first: `docker run --privileged --rm tonistiigi/binfmt --install amd64`.
+
+</Callout>
+
+## Run the stack
+
+<Steps>
+
+<Step title="Start the stack">
+
+Run this in the repository root, the folder that holds `compose.yaml`. No `.env` file and no other step is needed.
+
+```bash
+docker compose up -d
+docker compose ps
+```
+
+`up -d` builds five images, pulls the rest and starts everything in dependency order. The first start downloads about 1 GB of images and two small models (about 580 MB) from Hugging Face. On a 4-CPU VM with a fast link, building the images from nothing took about 1.5 minutes, and `up -d` returned after about 45 seconds once they were built.
+
+| Container | What it is |
+|---|---|
+| `zebra`, `zaino`, `zallet` | The private Zcash chain: a node, its indexer, and the agent's wallet. |
+| `clock` | Mines one block every 25 seconds. Nothing confirms or expires without blocks. |
+| `facilitator` | Verifies vouchers, reads deposits, keeps the ledger and hosts the catalog of paid APIs. |
+| `api` | The demo paid API. `GET /chunk` costs 500 zat. |
+| `llm`, `embeddings`, `dropbox` | Starter services run by the operator. `llm` and `embeddings` use local models. |
+| `markdown` | The starter service URL to markdown, run as an independent provider with its own address and API key. |
+| `llm-model`, `embed-model` | The llama.cpp servers that hold the two models. |
+| `web` | The website on port 3000. |
+
+Five one-shot jobs prepare the chain, the wallet, the keys and the registration of provider 2: `chain-init`, `zallet-init`, `wallet-fund`, `keygen` and `markdown-register`. They show as `Exited (0)` in `docker compose ps -a`, and they run again on every `up`, changing nothing once their work is done. `wallet-fund` mines 110 blocks and shields 62.5 ZEC to the agent's wallet.
+
+`llm` and `embeddings` show `health: starting` until their model is loaded. Nothing else waits for them.
+
+</Step>
+
+<Step title="Look at an offer">
+
+An unpaid call to the demo API gets the price instead of an answer.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:4021/chunk
+```
+
+```text
+402
+```
+
+The terms travel in the `PAYMENT-REQUIRED` header as base64 JSON. This decodes the offer (it needs `curl`, `base64` and `jq`):
+
+```bash
+curl -s -D - -o /dev/null http://localhost:4021/chunk | tr -d '\r' \
+  | awk -F': ' 'tolower($1) == "payment-required" { print $2 }' | base64 -d | jq '.accepts[0]'
+```
+
+```json
+{
+  "scheme": "prepaid-voucher",
+  "network": "zcash:regtest",
+  "amount": "500",
+  "asset": "ZEC",
+  "payTo": "uregtest1...",
+  "maxTimeoutSeconds": 60,
+  "extra": {
+    "windowZat": "100000",
+    "creditRatioBps": 2500,
+    "creditCapZat": "200000",
+    "zeroConfMinExpiryBlocks": 20,
+    "termsVersion": "<16 hex characters>"
+  }
+}
+```
+
+Each call costs 500 zat. The agent deposits `windowZat`, 100,000 zat, at a time. [How it works](/docs/how-it-works#the-402-offer) explains every field.
+
+</Step>
+
+<Step title="Pay every starter service">
+
+```bash
+docker compose run --rm smoke
+```
+
+`smoke` waits until `llm`, `markdown`, `embeddings` and `dropbox` are healthy (on a first start, until the models are loaded). It then makes a deposit from the agent's wallet to each provider and runs one short script on every service: an `llm` stream of up to three chunks, one page, one embedding, and a drop uploaded, held, fetched and deleted. It checks every answer, prints one line per step, and exits 0 if all passed.
+
+```text
+llm start 200 31842 ms chunk 0 "Once upon a time, there lived a lighthouse keeper named Elias." (200 zat)
+llm continue 200 1910 ms chunk 1 " Every night he climbed the stairs to light the lamp" (200 zat)
+llm continue 200 1895 ms chunk 2 "..." (done, length) (200 zat)
+markdown get 200 412 ms "Example Domain" 1256 chars (1000 zat)
+embeddings embed 200 96 ms 2 vectors, 768 dimensions, model nomic-embed-text, 5 tokens (100 zat)
+dropbox upload 201 40 ms id q3Zs0mYbT7cWpAxK1nGhUw, 1192 bytes, held until block 1052 (500 zat)
+dropbox hold 200 75 ms held until block 1062 (500 zat)
+dropbox fetch 200 5 ms 1192 bytes identical, expires at block 1062
+dropbox delete 204 4 ms deleted, then 404
+session uregtest1qqq…qqqqqq cumulative 1700 zat after 7 paid calls
+session uregtest1ppp…pppppp cumulative 1000 zat after 7 paid calls
+smoke ok: 9 steps passed on llm, markdown, embeddings, dropbox
+```
+
+Your times, texts and ids will differ. Each line reads `service step status time detail`. The first line is slow because it includes the first deposit: the wallet has to build a proof, which takes 5 to 10 seconds. The two `session` lines are the two providers: the operator, which runs `llm`, `embeddings` and `dropbox`, and provider 2, which runs `markdown`. Each has its own deposit and its own running total. The paid-call count on those lines is that of the whole run. A failed step says `FAIL` and whether the call was charged.
+
+`markdown` fetches `https://example.com`, so the `markdown` container needs internet access. To fetch another page, add `--page`:
+
+```bash
+docker compose run --rm smoke --page https://www.rfc-editor.org/rfc/rfc9110.html
+```
+
+</Step>
+
+<Step title="Run an agent against two providers">
+
+The demo agent is the stock x402 client plus the z402 scheme. This run calls the demo API and URL to markdown in turn, five times each:
+
+```bash
+docker compose run --rm agent --calls 5 \
+  --url http://api:4021/chunk \
+  --url "http://markdown:4032/v1/markdown?url=https://example.com"
+```
+
+Inside the compose network the services have their container names and ports (`api`, `markdown`). From your own machine, the same services are on `localhost` and the published ports.
+
+```text
+wallet: 6,249,460,000 zat spendable
+z402 demo: 5 calls to each of 2 targets, in turn, every 1000 ms on zcash:regtest
+  [1] http://api:4021/chunk
+  [2] http://markdown:4032/v1/markdown?url=https://example.com
+  * session 7c1e…9d on zcash:regtest
+  * deposit D1 started, paid inline
+  * deposit D1 broadcast 3f2a…c1 in 6,888 ms
+  * deposit 3f2a…c1 acknowledged by the merchant
+#001 [1] 200  c=500  limit=100,000  conf=0  pend=100,000  credit=0  D1 3f2a…c1 pending
+  * session 2b90…e4 on zcash:regtest
+  * deposit D1 started, paid inline
+  * deposit D1 broadcast 91d0…7a in 6,214 ms
+  * deposit 91d0…7a acknowledged by the merchant
+#002 [2] 200  c=1,000  limit=100,000  conf=0  pend=100,000  credit=0  D1 91d0…7a pending
+#003 [1] 200  c=1,000  limit=100,000  conf=0  pend=100,000  credit=0  D1 3f2a…c1 pending
+#004 [2] 200  c=2,000  limit=100,000  conf=0  pend=100,000  credit=0  D1 91d0…7a pending
+...
+per target:
+  [1] 5 paid  c=2,500  session 7c1e…9d  payTo uregtest1qqq…qqqqqq  deposits 1
+  [2] 5 paid  c=5,000  session 2b90…e4  payTo uregtest1ppp…pppppp  deposits 1
+done
+```
+
+How to read it:
+
+- **`[1]` and `[2]`** tag the two targets. They have different payTo addresses, so the agent opens one session, with its own session key and its own deposit, for each. Each provider sees only its own session.
+- **`c=`** is the running total the agent has signed for with that provider. It grows by the price of each call: 500 zat at the demo API, 1,000 zat at URL to markdown.
+- **`limit=`** is the most that provider will accept right now. `conf=`, `pend=` and `credit=` are its three parts: confirmed deposits, one unconfirmed deposit, and credit.
+- **`D1 3f2a…c1 pending`** is the deposit and its status. Call 1 is served while the deposit is still in the mempool. Once a block confirms it, the status becomes `confirmed`, and the limit grows by the 25 percent credit.
+
+The same agent has more modes:
+
+<CodeTabs>
+
+```bash title="One provider"
+docker compose run --rm agent --calls 20
+```
+
+```bash title="Cheat run"
+docker compose run --rm agent --calls 300 --interval-ms 0 --cheat
+```
+
+</CodeTabs>
+
+The cheat run makes one deposit and refuses to make another. About 200 calls run on the unconfirmed deposit, the agent waits for a block, about 50 more run on credit, and the provider then refuses at its limit of 125,000 zat with `z402_deposit_required`. That is the most a cheating agent can ever get: one unconfirmed window plus the credit line.
+
+</Step>
+
+<Step title="List the services">
+
+Services list themselves in the facilitator's catalog, the x402 Bazaar, and repeat it every 30 seconds. `discover` reads the catalog the way any agent would, with no wallet:
+
+```bash
+docker compose run --rm discover
+```
+
+```text
+LLM inference       POST  http://localhost:4031/v1/generate        200 zat per output chunk  up, 3 paid today
+URL to markdown     GET   http://localhost:4032/v1/markdown        1,000 zat per page        up, 6 paid today
+Text embeddings     POST  http://localhost:4033/v1/embeddings      100 zat per 1k tokens     up, 1 paid today
+Encrypted drop box  POST  http://localhost:4034/v1/drops           500 zat per 10 blocks     up, 1 paid today
+Encrypted drop box  POST  http://localhost:4034/v1/drops/:id/hold  500 zat per 10 blocks     up, 1 paid today
+```
+
+Each line ends with the route's description, left out here. `up` means the service declared itself in the last 90 seconds. `paid today` counts calls settled since 00:00 UTC. After the two runs above, `llm` shows the three chunks of the smoke run, and `markdown` shows its one smoke page plus the five the agent fetched. The URLs are the services' public addresses: reach them from your machine, not from inside the compose network.
+
+`--intent` ranks the list on your side by word overlap, so the catalog never learns what you are looking for:
+
+```bash
+docker compose run --rm discover --intent "turn a web page into markdown"
+```
+
+The website shows the same list at `http://localhost:3000/services`. These docs are served by the same site, at `/docs`.
+
+</Step>
+
+<Step title="Stop or reset">
+
+```bash
+docker compose stop      # stop the containers, keep everything
+docker compose start
+docker compose down -v   # delete every volume
+```
+
+<Callout type="warning" title="down -v deletes the chain">
+
+`docker compose down -v` deletes the chain, the wallet, the merchant keys, the ledgers, the drops and the models. The next `up -d` starts a new chain from height 0 and downloads the models again. The chain, the wallet and the facilitator's ledger go together: never delete one of them without the others, because a ledger kept from an old chain credits deposits that do not exist.
+
+</Callout>
+
+</Step>
+
+</Steps>
+
+## Ports and settings
+
+| Service | Port | Setting |
+|---|---|---|
+| `web` | 3000 | `Z402_WEB_PORT` |
+| `api` | 4021 | `Z402_API_PORT` |
+| `llm`, `markdown`, `embeddings`, `dropbox` | 4031 to 4034 | `Z402_LLM_PORT`, `Z402_MARKDOWN_PORT`, `Z402_EMBEDDINGS_PORT`, `Z402_DROPBOX_PORT` |
+| `facilitator` | 4022 | not published. The website proxies its public catalog reads. |
+
+Copy `.env.example` to `.env` to change a port, the block time (`Z402_BLOCK_SECONDS`) or the models. Published ports bind to every interface by default, so a server serves them. On a laptop, set `Z402_PUBLISH_HOST=127.0.0.1` so only your machine reaches them. Docker's published ports bypass `ufw`.
+
+## Next steps
+
+<Cards>
+  <Card title="How it works" href="/docs/how-it-works">Follow one session from the 402 to the next call.</Card>
+  <Card title="Pay from an agent" href="/docs/guides/pay-from-an-agent">Put the scheme into your own agent.</Card>
+  <Card title="Sell an API" href="/docs/guides/sell-an-api">Charge for a route of your own.</Card>
+  <Card title="Troubleshooting" href="/docs/troubleshooting">A deposit that never confirms, a 402 after paying, and more.</Card>
+</Cards>
+
+## References
+
+- <Source path="docs/deploy.md" />: prerequisites, first start, ports, the agent and how to stop and wipe.
+- <Source path="compose.yaml" />: the services, the one-shot jobs and the profiles of `agent`, `discover` and `smoke`.
+- <Source path=".env.example" />: the compose settings.
+- <Source path="apps/smoke/README.md" />: what `smoke` runs and how its output reads.
+- <Source path="apps/agent/src/flags.ts" />: `--url`, `--calls`, `--interval-ms` and `--cheat`.
+- <Source path="apps/agent/src/log.ts" />: the format of the agent's log lines.
+- <Source path="apps/agent/src/discover.ts" />: the `discover` command and its list format.
+- <Source path="docs/demo.md" />: the cheat run and the numbers behind it.
+- <Source path="docs/research/live-run.md" />: deposit timings measured on the regtest stack.
+- <Source path="services/README.md" />: the starter services and how they list themselves.

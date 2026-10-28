@@ -1,0 +1,174 @@
+export const meta = {
+  title: "FAQ",
+  description: "Short answers about money, privacy, speed and limits: what an agent or a provider can lose, who sees what, and what z402 does not do yet.",
+};
+
+## The basics
+
+### What is z402?
+
+z402 is shielded x402 payments for AI agents on Zcash. x402 is an open standard in which a server answers `402 Payment Required` with a price, and a client pays and asks again. z402 adds one payment scheme, `prepaid-voucher`: the agent makes one shielded deposit per window, then signs a voucher for each call. The repository holds the client library, the provider-side library, a facilitator, a service kit and four starter services.
+
+### How is it different from plain x402?
+
+The x402 SDK is unchanged. z402 runs on the stock `@x402/fetch`, `@x402/core` and `@x402/express` packages, pinned to 2.28.0, and registers one extra scheme. A payment with the common `exact` scheme settles on the chain for each call. A z402 payment settles on the chain once per window and uses signatures in between. A client that does not have the z402 scheme cannot pay a `prepaid-voucher` offer.
+
+### Why Zcash?
+
+A shielded Zcash payment encrypts the amount, the recipient and the memo, so the chain does not show what an agent pays for, or to whom. z402 also uses the memo to carry the agent's session key to the provider.
+
+### Does an agent need an account or an API key?
+
+No. An agent needs a wallet with funds. It makes its own session keys, and the provider asks for no sign-up. Providers do get an API key, from the facilitator, to prove which address they are paid at. Agents never see it.
+
+### Which networks does it run on?
+
+The whole stack runs on a private Zcash regtest chain with `docker compose up`, and that is the supported way to try it. The facilitator and the services take the network as a setting (`Z402_NETWORK`: regtest, testnet or mainnet). The agent's shipped wallet adapter pays from a Zallet account over JSON-RPC. A wallet for mainnet is planned for a later phase. For real money, the facilitator should read a Zcash node that you operate. See [What are the limits today?](#what-are-the-limits-today).
+
+## Money
+
+### What does a deposit cost, and what does it buy?
+
+A deposit is exactly one window, 100,000 zat (0.001 ZEC) on the demo terms, plus a network fee of about 10,000 zat. The window is the agent's prepaid balance with that provider: 200 calls at 500 zat, or 100 calls at 1,000 zat. The fee is shared by the calls the window pays for, which is 50 zat per call at 500 zat a call.
+
+### What happens to money an agent does not spend?
+
+<Callout type="warning" title="There are no refunds">
+
+A deposit is a payment to the provider's address. Whatever is left of a window when an agent stops using a provider stays with the provider. Session keys are not saved, so a new session, for example after a restart, cannot use the balance of an old one. Keep windows small. The demo window is 0.001 ZEC.
+
+</Callout>
+
+### How much can an agent lose?
+
+At most what it deposits, and the agent decides how much that can be. `maxDepositZat` makes the scheme refuse any offer whose window is larger than the number you set. It defaults to 1,000,000 zat. `maxDeposits` caps how many deposits the agent makes to each provider.
+
+```ts title="zcash.ts"
+import { LightwalletdTxStatus, PrepaidVoucherScheme, ZalletRpcWallet } from "@z402/client";
+import { createLightwalletdClient } from "@z402/lightwalletd";
+
+export const zcashClientScheme = new PrepaidVoucherScheme({
+  wallet: new ZalletRpcWallet({ url: "http://127.0.0.1:50232", user: "zebra", password: "zebra" }),
+  chain: new LightwalletdTxStatus(createLightwalletdClient({ url: "http://127.0.0.1:28137" })),
+  maxDepositZat: 200_000n, // refuse an offer whose window is larger
+  maxDeposits: 5, // at most five deposits per provider
+});
+```
+
+The stock x402 client also caps one payment. For ZEC the cap is 1 ZEC, which is 100,000,000 zat, and the scheme refuses an offer whose window is above it. A provider that takes a deposit and does not serve keeps the deposit, so choose providers as you would for any prepaid service.
+
+### How much can a provider lose?
+
+For each session, at most one unconfirmed window plus the credit line. The credit line is 25 percent of the confirmed deposits, up to 200,000 zat. A credited deposit that a chain reorganization removes before it is final, at 10 confirmations, adds to that. On the demo terms, an agent that deposits once and then cheats gets 125,000 zat of service for a 100,000 zat deposit. [The credit limit](/docs/how-it-works#the-credit-limit) has the rule.
+
+The provider also trusts its facilitator and the Zcash node behind it to say whether a deposit exists and how deep it is mined. An unconfirmed deposit is trusted on the node's mempool.
+
+### Who holds the money?
+
+The provider, at its own address. A deposit goes from the agent's wallet straight to the provider's `payTo`. The facilitator never holds funds. It holds each provider's <Term tip="Unified incoming viewing key. Whoever holds it can see the payments made to an address, but cannot spend them.">view-only key</Term>, which can see incoming payments but cannot spend them.
+
+## Privacy
+
+### What does the chain show?
+
+That a shielded transaction happened, when, and what it paid in fees. It does not show the amount, the recipient or the memo. Vouchers never reach the chain.
+
+### Who sees what?
+
+| Party | Sees |
+|---|---|
+| The public chain | A shielded transaction and its fee. Not the amount, the recipient or the memo. |
+| The provider | Every call it serves, and the session key and running total of the agent that makes it. |
+| The facilitator | For each provider it serves: the deposits made to it (amount, memo, time), read with the provider's view-only key. For each voucher: the session key, the running total and the resource URL in the payment. Not the contents of requests or responses. Its access log records paths only, never query strings. |
+| The node operator | Which transactions are asked for. The facilitator looks a deposit up seconds after the agent broadcasts it, so the node's operator can match the two. |
+
+z402 does not hide an agent's IP address from the provider. [Privacy model](/docs/concepts/privacy) has the full picture.
+
+### Can the facilitator link my deposits to my calls?
+
+Within one session, yes. The memo of a deposit carries the session key, and every voucher names it. The agent uses a different session key for each provider, so the keys do not link its sessions with different providers.
+
+## Using it
+
+### Why is the first call slow?
+
+The first call has to make a deposit. The wallet builds a proof, which takes 5 to 10 seconds, before the first voucher can be signed. Later calls cost one request to the provider, plus its verify and settle calls to the facilitator. If the facilitator cannot see a new deposit yet, verify waits for it for up to 30 seconds, and the provider gives the facilitator 60 seconds in all.
+
+### How long does a deposit take to confirm?
+
+Until the next block, plus a few seconds. On the compose stack a block comes every 25 seconds, set by `Z402_BLOCK_SECONDS`. On mainnet blocks average about 75 seconds. It does not hold up calls: the first call is served on the unconfirmed deposit, and the agent sends its next deposit before the money runs out.
+
+### What if the agent restarts?
+
+It starts a new session with a new session key, a new deposit and no credit. The balance left in the old session stays with the provider.
+
+### Can one agent pay several providers?
+
+Yes. The agent keeps one session per provider address, each with its own session key, deposits and running total, and one scheme object serves them all. This command pays two providers in one run:
+
+```bash
+docker compose run --rm agent --calls 5 \
+  --url http://api:4021/chunk \
+  --url "http://markdown:4032/v1/markdown?url=https://example.com"
+```
+
+### What does a failed call cost?
+
+Nothing, when the service can tell before payment. The starter services check everything they can first (the input, the size, rate limits, readiness), so a refused call is never charged. A failure after the voucher is sent is different. The client cannot tell whether it was charged, so it counts the call as paid, and its next voucher covers it. [Troubleshooting](/docs/troubleshooting#a-call-failed-after-i-paid) shows how that looks in the log.
+
+### Can I price each route differently?
+
+Yes. A provider sets a price for each route, any whole number of zat from 1 up to the window, which is 100,000 on the demo terms. The routes of one provider share one session, and each voucher advances the total by the price of its own call. A price above the window is not possible, because the window is the same for every provider on a facilitator.
+
+### How do I test without a chain?
+
+`@z402/testkit` has `FakeChain`, an in-memory chain, and `MockWallet`. `@z402/service-kit/testing` starts a real facilitator on a `FakeChain` together with a stock paying client, so a test can make real paid calls in one process.
+
+### Can I use my own wallet?
+
+The scheme talks to a wallet through a small interface, `ZcashWallet`. It has one method, `sendDeposit`, which pays the amount to the address with the memo and returns the txid. The package ships `ZalletRpcWallet`, which pays from a Zallet account. For another wallet, implement the interface:
+
+```ts title="wallet.ts"
+import type { ZcashWallet } from "@z402/protocol";
+
+export const wallet: ZcashWallet = {
+  async sendDeposit({ to, amountZat, memo }) {
+    // Send a shielded payment of amountZat to `to` with `memo`, then return its txid
+    const txid = await myWalletSend(to, amountZat, memo);
+    return { txid };
+  },
+};
+
+declare function myWalletSend(to: string, amountZat: bigint, memo: string): Promise<string>;
+```
+
+## Limits
+
+### What are the limits today?
+
+- **One set of terms.** The window, the credit ratio and the credit cap are the same for every provider on a facilitator. Terms per provider, and so prices above the window, are future work.
+- **The facilitator sees incoming payments.** It holds every provider's view-only key. Sender-disclosed decryption would remove that, and is future work.
+- **No refunds.** Unspent balance stays with the provider.
+- **Trust in the node.** The facilitator trusts its Zcash node about whether a deposit exists and how deep it is mined, and zero-conf credit trusts the node's mempool. For real money, run your own node. A mainnet facilitator warns when its node is not on the same machine.
+- **A leaked voucher can be raced.** A voucher is not bound to one resource, so someone who copies a `PAYMENT-SIGNATURE` header from the wire could use it first. TLS is the defense, and the header is never logged.
+- **One failure restarts everyone.** A failed ledger write or a lost ledger lock in any provider's runtime makes the facilitator exit, and the restart replays every ledger.
+- **No rate limit on the public routes.** The facilitator's catalog routes have none.
+- **Ledgers only grow.** Each provider's ledger and state grow without bound.
+- **Mainnet has open items.** The facilitator design lists them: endpoint trust, a request flood limiter, the ledger lock fencing and more.
+- **TypeScript only.** The client and the provider libraries are TypeScript for Node, and the shipped wallet adapter is Zallet's.
+
+## References
+
+- <Source path="docs/spec/protocol.md" />: the demo terms (section 12), credit and its worst case (section 6), deposits (section 5), the closed list of reason codes (section 8).
+- <Source path="docs/superpowers/specs/2026-10-27-z402-facilitator-design.md" />: known limits (section 7) and the open mainnet gates (section 7.1).
+- <Source path="docs/superpowers/specs/2026-10-28-z402-multi-provider-design.md" />: what the facilitator sees, rail-wide terms and the known limits (section 9).
+- <Source path="docs/superpowers/specs/2026-10-27-z402-client-design.md" />: spend limits, the wallet seam, and what is out of scope.
+- <Source path="docs/superpowers/specs/2026-10-27-z402-services-design.md" />: refusing before payment, and the in-process test stack (section 3).
+- <Source path="docs/research/live-run.md" />: deposit fees and timings.
+- <Source path="docs/deploy.md" />: the regtest limit and the step to other networks ("Beyond regtest").
+- <Source path="packages/client/src/scheme.ts" />: `PrepaidVoucherSchemeOptions`, including `maxDepositZat` and `maxDeposits`.
+- <Source path="packages/protocol/src/seams.ts" />: the `ZcashWallet` interface.
+- <Source path="packages/client/src/wallet/zallet-rpc.ts" />: `ZalletRpcWallet`.
+- <Source path="apps/agent/src/zcash.ts" />: the demo agent's scheme setup.
+- [ZIP 316](https://zips.z.cash/zip-0316): unified addresses and unified viewing keys.
+- [x402](https://github.com/x402-foundation/x402): the open standard.
