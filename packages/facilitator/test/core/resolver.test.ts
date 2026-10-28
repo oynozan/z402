@@ -250,7 +250,7 @@ describe("concurrency limit", () => {
     expect(inspect.mock.calls.map(([txid]) => txid)).toEqual([txidOf(1), txidOf(1), txidOf(1), txidOf(2)]);
   });
 
-  test("the wait for a slot counts against the budget, and a lookup that spent it all there makes no inspect", async () => {
+  test("the wait for a slot counts against the budget, and a lookup that spent it there makes no inspect", async () => {
     const { chain, resolver } = rig({ maxConcurrent: 1 });
 
     const [, second] = await Promise.all([resolver.lookup(txidOf(1), 5000), resolver.lookup(txidOf(2), 5000)]);
@@ -553,6 +553,40 @@ describe("a slow chain", () => {
 
     expect(settled).toEqual({ kind: "not_found" });
     expect(chain.calls.get(T)).toBe(7);
+  });
+});
+
+describe("the bound when the deposit appears on the last poll", () => {
+  test("a lookup settles within the budget plus one inspect and one tip", async () => {
+    vi.useFakeTimers();
+    const delay = 4000;
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    let inspects = 0;
+    // An inspect costs two RPCs (GetTransaction, then the tip for zdecrypt) and the tip after it one
+    const chain: ChainView = {
+      inspect: async (txid) => {
+        await wait(2 * delay);
+        inspects += 1;
+        return inspects === 4 ? found(txid) : NOT_FOUND;
+      },
+      tip: async () => {
+        await wait(delay);
+        return 1234;
+      },
+    };
+    const resolver = new DepositResolver({ chain });
+    const budget = 30000;
+    let settled: { lookup: Lookup; at: number } | undefined;
+    const started = Date.now();
+    void resolver.lookup(T, budget).then((lookup) => {
+      settled = { lookup, at: Date.now() - started };
+    });
+
+    await vi.advanceTimersByTimeAsync(budget + 3 * delay);
+
+    expect(settled?.lookup).toMatchObject({ kind: "found", tip: 1234 });
+    expect(inspects).toBe(4);
+    expect(settled?.at).toBeLessThanOrEqual(budget + 2 * delay + delay);
   });
 });
 

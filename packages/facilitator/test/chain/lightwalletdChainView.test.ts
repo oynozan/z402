@@ -290,3 +290,73 @@ describe("LightwalletdChainView with a scripted zdecrypt", () => {
     await expect(view.tip()).resolves.toBe(4_547_999);
   });
 });
+
+describe("LightwalletdChainView tip", () => {
+  test("the tip read for a mempool inspect is reused by a tip() right after it", async () => {
+    const lwd = fakeLwd(inMempool(keys.deposit.hex));
+    const view = merchantView(lwd, ZDECRYPT_BIN);
+
+    await view.inspect(keys.deposit.txid);
+    await expect(view.tip()).resolves.toBe(DEPOSIT_TIP);
+
+    expect(lwd.tipCalls).toBe(1);
+  });
+
+  test("a tip read 1000 ms ago is read again", async () => {
+    let ms = 0;
+    const lwd = fakeLwd({ found: false }, 4_547_999);
+    const view = new LightwalletdChainView({
+      lwd,
+      zdecryptBin: ZDECRYPT_BIN,
+      uivk: keys.merchant.uivk,
+      payTo: keys.merchant.address,
+      network: NETWORK_TESTNET,
+      now: () => ms,
+    });
+
+    await view.tip();
+    ms += 999;
+    await view.tip();
+    expect(lwd.tipCalls).toBe(1);
+    ms += 1;
+    await view.tip();
+    expect(lwd.tipCalls).toBe(2);
+  });
+
+  test.each([2 ** 53, 2 ** 32, -1, 1.5, Number.NaN])("a tip of %d is no block height and is refused", async (tip) => {
+    const view = merchantView(fakeLwd({ found: false }, tip), ZDECRYPT_BIN);
+    const error = await failure(view.tip());
+    expect(error).toBeInstanceOf(ChainUnavailableError);
+    expect(error.message).toBe(`lightwalletd reported tip ${tip}, which is not a block height`);
+  });
+
+  test("a refused tip is not kept, so the next read asks again", async () => {
+    const lwd = fakeLwd({ found: false }, 2 ** 53);
+    const view = merchantView(lwd, ZDECRYPT_BIN);
+    await expect(view.tip()).rejects.toBeInstanceOf(ChainUnavailableError);
+    await expect(view.tip()).rejects.toBeInstanceOf(ChainUnavailableError);
+    expect(lwd.tipCalls).toBe(2);
+  });
+
+  test.each([0, 0xffff_ffff])("a tip of %d is a block height", async (tip) => {
+    await expect(merchantView(fakeLwd({ found: false }, tip), ZDECRYPT_BIN).tip()).resolves.toBe(tip);
+  });
+
+  test("a mined height that is not a block height is refused before zdecrypt runs", async () => {
+    const lwd = fakeLwd(inBlock(keys.deposit.hex, Number("18446744073709551614")));
+    const zd = fakes.recording(ZDECRYPT_BIN);
+
+    const error = await failure(merchantView(lwd, zd.bin).inspect(keys.deposit.txid));
+
+    expect(error).toBeInstanceOf(ChainUnavailableError);
+    expect(error.message).toMatch(/as mined at 18446744073709552000, which is not a block height$/);
+    expect(zd.calls()).toEqual([]);
+  });
+
+  test("a mempool deposit read at a tip that is not a block height is refused before zdecrypt runs", async () => {
+    const lwd = fakeLwd(inMempool(keys.deposit.hex), 2 ** 53);
+    const zd = fakes.recording(ZDECRYPT_BIN);
+    await expect(merchantView(lwd, zd.bin).inspect(keys.deposit.txid)).rejects.toBeInstanceOf(ChainUnavailableError);
+    expect(zd.calls()).toEqual([]);
+  });
+});
