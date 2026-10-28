@@ -1,9 +1,9 @@
 # Deploy with Docker Compose
 
 `docker compose up -d` in the repository root runs the whole project on one machine: a private Zcash regtest chain
-with a funded agent wallet and a block clock, the merchant keys, the facilitator, the paid API (`GET /chunk`), the
-four starter services, a local llama.cpp model runtime for `llm` and `embeddings`, discovery and the website. No
-`.env` and no other step is needed.
+with a funded agent wallet and a block clock, the merchant keys, the facilitator with its service catalog, the paid
+API (`GET /chunk`), the four starter services, a local llama.cpp model runtime for `llm` and `embeddings`, and the
+website. No `.env` and no other step is needed.
 
 Needs Docker Engine 25 or later with Compose v2.24 or later, at least 4 GB of memory, about 8 GB of free disk, and
 internet access on the first start. Linux amd64 is the target. macOS arm64 works too, with Zaino (amd64 only)
@@ -24,21 +24,22 @@ docker compose ps
 ```
 
 `up -d` builds five images (`z402-node`, `z402-web`, `z402-zallet`, `z402-zebra`, `z402-zaino`), pulls the rest, then
-starts everything in dependency order. It returns once every service has started, the website once discovery answers
-and the clock once the agent is funded:
+starts everything in dependency order. It returns once every service has started, the website once the facilitator
+answers and the clock once the agent is funded:
 
 1. `zebra` → `chain-init` mines blocks 1 and 2, where NU5 to NU6.3 activate
 2. `zallet-init` creates the wallet, account 0 and the miner address, once → `zallet`, and `zaino` beside it
 3. `wallet-fund` mines 110 blocks and shields 62.5 ZEC to the agent, when it holds less than 1 ZEC → `clock`
 4. `keygen` creates the merchant keys and the facilitator token, once → `facilitator` (after Zaino answers) → `api`,
-   `llm`, `markdown`, `embeddings`, `dropbox` → `discovery` → `web`
+   `llm`, `markdown`, `embeddings`, `dropbox`, `web`
 5. `llm-model` and `embed-model` download their models (about 580 MB) on the first start; `llm` and `embeddings` show
    `health: starting` until the model is loaded. Nothing else waits for them.
 
 Measured on a 4-CPU arm64 VM with a fast link: building the images from nothing took about 1.5 minutes (the Node image
 69 s, 31 s of it compiling zdecrypt; the web image 19 s). With the images built, `up -d` on empty volumes returned
-after 45 s, and every service was healthy a second later, the model downloads included. Funding the agent is most of
-that (36 s). A fresh server first downloads about 1 GB of images (Zebra, Zallet, Zaino, llama.cpp, the Rust and Node
+after 45 to 75 s, and every service was healthy within two minutes (111 s in the latest run), the model downloads and
+the LLM's first load included. Funding the agent is most of the wait (36 to 48 s). A fresh server first downloads about
+1 GB of images (Zebra, Zallet, Zaino, llama.cpp, the Rust and Node
 build bases), plus the crates and npm packages of the build.
 
 `chain-init`, `zallet-init`, `wallet-fund` and `keygen` are one-shot jobs: `docker compose ps -a` shows them as
@@ -78,8 +79,7 @@ docker compose run --rm smoke --page https://www.rfc-editor.org/rfc/rfc9110.html
 | markdown | 4032 | `Z402_MARKDOWN_PORT` (4032) |
 | embeddings | 4033 | `Z402_EMBEDDINGS_PORT` (4033) |
 | dropbox | 4034 | `Z402_DROPBOX_PORT` (4034) |
-| facilitator | 4022 | no |
-| discovery | 4030 | no, the website serves it at `/discovery/*` |
+| facilitator | 4022 | no, the website serves its catalog at `/discovery/*` |
 | zebra, zallet, zaino, llm-model, embed-model | 18232, 28232, 8137, 8080 | no |
 
 Published ports bind to `Z402_PUBLISH_HOST`, `0.0.0.0` by default so a server serves them. On a laptop, or behind a
@@ -101,7 +101,8 @@ bypass `ufw`.
   cannot be changed from these files.
 
 `docker compose up -d` recreates a service whose settings changed. After pulling new code:
-`docker compose up -d --build`.
+`docker compose up -d --build --remove-orphans`. `--remove-orphans` also removes the container of a service that is
+gone, such as `discovery`, retired now that the facilitator serves the service catalog.
 
 ### A hosted model provider
 

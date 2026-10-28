@@ -1,7 +1,7 @@
 # @z402/web
 
-The z402 website: the landing page (`/`), the live list of paid services (`/services`), and a read-only proxy to the
-facilitator's Bazaar (`GET /discovery/resources`, `GET /discovery/search`) that makes the site origin a Bazaar
+The z402 website: the landing page (`/`), the live list of paid services (`/services`), the documentation (`/docs`,
+see [Docs](#docs)), and a read-only proxy to the facilitator's Bazaar (`GET /discovery/resources`, `GET /discovery/search`) that makes the site origin a Bazaar
 endpoint, so `withBazaar(new HTTPFacilitatorClient({ url: siteOrigin })).extensions.bazaar.listResources()` works
 against it. Next.js 16 (App Router, standalone output), React 19, Tailwind 4.
 
@@ -28,20 +28,60 @@ by the server's clock (up under 90 s, stale under 10 min, down after, a dash for
 alone), and TODAY the sum of `paidCallsToday` over its routes. The proxy passes on only the query parameters each read
 documents.
 
+## Docs
+
+`/docs` renders the MDX pages under `src/content/docs`: `/docs/<slug>` is `src/content/docs/<slug>.mdx`, and a
+section's `index.mdx` is the section's own URL (`services/index.mdx` is `/docs/services`). Every page is built ahead
+of time and any other path under `/docs` is a 404.
+
+- **Order and titles.** `src/lib/docs/ia.ts` is the only place they live: the sidebar, previous and next, the search
+  and the sitemap all read it. A page listed there without a file is left out, with one warning per build. A page
+  with a file but not in the list does not render, except `components`, which `HIDDEN_DOCS` serves at
+  `/docs/components` (noindex, out of the sidebar, the search and the sitemap): it shows every element and component
+  once, so a design change can be checked on one page.
+- **A page** starts with `export const meta = { title, description }` (under 160 characters) and has no `#` heading,
+  since the template renders `meta.title` as the H1. `##` and `###` make "On this page", with github-slugger anchors.
+  A fence takes a language and an optional title: ```` ```ts title="agent.ts" ````. A ```` ```mermaid ```` fence
+  (flowchart, sequenceDiagram, stateDiagram-v2, Mermaid 12.1 syntax) is drawn to inline SVG by Pele at build time; a
+  syntax error shows on the page in `next dev` and fails `next build`. Leave out `style`, `classDef`, `%%{init}%%`
+  and colors: the site's tokens color the diagrams.
+- **Components** every page gets without imports, defined in `src/components/docs/` and listed in
+  `src/mdx-components.tsx`:
+
+  | Component | Props |
+  |---|---|
+  | `<Callout>` | `type`: `note` (default), `tip`, `warning` or `privacy`; `title` optional; Markdown inside |
+  | `<Steps>`, `<Step>` | `Step` takes `title`; Markdown inside each step |
+  | `<CodeTabs>` | two or more fences inside, each tab named by its fence's `title`, else its language |
+  | `<Cards>`, `<Card>` | `Card` takes `title` and `href` (a `/docs/...` path or an `https://` URL); one line inside |
+  | `<Video>` | `src`, `poster`, `title`, `caption` optional; a file under `public/` that is not there yet shows a "recording soon" frame |
+  | `<Endpoint>` | `method`, `path`, `auth`: `public`, `api-key` or `registration-token`; Markdown inside, optional |
+  | `<Params>`, `<Param>` | `Params` takes an optional `title`; `Param` takes `name`, `type` and `required`; Markdown inside |
+  | `<Term>` | `tip`, the plain-language meaning, shown by the site's `?` tooltip |
+  | `<Source>` | `path` from the repository root, `line` optional; a GitHub link when `NEXT_PUBLIC_REPO_URL` is set, else the path |
+
+- **How it is built.** `@next/mdx` compiles the pages with the plugins `src/lib/docs/mdx/options.ts` names, as
+  strings, since Turbopack hands them to its workers as JSON: remark-gfm, rehype-slug, `rehype-docs.mjs` (this app's:
+  it exports each page's TOC, its text by heading for the search, and its Markdown for "Copy page") and
+  rehype-mdx-code-props (a fence's meta as props on `<pre>`). Shiki colors code on the server in a theme of CSS
+  variables that `src/app/docs/docs.css` maps to the site's tokens, and Pele draws the diagrams with Manrope's
+  measured widths (`src/lib/docs/manrope.ts`). `/docs/search.json` is the search index, built with the pages and
+  fetched by the browser the first time search opens (Cmd+K, Ctrl+K or `/`).
+
 ## Environment
 
 | Variable | Default | Read |
 |---|---|---|
 | `DISCOVERY_URL` | `http://127.0.0.1:4022` | at request time, by the pages and the proxy: the facilitator, which hosts the Bazaar |
-| `NEXT_PUBLIC_REPO_URL` | unset | at build time; when set, the header and footer link to it as GitHub |
+| `NEXT_PUBLIC_REPO_URL` | unset | at build time; when set, the header and footer link to it as GitHub, and the docs' `<Source>` links files under its `/blob/main/` |
 | `PORT`, `HOSTNAME` | `3000`, `0.0.0.0` | by the standalone server |
 
 ## Build and check
 
 ```sh
 pnpm exec tsc --noEmit    # the app and its tests
-pnpm exec vitest run      # parsing, grouping and status, paging, catalog search and filters, call snippets, proxy, origin
-pnpm exec next build      # needs no Bazaar, nothing from it is built in
+pnpm exec vitest run      # catalog, calls, proxy, origin, and the docs: IA, anchors, code meta, search, diagrams
+pnpm exec next build      # needs no Bazaar, nothing from it is built in; prerenders every docs page
 ```
 
 The server lands at `.next/standalone/apps/web/server.js`. Copy `public` and `.next/static` beside it, as
@@ -58,3 +98,5 @@ its references so a clean checkout type-checks without it.
 - `src/components/dither-veil/` is React Bits' Dither Veil, vendored under its own license (`LICENSE.md` there).
 - `src/components/live/catalog.tsx` is the services catalog the landing and `/services` share; `src/lib/catalog.ts`
   and `src/lib/calls.ts` hold its search, filters and the curl and `paidFetch` snippets it copies.
+- `src/app/docs/` holds the docs' layout, page template, stylesheet and search index route; `src/lib/docs/` the IA,
+  the page loader, the search and the MDX plugin.

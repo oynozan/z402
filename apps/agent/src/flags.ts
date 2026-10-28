@@ -156,7 +156,7 @@ export function parseFlags(argv: readonly string[]): Flags {
 }
 
 export interface DiscoverFlags {
-  /** A Bazaar endpoint without a trailing slash, the discovery service or the website that proxies it */
+  /** A Bazaar endpoint without a trailing slash, the facilitator or the website that proxies it */
   discovery: string;
   /** Free text to rank the list against, which never leaves the process */
   intent: string | undefined;
@@ -166,13 +166,13 @@ export interface DiscoverFlags {
 
 export const DISCOVER_USAGE = `usage: pnpm --filter @z402/agent discover [flags]
 
-  --discovery <url>        discovery service, or the website that proxies it     (http://127.0.0.1:4030)
+  --discovery <url>        the facilitator, or the website that proxies it       (http://127.0.0.1:4022)
   --intent <text>          rank the list by word overlap with this text, matched here and never sent
   --json                   print the list as JSON, as the service sent it
   --help                   print this text`;
 
 const DISCOVER_DEFAULTS: DiscoverFlags = Object.freeze({
-  discovery: "http://127.0.0.1:4030",
+  discovery: "http://127.0.0.1:4022",
   intent: undefined,
   json: false,
 });

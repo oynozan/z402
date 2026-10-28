@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { DISCOVER_USAGE, FlagError, parseDiscoverFlags, parseFlags, type DiscoverFlags } from "../src/flags.js";
 
 const DEFAULTS: DiscoverFlags = {
-  discovery: "http://127.0.0.1:4030",
+  discovery: "http://127.0.0.1:4022",
   intent: undefined,
   json: false,
 };
 
 describe("parseDiscoverFlags", () => {
-  it("defaults to the local discovery service and the plain list", () => {
+  it("defaults to the local facilitator's Bazaar and the plain list", () => {
     expect(parseDiscoverFlags([])).toEqual(DEFAULTS);
   });
 
@@ -78,7 +78,7 @@ describe("parseDiscoverFlags", () => {
     for (const flag of [...Object.keys(DEFAULTS), "help"]) {
       expect(DISCOVER_USAGE, flag).toContain(`--${flag}`);
     }
-    expect(DISCOVER_USAGE).toContain("http://127.0.0.1:4030");
+    expect(DISCOVER_USAGE).toContain("http://127.0.0.1:4022");
   });
 
   it("leaves the demo's own parser alone, which still takes no subcommand", () => {
