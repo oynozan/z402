@@ -1,7 +1,9 @@
 /**
  * The merchant's paid HTTP API (design §4.6, protocol.md v2.0 §15). One route, `/chunk`, priced in zatoshi and paid
  * with prepaid-voucher through the stock x402 Express middleware, which has the facilitator verify each voucher
- * before the handler runs and settle it after. The terms come from the facilitator's /supported at start.
+ * before the handler runs and settle it after. The terms come from the facilitator's /supported at start. Given a
+ * public URL, the API also declares its route to the facilitator's Bazaar every 30 s (declare.ts), which lists the
+ * route before its first sale and tells that the API is up.
  *
  * Every startup failure names the option at fault, so the message tells the operator which setting to fix.
  */
@@ -29,6 +31,7 @@ import {
 } from "@z402/protocol";
 import { checkProvider, PrepaidVoucherServerScheme, ProviderCheckError } from "@z402/server";
 import express, { type Express, type Request, type RequestHandler, type Response } from "express";
+import { CHUNK_PATH, DECLARE_INTERVAL_MS, declaredResource, publicUrlProblem, startDeclaring } from "./declare.js";
 
 export interface ApiOptions {
   network: ZcashNetwork;
@@ -42,6 +45,12 @@ export interface ApiOptions {
   host?: string;
   /** Default 0 picks a free port, read the real one from url */
   port?: number;
+  /** Where this API is reached, which the 402 names as the route's resource and the Bazaar lists it under */
+  publicUrl?: string;
+  /** How often the route is declared to the Bazaar, default 30000, and only a publicUrl makes the API declare */
+  declareIntervalMs?: number;
+  /** Where the outcomes of the declarations are reported, default stderr */
+  log?: (message: string) => void;
 }
 
 export interface ApiHandle {
@@ -55,6 +64,8 @@ const FACILITATOR_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_SECONDS = 60;
 const X402_VERSION = 2;
 const MAX_CAUSES = 5;
+/** The longest delay setTimeout honours, past which Node fires it after 1 ms */
+const MAX_TIMER_MS = 2_147_483_647;
 /** An RFC 6750 b64token, the only token an Authorization header can carry and match */
 const B64TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
 
@@ -93,6 +104,12 @@ function checkOptions(o: ApiOptions): void {
   if (!isValidPayTo(o.payTo, o.network)) throw new Error(`payTo: not a shielded-only unified address for ${o.network}`);
   // initialize() never prices the route, so a bad price would otherwise fail every request instead of the start
   if (typeof o.priceZat !== "bigint" || o.priceZat < 1n) throw new Error("priceZat: must be a bigint of at least 1 zat");
+  const problem = o.publicUrl === undefined ? undefined : publicUrlProblem(o.publicUrl);
+  if (problem !== undefined) throw new Error(`publicUrl: ${problem}`);
+  const every = o.declareIntervalMs;
+  if (every !== undefined && (!Number.isInteger(every) || every < 1 || every > MAX_TIMER_MS)) {
+    throw new Error(`declareIntervalMs: expected a whole number of milliseconds from 1 to ${MAX_TIMER_MS}`);
+  }
 }
 
 function checkListen(o: ApiOptions): void {
@@ -208,20 +225,20 @@ function chunk(priceZat: bigint): RequestHandler {
   };
 }
 
-/** The Express app with the paid route, once the facilitator's /supported has been loaded and checked */
-export async function createApiApp(o: ApiOptions): Promise<Express> {
+/** The Express app with the paid route and the x402 server behind it, once /supported has been loaded and checked */
+async function buildApi(o: ApiOptions): Promise<{ app: Express; http: x402HTTPResourceServer }> {
   checkOptions(o);
   // Before the first /supported, so a refused key or another payTo is named for what it is
   await checkKey(o);
   // One payTo and one network feed both the scheme and the route, since nothing compares the two later
-  const { network, payTo, priceZat } = o;
+  const { network, payTo, priceZat, publicUrl } = o;
   const server = new x402ResourceServer(facilitatorClient(o)).register(
     network,
     new PrepaidVoucherServerScheme({ payTo, network }),
   );
   const routes: RoutesConfig = {
     // Keyed without a verb, so a request of any method must pay before it reaches a handler
-    "/chunk": {
+    [CHUNK_PATH]: {
       accepts: {
         scheme: SCHEME,
         network,
@@ -229,6 +246,8 @@ export async function createApiApp(o: ApiOptions): Promise<Express> {
         payTo,
         maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
       },
+      // The 402 names the resource that is declared, so that a settled payment matches its item
+      ...(publicUrl !== undefined && { resource: `${publicUrl.replace(/\/+$/, "")}${CHUNK_PATH}` }),
       mimeType: "application/json",
       extensions: { bazaar: bazaarExtension(priceZat) },
     },
@@ -245,10 +264,15 @@ export async function createApiApp(o: ApiOptions): Promise<Express> {
   // The support is loaded above, and false keeps the middleware from loading it again or exiting the process
   app.use(paymentMiddlewareFromHTTPServer(http, undefined, undefined, false));
   // Registered before the GET route, which Express would otherwise also run for HEAD
-  app.head("/chunk", notAllowed);
-  app.get("/chunk", chunk(priceZat));
-  app.all("/chunk", notAllowed);
-  return app;
+  app.head(CHUNK_PATH, notAllowed);
+  app.get(CHUNK_PATH, chunk(priceZat));
+  app.all(CHUNK_PATH, notAllowed);
+  return { app, http };
+}
+
+/** The Express app with the paid route, once the facilitator's /supported has been loaded and checked */
+export async function createApiApp(o: ApiOptions): Promise<Express> {
+  return (await buildApi(o)).app;
 }
 
 /** Only GET is served, and the middleware never settles a 405, so the voucher sent with it still buys a GET */
@@ -275,18 +299,35 @@ function listen(app: Express, host: string, port: number): Promise<Server> {
 /** Loads the facilitator's support, then listens, and rejects naming the option at fault */
 export async function startApi(o: ApiOptions): Promise<ApiHandle> {
   checkListen(o);
-  const app = await createApiApp(o);
+  const { app, http } = await buildApi(o);
+  // Read before listening, so that a failure here leaves no server to close
+  const route = { method: "GET", path: CHUNK_PATH };
+  const item = o.publicUrl === undefined ? undefined : await declaredResource(http, route);
   const host = o.host ?? DEFAULT_HOST;
   const server = await listen(app, host, o.port ?? 0);
 
   const { port } = server.address() as AddressInfo;
+  // The first declaration is made at once, now that the route answers
+  const declaring =
+    item === undefined
+      ? undefined
+      : startDeclaring({
+          facilitatorUrl: o.facilitatorUrl,
+          token: o.facilitatorToken,
+          item,
+          intervalMs: o.declareIntervalMs ?? DECLARE_INTERVAL_MS,
+          log: o.log ?? ((message) => console.error(`api: ${message}`)),
+        });
   let closing: Promise<void> | undefined;
   return {
     url: `http://${host.includes(":") ? `[${host}]` : host}:${port}`,
     // close() also drops idle keep-alive connections on Node 19 and later, and waits for requests in flight
     close: () =>
-      (closing ??= new Promise<void>((resolve, reject) => {
-        server.close((err) => (err === undefined ? resolve() : reject(err)));
-      })),
+      (closing ??= (async () => {
+        await declaring?.stop();
+        await new Promise<void>((resolve, reject) => {
+          server.close((err) => (err === undefined ? resolve() : reject(err)));
+        });
+      })()),
   };
 }

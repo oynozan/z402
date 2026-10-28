@@ -8,7 +8,7 @@ import { decodePaymentRequiredHeader } from "@x402/core/http";
 import { startFacilitator } from "@z402/facilitator";
 import { DEMO_TERMS, NETWORK_REGTEST } from "@z402/protocol";
 import { FakeChain } from "@z402/testkit";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 const API_DIR = fileURLToPath(new URL("..", import.meta.url));
 /** Relative to the repository root, which is two levels above the child's working directory */
@@ -130,6 +130,60 @@ test(
     expect(await run.exited).toBe(1);
     expect(run.stderr()).toMatch(/^api: payTo:/m);
     expect(run.stderr()).not.toContain(TOKEN);
+    expect(run.stdout()).toBe("");
+  },
+  SLOW,
+);
+
+test(
+  "Z402_API_PUBLIC_URL lists /chunk in the facilitator's Bazaar, and the ready line is as it was",
+  async () => {
+    const fac = await facilitator();
+    const run = runMain({
+      Z402_FACILITATOR_URL: fac.url,
+      Z402_FACILITATOR_TOKEN: TOKEN,
+      Z402_MERCHANT_KEYS_FILE: KEYS_FILE,
+      Z402_API_PORT: "0",
+      Z402_API_PUBLIC_URL: "https://api.example.test/",
+    });
+
+    const line = await run.firstLine;
+    expect(line).toMatch(/^api listening on http:\/\/127\.0\.0\.1:\d+ network=zcash:regtest$/);
+    const items = async (): Promise<unknown[]> =>
+      ((await (await fetch(`${fac.url}/discovery/resources`)).json()) as { items: unknown[] }).items;
+    await vi.waitFor(async () => expect(await items()).toHaveLength(1), { timeout: 10_000 });
+    expect(await items()).toMatchObject([
+      { resource: "https://api.example.test/chunk", accepts: [{ payTo: PAY_TO, amount: "500" }] },
+    ]);
+    const listed = new RegExp(
+      String.raw`^api: discovery: 1 paid route listed by the facilitator at http://127\.0\.0\.1:\d+, ` +
+        String.raw`declared again every 30 s$`,
+      "m",
+    );
+    await vi.waitFor(() => expect(run.stderr()).toMatch(listed), { timeout: 10_000 });
+
+    run.child.kill("SIGTERM");
+    expect(await run.exited).toBe(0);
+    expect(run.stdout()).toBe(`${line}\n`);
+    for (const secret of [TOKEN, UIVK]) {
+      expect(run.stdout()).not.toContain(secret);
+      expect(run.stderr()).not.toContain(secret);
+    }
+  },
+  SLOW,
+);
+
+test(
+  "a Z402_API_PUBLIC_URL with credentials exits 1 naming it, without quoting it or asking the facilitator",
+  async () => {
+    const run = runMain({
+      Z402_FACILITATOR_URL: "http://127.0.0.1:9",
+      Z402_PAY_TO: PAY_TO,
+      Z402_API_PUBLIC_URL: "https://agent:hunter2@api.example.test",
+    });
+    expect(await run.exited).toBe(1);
+    expect(run.stderr()).toMatch(/^api: Z402_API_PUBLIC_URL: must not carry credentials$/m);
+    expect(run.stderr()).not.toContain("hunter2");
     expect(run.stdout()).toBe("");
   },
   SLOW,

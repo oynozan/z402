@@ -774,6 +774,19 @@ describe("startApi", () => {
     ["host", { host: " " }],
     ["port", { port: 70000 }],
     ["port", { port: 1.5 }],
+    ["publicUrl", { publicUrl: "" }],
+    ["publicUrl", { publicUrl: "api.example.com" }],
+    ["publicUrl", { publicUrl: "ftp://api.example.com" }],
+    ["publicUrl", { publicUrl: "https://api.example.com/a b" }],
+    ["publicUrl", { publicUrl: "https://agent:pw@api.example.com" }],
+    ["publicUrl", { publicUrl: "https://agent@api.example.com" }],
+    ["publicUrl", { publicUrl: "https://api.example.com?x=1" }],
+    ["publicUrl", { publicUrl: "https://api.example.com/?" }],
+    ["publicUrl", { publicUrl: "https://api.example.com#top" }],
+    ["publicUrl", { publicUrl: `https://api.example.com/${"a".repeat(2048)}` }],
+    ["declareIntervalMs", { declareIntervalMs: 0 }],
+    ["declareIntervalMs", { declareIntervalMs: 1.5 }],
+    ["declareIntervalMs", { declareIntervalMs: 2 ** 31 }],
   ] as Array<[string, Partial<ApiOptions>]>)("a bad %s rejects naming the field before any request", async (field, over) => {
     const requests = vi.spyOn(globalThis, "fetch");
     await expect(startApi(apiOptions("http://127.0.0.1:9", over))).rejects.toThrow(new RegExp(`^${field}:`));
@@ -802,6 +815,8 @@ describe("startApi", () => {
   test.each<[string, Partial<ApiOptions>, string]>([
     ["facilitatorUrl", { facilitatorUrl: "http://op:pw@127.0.0.1:9" }, "pw@"],
     ["facilitatorToken", { facilitatorToken: "abc\nSECRET" }, "SECRET"],
+    ["publicUrl", { publicUrl: "https://agent:hunter2@api.example.com" }, "hunter2"],
+    ["publicUrl", { publicUrl: "https://api.example.com/?key=hunter2" }, "hunter2"],
   ])("a %s that carries a secret is refused without quoting it anywhere", async (field, over, secret) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const error = await startApi(apiOptions("http://127.0.0.1:9", over)).then(
@@ -960,5 +975,507 @@ describe("startApi", () => {
     const { port } = server.address() as { port: number };
     const refusal = await refusalOf(await fetch(`http://127.0.0.1:${port}/chunk`));
     expect(refusal.accepts[0]).toMatchObject({ scheme: SCHEME, payTo: PAY_TO, amount: "500" });
+  });
+});
+
+/** Where the operator says the API is reached, which nothing needs to serve since the facilitator never fetches it */
+const PUBLIC_URL = "https://demo.example.test";
+
+/** One POST /discovery/resources that a stub catalog took */
+interface Declaration {
+  authorization: string | undefined;
+  contentType: string | undefined;
+  /** The body, parsed, or undefined when it is not JSON */
+  body: unknown;
+  /** When it arrived, as Date.now() */
+  at: number;
+}
+
+/** A facilitator stand-in that takes the API's start and keeps what is declared to it, answering as told */
+async function stubCatalog() {
+  let how: number | "drop" = 200;
+  let refusal: unknown;
+  let atOnce = 0;
+  const stub = {
+    /** Every request it took, as "METHOD /path", in order */
+    requests: [] as string[],
+    declarations: [] as Declaration[],
+    /** The most declarations it was answering at one time */
+    mostAtOnce: 0,
+    /** The declarations whose sender went away before the answer */
+    abandoned: 0,
+    /** How long it holds each answer */
+    delayMs: 0,
+    /** How it answers declarations from now on, 200 by default, another status and body, or "drop" to cut them off */
+    answer(next: number | "drop", body?: unknown): void {
+      how = next;
+      refusal = body;
+    },
+  };
+  const server = createServer((req, res) => {
+    stub.requests.push(`${req.method} ${req.url}`);
+    res.setHeader("content-type", "application/json");
+    if (req.method === "GET" && req.url === "/providers/me") {
+      res.end(JSON.stringify(ME));
+    } else if (req.method === "GET" && req.url === "/supported") {
+      res.end(JSON.stringify(supportedOn(NETWORK, ADVERTISED)));
+    } else if (req.method === "POST" && req.url === "/discovery/resources") {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("close", () => {
+        if (!res.writableFinished) stub.abandoned += 1;
+      });
+      req.on("end", () => {
+        void (async () => {
+          atOnce += 1;
+          stub.mostAtOnce = Math.max(stub.mostAtOnce, atOnce);
+          try {
+            let body: unknown;
+            try {
+              body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            } catch {
+              body = undefined;
+            }
+            const { authorization } = req.headers;
+            const contentType = req.headers["content-type"];
+            stub.declarations.push({ authorization, contentType, body, at: Date.now() });
+            if (stub.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, stub.delayMs));
+            if (req.socket.destroyed) return;
+            if (how === "drop") {
+              req.socket.destroy();
+            } else if (how === 200) {
+              const items = typeof body === "object" && body !== null ? (body as { items?: unknown }).items : [];
+              res.end(JSON.stringify({ x402Version: 2, items }));
+            } else {
+              res.statusCode = how;
+              res.end(JSON.stringify(refusal ?? { error: "refused_by_the_stub" }));
+            }
+          } finally {
+            atOnce -= 1;
+          }
+        })();
+      });
+    } else {
+      res.statusCode = 404;
+      res.end('{"error":"not_found"}');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  running.push({
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  });
+  return Object.assign(stub, { url: `http://127.0.0.1:${(server.address() as { port: number }).port}` });
+}
+
+describe("declaring GET /chunk to the facilitator's Bazaar", { timeout: LONG }, () => {
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** Waits until the stub has taken `more` declarations beyond those it has now */
+  async function declared(stub: Awaited<ReturnType<typeof stubCatalog>>, more: number): Promise<void> {
+    const target = stub.declarations.length + more;
+    await vi.waitFor(() => expect(stub.declarations.length).toBeGreaterThanOrEqual(target), { timeout: 5_000 });
+  }
+
+  /** What GET /discovery/resources answers for the API's payTo, the items only */
+  const listedFor = async (facilitatorUrl: string, payTo = PAY_TO): Promise<any[]> =>
+    ((await (await fetch(`${facilitatorUrl}/discovery/resources?payTo=${payTo}`)).json()) as { items: any[] }).items;
+
+  /** An API that declares under PUBLIC_URL and keeps its log to itself, unless the test reads it */
+  const declaring = (facilitatorUrl: string, over: Partial<ApiOptions> = {}) =>
+    apiOn(facilitatorUrl, { publicUrl: PUBLIC_URL, log: quiet, ...over });
+
+  test("lists /chunk under the public URL and the API's payTo within one beat, with a fresh lastSeen", async () => {
+    const facilitator = await facilitatorOn(new FakeChain({ expiryDelta: 40 }));
+    expect(await listedFor(facilitator.url)).toEqual([]);
+
+    const before = Date.now();
+    const api = await declaring(facilitator.url);
+    await vi.waitFor(async () => expect(await listedFor(facilitator.url)).toHaveLength(1), { timeout: 5_000 });
+
+    const [item] = await listedFor(facilitator.url);
+    const required = await refusalOf(await fetch(`${api.url}/chunk`));
+    expect(item).toMatchObject({
+      resource: `${PUBLIC_URL}/chunk`,
+      type: "http",
+      x402Version: 2,
+      mimeType: "application/json",
+      accepts: [{ scheme: SCHEME, network: NETWORK, amount: "500", asset: "ZEC", payTo: PAY_TO }],
+      extensions: { bazaar: bazaarOf("500") },
+      paidCallsToday: 0,
+    });
+    // What the 402 asks, which is also what the catalog offers
+    expect(item.accepts).toEqual(required.accepts);
+    expect(item.extensions).toEqual(required.extensions);
+    const seen = Date.parse(item.lastSeen);
+    expect(seen).toBeGreaterThanOrEqual(before);
+    expect(seen).toBeLessThanOrEqual(Date.now());
+  });
+
+  test("the 402 names the declared resource, a trailing slash of the public URL dropped", async () => {
+    const facilitator = await facilitatorOn(new FakeChain({ expiryDelta: 40 }));
+    const api = await declaring(facilitator.url, { publicUrl: `${PUBLIC_URL}/` });
+    const required = await refusalOf(await fetch(`${api.url}/chunk`));
+    expect(required.resource).toEqual({ url: `${PUBLIC_URL}/chunk`, description: "", mimeType: "application/json" });
+
+    // Without a public URL it is the URL the request came to, as it was
+    const bare = await apiOn(facilitator.url);
+    expect((await refusalOf(await fetch(`${bare.url}/chunk`))).resource.url).toBe(`${bare.url}/chunk`);
+  });
+
+  test("a path in the public URL is kept in the resource", async () => {
+    const facilitator = await facilitatorOn(new FakeChain({ expiryDelta: 40 }));
+    const api = await declaring(facilitator.url, { publicUrl: `${PUBLIC_URL}/z402/` });
+    expect((await refusalOf(await fetch(`${api.url}/chunk`))).resource.url).toBe(`${PUBLIC_URL}/z402/chunk`);
+    await vi.waitFor(
+      async () => expect((await listedFor(facilitator.url))[0]?.resource).toBe(`${PUBLIC_URL}/z402/chunk`),
+      { timeout: 5_000 },
+    );
+  });
+
+  test("createApiApp only names the resource, since declaring belongs to the API that runs", async () => {
+    const stub = await stubCatalog();
+    const app = await createApiApp(apiOptions(stub.url, { publicUrl: PUBLIC_URL, declareIntervalMs: 20 }));
+    const server = createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    running.push({
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        }),
+    });
+    const { port } = server.address() as { port: number };
+    expect((await refusalOf(await fetch(`http://127.0.0.1:${port}/chunk`))).resource.url).toBe(`${PUBLIC_URL}/chunk`);
+    await sleep(200);
+    expect(stub.requests).toEqual(["GET /providers/me", "GET /supported"]);
+  });
+
+  test("settled payments count on the declared item and create no other", async () => {
+    const chain = new FakeChain({ expiryDelta: 40 });
+    const facilitator = await facilitatorOn(chain);
+    const api = await declaring(facilitator.url);
+    await vi.waitFor(async () => expect(await listedFor(facilitator.url)).toHaveLength(1), { timeout: 5_000 });
+
+    // The client pays at the URL it reached, and echoes the resource the 402 named
+    const p = payer(api.url);
+    p.client.pendingTxid = deposit(chain, p.client.sessionKey, 1);
+    for (let i = 1; i <= 3; i++) await paidChunk(await p.chunk());
+
+    expect(decodePaymentSignatureHeader(p.sent[0] ?? "").resource?.url).toBe(`${PUBLIC_URL}/chunk`);
+    const items = await listedFor(facilitator.url);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ resource: `${PUBLIC_URL}/chunk`, paidCallsToday: 3 });
+    expect(items[0].lastSeen).toBeDefined();
+  });
+
+  test("declares again every interval, so lastSeen keeps moving", async () => {
+    const facilitator = await facilitatorOn(new FakeChain({ expiryDelta: 40 }));
+    await declaring(facilitator.url, { declareIntervalMs: 40 });
+    let first = 0;
+    await vi.waitFor(
+      async () => {
+        const [item] = await listedFor(facilitator.url);
+        expect(item).toBeDefined();
+        first = Date.parse(item.lastSeen);
+      },
+      { timeout: 5_000 },
+    );
+    await vi.waitFor(
+      async () => expect(Date.parse((await listedFor(facilitator.url))[0].lastSeen)).toBeGreaterThan(first),
+      { timeout: 5_000 },
+    );
+    expect(await listedFor(facilitator.url)).toHaveLength(1);
+  });
+
+  test("sends one item made of the 402 of an unpaid request, with its accepts and extensions as they are", async () => {
+    const stub = await stubCatalog();
+    const api = await declaring(stub.url, { priceZat: 700n });
+    await declared(stub, 1);
+
+    const required = await refusalOf(await fetch(`${api.url}/chunk`));
+    expect(required.accepts[0]).toMatchObject({ payTo: PAY_TO, amount: "700" });
+    // No empty description and no key the 402 does not carry
+    expect(stub.declarations[0]?.body).toStrictEqual({
+      items: [
+        {
+          resource: `${PUBLIC_URL}/chunk`,
+          type: "http",
+          x402Version: 2,
+          accepts: required.accepts,
+          mimeType: "application/json",
+          extensions: { bazaar: bazaarOf("700") },
+        },
+      ],
+    });
+    expect(stub.requests.slice(0, 3)).toEqual(["GET /providers/me", "GET /supported", "POST /discovery/resources"]);
+  });
+
+  test("the key goes as a bearer token, and no header is sent without one", async () => {
+    const withKey = await stubCatalog();
+    await declaring(withKey.url);
+    await declared(withKey, 1);
+    expect(withKey.declarations[0]).toMatchObject({
+      authorization: `Bearer ${TOKEN}`,
+      contentType: "application/json",
+    });
+
+    const without = await stubCatalog();
+    await declaring(without.url, { facilitatorToken: undefined });
+    await declared(without, 1);
+    expect(without.declarations[0]?.authorization).toBeUndefined();
+  });
+
+  test("without a public URL nothing is ever declared, whatever the interval", async () => {
+    const stub = await stubCatalog();
+    const api = await apiOn(stub.url, { declareIntervalMs: 20, log: quiet });
+    await refusalOf(await fetch(`${api.url}/chunk`));
+    await sleep(400);
+    await api.close();
+    await sleep(100);
+    // The start was all it asked, so no declaration and no other request ever arrived
+    expect(stub.requests).toEqual(["GET /providers/me", "GET /supported"]);
+  });
+
+  test("close() stops the beat", async () => {
+    const stub = await stubCatalog();
+    const api = await declaring(stub.url, { declareIntervalMs: 30 });
+    await declared(stub, 3);
+
+    await api.close();
+    // A declaration sent just before the close may still be on its way to the stub
+    await sleep(100);
+    const count = stub.declarations.length;
+    await sleep(400);
+    expect(stub.declarations).toHaveLength(count);
+  });
+
+  test("close() ends a declaration in flight at once, and says nothing of it", async () => {
+    const log: string[] = [];
+    const stub = await stubCatalog();
+    stub.delayMs = 5_000;
+    const api = await declaring(stub.url, { log: (line) => log.push(line) });
+    await declared(stub, 1);
+
+    const started = Date.now();
+    await api.close();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // The request is gone from the stub long before the 5 s it holds the answer for
+    await vi.waitFor(() => expect(stub.abandoned).toBe(1), { timeout: 3_000 });
+    expect(log).toEqual([]);
+  });
+
+  test("the next beat is 30 s after the last declaration, on a timer that never holds the process open", async () => {
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    const stub = await stubCatalog();
+    await declaring(stub.url);
+    await declared(stub, 1);
+
+    const thirty = (): number => timers.mock.calls.findIndex(([, ms]) => ms === 30_000);
+    await vi.waitFor(() => expect(thirty()).toBeGreaterThanOrEqual(0), { timeout: 5_000 });
+    expect((timers.mock.results[thirty()]?.value as NodeJS.Timeout).hasRef()).toBe(false);
+    expect(stub.declarations).toHaveLength(1);
+  });
+
+  test("declares again an interval after the last declaration ended, so two never overlap", async () => {
+    const stub = await stubCatalog();
+    await declaring(stub.url, { declareIntervalMs: 100 });
+    const gaps = (list: Declaration[]): number[] => list.slice(1).map((d, i) => d.at - (list[i]?.at ?? 0));
+    await declared(stub, 4);
+    expect(Math.min(...gaps(stub.declarations))).toBeGreaterThanOrEqual(95);
+
+    // A catalog that is slow to answer holds the next declaration back until it has answered
+    stub.delayMs = 300;
+    const from = stub.declarations.length;
+    await declared(stub, 3);
+    expect(Math.min(...gaps(stub.declarations.slice(from)))).toBeGreaterThanOrEqual(395);
+    expect(stub.mostAtOnce).toBe(1);
+  });
+
+  test("a 400 is logged once, without the token, and the next beat tries again", async () => {
+    const log: string[] = [];
+    const stub = await stubCatalog();
+    stub.answer(400, { error: "invalid_request", index: 0, message: `accepts[0].extra: not for ${TOKEN}` });
+    const api = await declaring(stub.url, { declareIntervalMs: 30, log: (line) => log.push(line) });
+
+    await declared(stub, 5);
+    expect(log).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          String.raw`^discovery: the facilitator at http://127\.0\.0\.1:\d+ refused the declaration ` +
+            String.raw`\(400, item 0: accepts\[0\]\.extra: not for <token>\); trying again every 0\.03 s$`,
+        ),
+      ),
+    ]);
+    expect(log.join("\n")).not.toContain(TOKEN);
+    // The API is up all the while
+    expect((await fetch(`${api.url}/chunk`)).status).toBe(402);
+  });
+
+  test("a price the facilitator's window cannot take is refused by its catalog and logged once", async () => {
+    const log: string[] = [];
+    const facilitator = await facilitatorOn(new FakeChain({ expiryDelta: 40 }));
+    // Nothing checks the price against the window at start (the README says so), but the catalog does
+    await declaring(facilitator.url, { priceZat: 100_001n, declareIntervalMs: 30, log: (line) => log.push(line) });
+
+    await vi.waitFor(() => expect(log).toHaveLength(1), { timeout: 5_000 });
+    await sleep(200);
+    expect(log).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          String.raw`^discovery: the facilitator at http://127\.0\.0\.1:\d+ refused the declaration ` +
+            String.raw`\(400, item 0: items\[0\]\.accepts\[0\]\.amount: ` +
+            String.raw`must be a canonical zat amount from 1 to 100000\); trying again every 0\.03 s$`,
+        ),
+      ),
+    ]);
+    expect(log.join("\n")).not.toContain(TOKEN);
+    expect(await listedFor(facilitator.url)).toEqual([]);
+  });
+
+  test("logs each change of outcome once, keeps the API up, and never logs the token", async () => {
+    const log: string[] = [];
+    const stub = await stubCatalog();
+    const api = await declaring(stub.url, { declareIntervalMs: 30, log: (line) => log.push(line) });
+    await declared(stub, 2);
+    const answers: Array<[number | "drop", unknown]> = [
+      [404, { error: "not_found" }],
+      [401, { error: "unauthorized" }],
+      [403, { error: "forbidden" }],
+      [400, { error: "invalid_request", index: 0, message: `accepts[0].amount: not for ${TOKEN}\u001b[2J` }],
+      [503, undefined],
+      [301, undefined],
+      ["drop", undefined],
+      [200, undefined],
+    ];
+    for (const [how, body] of answers) {
+      stub.answer(how, body);
+      await declared(stub, 3);
+    }
+
+    const at = String.raw`the facilitator at http://127\.0\.0\.1:\d+`;
+    const again = String.raw`; trying again every 0\.03 s$`;
+    const listed = new RegExp(String.raw`^discovery: 1 paid route listed by ${at}, declared again every 0\.03 s$`);
+    expect(log).toEqual(
+      [
+        listed,
+        new RegExp(
+          String.raw`^discovery: ${at} has no Bazaar to declare to \(404\), ` +
+            String.raw`so the route is not listed${again}`,
+        ),
+        new RegExp(String.raw`^discovery: Z402_FACILITATOR_TOKEN: ${at} refused the declaration \(401\)${again}`),
+        new RegExp(String.raw`^discovery: Z402_FACILITATOR_TOKEN: ${at} refused the declaration \(403\)${again}`),
+        new RegExp(
+          String.raw`^discovery: ${at} refused the declaration ` +
+            String.raw`\(400, item 0: accepts\[0\]\.amount: not for <token> \[2J\)${again}`,
+        ),
+        new RegExp(String.raw`^discovery: ${at} answered the declaration with 503${again}`),
+        new RegExp(String.raw`^discovery: ${at} answered the declaration with 301${again}`),
+        new RegExp(String.raw`^discovery: cannot reach ${at} \(\S+\)${again}`),
+        listed,
+      ].map((line) => expect.stringMatching(line)),
+    );
+    expect(log.join("\n")).not.toContain(TOKEN);
+    expect((await fetch(`${api.url}/chunk`)).status).toBe(402);
+  });
+
+  test("a declaration that gets no answer in time is reported as that, once", async () => {
+    const log: string[] = [];
+    const stub = await stubCatalog();
+    // Only the declarations time out, since the start has to reach the stub
+    const real = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) =>
+      init?.method === "POST"
+        ? Promise.reject(new DOMException("The operation timed out.", "TimeoutError"))
+        : real(input, init),
+    );
+    await declaring(stub.url, { declareIntervalMs: 30, log: (line) => log.push(line) });
+
+    await vi.waitFor(() => expect(log).toHaveLength(1), { timeout: 5_000 });
+    await sleep(200);
+    expect(log).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          String.raw`^discovery: cannot reach the facilitator at http://127\.0\.0\.1:\d+ ` +
+            String.raw`\(no answer within 10 s\); trying again every 0\.03 s$`,
+        ),
+      ),
+    ]);
+    expect(stub.declarations).toEqual([]);
+  });
+
+  test("keeps trying while the facilitator is down, and lists again once it is back", async () => {
+    const log: string[] = [];
+    const chain = new FakeChain({ expiryDelta: 40 });
+    const first = await facilitatorOn(chain);
+    await declaring(first.url, { declareIntervalMs: 30, log: (line) => log.push(line) });
+    await vi.waitFor(async () => expect(await listedFor(first.url)).toHaveLength(1), { timeout: 5_000 });
+
+    await first.close();
+    await vi.waitFor(() => expect(log.length).toBeGreaterThanOrEqual(2), { timeout: 5_000 });
+    await sleep(200);
+    const second = await facilitatorOn(chain, { port: Number(new URL(first.url).port) });
+    await vi.waitFor(async () => expect(await listedFor(second.url)).toHaveLength(1), { timeout: 5_000 });
+    await vi.waitFor(() => expect(log.at(-1)).toMatch(/^discovery: 1 paid route listed by /), { timeout: 5_000 });
+
+    // Each line is a change, so listed comes first and last with only the outage between
+    expect(log[0]).toMatch(/^discovery: 1 paid route listed by /);
+    const unreachable = /^discovery: cannot reach the facilitator at \S+ \(\S+\); /;
+    for (const line of log.slice(1, -1)) expect(line).toMatch(unreachable);
+    log.slice(1).forEach((line, i) => expect(line).not.toBe(log[i]));
+    expect(log.join("\n")).not.toContain(TOKEN);
+  });
+
+  describe("beside a second provider", () => {
+    const PAY_TO_2 = `uregtest1${"p".repeat(60)}`;
+
+    test("a bare API stays silent and is listed from its payments, beside one that declares", async () => {
+      const chain = new FakeChain({ expiryDelta: 40 });
+      const chain2 = new FakeChain({ expiryDelta: 40 });
+      const facilitator = await facilitatorOn(chain, {
+        providers: {
+          dir: join(scratch, "providers-declare"),
+          chainFor: () => chain2.viewFor(PAY_TO_2),
+          owns: async () => true,
+        },
+      });
+      const registered = await fetch(`${facilitator.url}/providers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ payTo: PAY_TO_2, uivk: `uivkregtest1${"sec3ret".repeat(10)}` }),
+      });
+      expect(registered.status).toBe(201);
+      const { apiKey } = (await registered.json()) as { apiKey: string };
+
+      const operatorApi = await declaring(facilitator.url);
+      const providerApi = await apiOn(facilitator.url, {
+        facilitatorToken: apiKey,
+        payTo: PAY_TO_2,
+        priceZat: 800n,
+        declareIntervalMs: 30,
+      });
+      await vi.waitFor(async () => expect(await listedFor(facilitator.url)).toHaveLength(1), { timeout: 5_000 });
+
+      const first = payer(operatorApi.url);
+      const second = payer(providerApi.url);
+      first.client.pendingTxid = deposit(chain, first.client.sessionKey, 1);
+      second.client.pendingTxid = chain2.broadcast({
+        outputs: [{ to: PAY_TO_2, valueZat: 100000n, memo: depositMemo(second.client.sessionKey, 1) }],
+      });
+      for (let i = 0; i < 2; i++) {
+        await paidChunk(await first.chunk());
+        await paidChunk(await second.chunk());
+      }
+
+      const operator = await listedFor(facilitator.url, PAY_TO);
+      const provider = await listedFor(facilitator.url, PAY_TO_2);
+      expect(operator).toMatchObject([{ resource: `${PUBLIC_URL}/chunk`, paidCallsToday: 2 }]);
+      expect(operator[0].lastSeen).toBeDefined();
+      expect(provider).toMatchObject([{ resource: `${providerApi.url}/chunk`, paidCallsToday: 2 }]);
+      expect(provider[0].lastSeen).toBeUndefined();
+    });
   });
 });
