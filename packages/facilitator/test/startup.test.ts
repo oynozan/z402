@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,8 @@ import {
 } from "@z402/protocol";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { startFakeLwd, type FakeLwd } from "../../lightwalletd/test/support/fakeLwd.js";
+import { keyDigest } from "../src/providers/apiKey.js";
+import { providerId } from "../src/providers/id.js";
 import { runStartupChecks, StartupError } from "../src/startup.js";
 import { FakeBinaries, type Call } from "./support/fakeZdecrypt.js";
 import { KAGE_MEMO, KAGE_TXID, keys, minedFixture, ZDECRYPT_BIN } from "./support/fixtures.js";
@@ -153,8 +155,9 @@ describe("runStartupChecks with a stand-in zdecrypt", () => {
     outputs: [{ ...KAGE_REPORT.outputs[0], ...over }],
   });
 
-  function reply(decrypt: unknown, owns: unknown = OWNS): void {
-    writeFileSync(control, JSON.stringify({ decrypt, owns }));
+  /** `ownsByKey` answers the owns check of one viewing key in place of `owns`, since a provider's can differ */
+  function reply(decrypt: unknown, owns: unknown = OWNS, ownsByKey: Record<string, unknown> = {}): void {
+    writeFileSync(control, JSON.stringify({ decrypt, owns, ownsByKey }));
   }
 
   beforeAll(() => {
@@ -162,7 +165,10 @@ describe("runStartupChecks with a stand-in zdecrypt", () => {
     const stub = fakes.script(`
 const replies = JSON.parse(require("node:fs").readFileSync(${JSON.stringify(control)}, "utf8"));
 process.stdin.resume();
-process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[process.argv[2]])));
+process.stdin.on("end", () => {
+  const byKey = process.argv[2] === "owns" ? replies.ownsByKey[process.env.ZDECRYPT_KEY] : undefined;
+  process.stdout.write(JSON.stringify(byKey ?? replies[process.argv[2]]));
+});
 `);
     stand.bin = stub.bin;
     calls = stub.calls;
@@ -345,6 +351,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
         Z402_FACILITATOR_TOKEN: TOKEN,
         Z402_ZDECRYPT_BIN: stand.bin,
         Z402_LEDGER: join(scratch, "main-ledger.jsonl"),
+        Z402_PROVIDERS_DIR: join(scratch, `providers-${Math.random().toString(36).slice(2)}`),
         Z402_FACILITATOR_HOST: "127.0.0.1",
         Z402_FACILITATOR_PORT: "0",
         ...over,
@@ -396,22 +403,27 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
     });
 
     test(
-      "a ready facilitator prints the one ready line, serves with its token and stops on SIGINT",
+      "a ready facilitator prints the ready line, then its provider count, serves with its token and stops on SIGINT",
       { timeout: 30_000 },
       async () => {
         reply(KAGE_REPORT);
         const { child, out, exited } = launch(configured());
         try {
-          await until(() => out.stdout.includes("\n"), "the ready line");
-          const ready =
-            /^facilitator listening on (http:\/\/127\.0\.0\.1:\d+) network=zcash:mainnet payTo=(\S+)\n$/.exec(
-              out.stdout,
-            );
+          await until(() => out.stdout.split("\n").length > 2, "the ready line and the provider count");
+          const [first, second] = out.stdout.split("\n");
+          const ready = /^facilitator listening on (http:\/\/127\.0\.0\.1:\d+) network=zcash:mainnet payTo=(\S+)$/.exec(
+            first ?? "",
+          );
           expect(ready).not.toBeNull();
           expect(ready?.[2]).toBe(PAY_TO);
+          expect(second).toBe("facilitator providers=0");
           const url = ready?.[1] ?? "";
 
-          expect((await fetch(`${url}/supported`)).status).toBe(401);
+          // The advertisement is public, and everything else needs the token
+          expect((await fetch(`${url}/supported`)).status).toBe(200);
+          expect((await fetch(`${url}/providers/me`)).status).toBe(401);
+          const me = await fetch(`${url}/providers/me`, { headers: { authorization: `Bearer ${TOKEN}` } });
+          expect(me.status).toBe(200);
           const supported = await fetch(`${url}/supported`, { headers: { authorization: `Bearer ${TOKEN}` } });
           expect(supported.status).toBe(200);
           expect(await supported.json()).toMatchObject({
@@ -423,8 +435,8 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
         } finally {
           child.kill("SIGKILL");
         }
-        // stdout holds the ready line alone and neither secret is printed anywhere
-        expect(out.stdout.trimEnd().split("\n")).toHaveLength(1);
+        // stdout holds the ready line and the count alone, and neither secret is printed anywhere
+        expect(out.stdout.trimEnd().split("\n")).toHaveLength(2);
         for (const text of [out.stdout, out.stderr]) {
           expect(text).not.toContain(KEY);
           expect(text).not.toContain(TOKEN);
@@ -432,5 +444,124 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
         expect(out.stderr).toMatch(/Z402_EXPECTED_BRANCH_ID/);
       },
     );
+
+    describe("with providers", () => {
+      const PROVIDER = { payTo: `u1${"p".repeat(60)}`, uivk: `uivk1${"p".repeat(100)}` };
+      const PROVIDER_KEY = `z402_${"K".repeat(43)}`;
+      const REGISTRATION = "main-registration-token";
+
+      /** A providers directory that an earlier start left, holding PROVIDER under PROVIDER_KEY */
+      function registered(): string {
+        const dir = join(scratch, `providers-${Math.random().toString(36).slice(2)}`);
+        mkdirSync(join(dir, "ledgers"), { recursive: true, mode: 0o700 });
+        const at = "2026-10-28T10:00:00.000Z";
+        const provider = {
+          id: providerId("zcash:mainnet", PROVIDER.payTo),
+          payTo: PROVIDER.payTo,
+          uivk: PROVIDER.uivk,
+          keyHash: keyDigest(PROVIDER_KEY),
+          createdAt: at,
+          keyIssuedAt: at,
+        };
+        writeFileSync(
+          join(dir, "registry.json"),
+          `${JSON.stringify({ version: 1, network: "zcash:mainnet", providers: [provider] })}\n`,
+          { mode: 0o600 },
+        );
+        return dir;
+      }
+
+      test("opens a provider that was registered, counts it and serves its key", { timeout: 30_000 }, async () => {
+        reply(KAGE_REPORT);
+        const dir = registered();
+        const tipReads = () => lwd.calls.filter((c) => c.rpc === "GetLatestBlock").length;
+        const before = tipReads();
+        const { child, out, exited } = launch(configured({ Z402_PROVIDERS_DIR: dir }));
+        try {
+          await until(() => out.stdout.split("\n").length > 2, "the ready line and the provider count");
+          expect(out.stdout.split("\n")[1]).toBe("facilitator providers=1");
+          // The first poll of the operator and of the provider ask for the tip together, and lightwalletd is asked once
+          expect(tipReads() - before).toBe(1);
+          const url = /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(out.stdout)?.[1] ?? "";
+
+          const res = await fetch(`${url}/providers/me`, { headers: { authorization: `Bearer ${PROVIDER_KEY}` } });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toEqual({
+            providerId: providerId("zcash:mainnet", PROVIDER.payTo),
+            network: "zcash:mainnet",
+            payTo: PROVIDER.payTo,
+          });
+          child.kill("SIGINT");
+          expect(await exited).toBe(0);
+        } finally {
+          child.kill("SIGKILL");
+        }
+        expect(existsSync(join(dir, "ledgers", `${providerId("zcash:mainnet", PROVIDER.payTo)}.jsonl`))).toBe(true);
+        for (const text of [out.stdout, out.stderr]) {
+          for (const secret of [PROVIDER.uivk, PROVIDER_KEY, TOKEN, KEY]) expect(text).not.toContain(secret);
+        }
+      });
+
+      test("refuses to start when a provider's key no longer owns its payTo", { timeout: 30_000 }, async () => {
+        // The operator's key passes its own check, while the provider's reads as a payTo with a transparent receiver
+        reply(KAGE_REPORT, OWNS, { [PROVIDER.uivk]: { hasTransparent: true, ownedByKey: true } });
+        const { out, exited } = launch(configured({ Z402_PROVIDERS_DIR: registered() }));
+        expect(await exited).toBe(1);
+
+        expect(out.stdout).toBe("");
+        const id = providerId("zcash:mainnet", PROVIDER.payTo);
+        expect(out.stderr).toContain(
+          `facilitator: providersDir: provider ${id}: the stored viewing key no longer owns its payTo`,
+        );
+        expect(out.stderr).not.toContain(PROVIDER.uivk);
+      });
+
+      test("registers a provider over HTTP, proves its key and stores only a hash", { timeout: 30_000 }, async () => {
+        reply(KAGE_REPORT);
+        const dir = join(scratch, `providers-${Math.random().toString(36).slice(2)}`);
+        const { child, out, exited } = launch(
+          configured({ Z402_PROVIDERS_DIR: dir, Z402_REGISTRATION_TOKEN: REGISTRATION }),
+        );
+        let apiKey = "";
+        try {
+          await until(() => out.stdout.split("\n").length > 2, "the ready line and the provider count");
+          expect(out.stdout.split("\n")[1]).toBe("facilitator providers=0");
+          const url = /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(out.stdout)?.[1] ?? "";
+          const body = JSON.stringify({ payTo: PROVIDER.payTo, uivk: PROVIDER.uivk });
+          const post = (token?: string) =>
+            fetch(`${url}/providers`, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+              },
+              body,
+            });
+
+          expect((await post()).status).toBe(401);
+          const created = await post(REGISTRATION);
+          expect(created.status).toBe(201);
+          const answer = (await created.json()) as { apiKey: string; providerId: string };
+          apiKey = answer.apiKey;
+          expect(answer.providerId).toBe(providerId("zcash:mainnet", PROVIDER.payTo));
+          const me = await fetch(`${url}/providers/me`, { headers: { authorization: `Bearer ${apiKey}` } });
+          expect(me.status).toBe(200);
+
+          child.kill("SIGINT");
+          expect(await exited).toBe(0);
+        } finally {
+          child.kill("SIGKILL");
+        }
+        const stored = readFileSync(join(dir, "registry.json"), "utf8");
+        expect(stored).toContain(keyDigest(apiKey));
+        expect(stored).not.toContain(apiKey);
+        for (const text of [out.stdout, out.stderr]) {
+          for (const secret of [PROVIDER.uivk, apiKey, REGISTRATION, TOKEN, KEY]) expect(text).not.toContain(secret);
+        }
+        expect(out.stderr).toContain(
+          `facilitator: registered provider ${providerId("zcash:mainnet", PROVIDER.payTo)} payTo=${PROVIDER.payTo}`,
+        );
+      });
+    });
   });
 });
