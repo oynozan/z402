@@ -16,6 +16,7 @@ const log = (message: string, err?: unknown): void => {
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
+  for (const warning of config.warnings) console.error(`facilitator: warning: ${warning}`);
   const lwd = createLightwalletdClient({ url: config.lwdUrl });
 
   let fatal = false;

@@ -58,6 +58,7 @@ describe("defaults", () => {
       port: 4022,
       priceZat: 500n,
       terms: { windowZat: 100000n, creditRatioBps: 2500, creditCapZat: 200000n, zeroConfMinExpiryBlocks: 20 },
+      warnings: [],
     });
   });
 
@@ -185,6 +186,13 @@ describe("Z402_UIVK", () => {
   test("a missing key is refused", () => {
     expect(refusal(env({ Z402_UIVK: undefined })).message).toMatch(/Z402_UIVK/);
   });
+
+  test("a missing key points at the two variables before any keys file", () => {
+    expect(refusal(env({ Z402_UIVK: undefined })).message).toBe(
+      "Z402_UIVK is required (the merchant's unified incoming viewing key); set Z402_UIVK and Z402_PAY_TO, " +
+        "or Z402_MERCHANT_KEYS_FILE to a file holding only uivk and orchardOnlyAddress",
+    );
+  });
 });
 
 describe("Z402_FACILITATOR_TOKEN", () => {
@@ -271,6 +279,61 @@ describe("Z402_MERCHANT_KEYS_FILE", () => {
     const path = keysFile({ orchardOnlyAddress: bech32("utest"), uivk: UIVK }, "wrong-network.json");
     expect(refusal({ Z402_FACILITATOR_TOKEN: "t", Z402_MERCHANT_KEYS_FILE: path }).message).toMatch(/Z402_PAY_TO/);
   });
+
+  describe("that holds more than the facilitator needs", () => {
+    const MAINNET = { orchardOnlyAddress: bech32("u"), uivk: bech32("uivk", 100) };
+    const advice = (path: string, what: string) =>
+      `Z402_MERCHANT_KEYS_FILE: ${path} holds ${what}; give the facilitator only uivk and orchardOnlyAddress, ` +
+      "or set Z402_UIVK and Z402_PAY_TO";
+
+    test("is refused on mainnet when it holds the spending seed", () => {
+      const path = keysFile({ ...MAINNET, seedHex: merchant.seedHex }, "mainnet-seed.json");
+      const e = { Z402_NETWORK: "mainnet", Z402_LWD_URL: "https://127.0.0.1:9067" };
+      const error = refusal({ ...e, Z402_FACILITATOR_TOKEN: "t", Z402_MERCHANT_KEYS_FILE: path });
+      expect(error.message).toBe(advice(path, "the spending seed"));
+      expect(error.message).not.toContain(merchant.seedHex);
+    });
+
+    test("is refused on mainnet when it holds the full viewing key", () => {
+      const path = keysFile({ ...MAINNET, ufvk: "uview1fixture" }, "mainnet-ufvk.json");
+      const e = { Z402_NETWORK: "mainnet", Z402_LWD_URL: "https://127.0.0.1:9067" };
+      const error = refusal({ ...e, Z402_FACILITATOR_TOKEN: "t", Z402_MERCHANT_KEYS_FILE: path });
+      expect(error.message).toBe(advice(path, "the full viewing key"));
+    });
+
+    test("loads elsewhere with one warning that gives the same advice", () => {
+      const path = keysFile(merchant, "regtest-seed.json");
+      const config = loadConfig({ Z402_FACILITATOR_TOKEN: "t", Z402_MERCHANT_KEYS_FILE: path });
+      expect(config).toMatchObject({ payTo: PAY_TO, uivk: UIVK });
+      expect(config.warnings).toEqual([advice(path, "the spending seed")]);
+      expect(config.warnings.join(" ")).not.toContain(merchant.seedHex);
+    });
+
+    test("is not warned about when only the variables are used", () => {
+      const path = keysFile({ ...MAINNET, seedHex: merchant.seedHex }, "unused-seed.json");
+      const e = { Z402_NETWORK: "mainnet", Z402_LWD_URL: "https://127.0.0.1:9067", ...MAINNET };
+      const config = loadConfig({
+        ...e,
+        Z402_PAY_TO: MAINNET.orchardOnlyAddress,
+        Z402_UIVK: MAINNET.uivk,
+        Z402_FACILITATOR_TOKEN: "t",
+        Z402_MERCHANT_KEYS_FILE: path,
+      });
+      expect(config.warnings).toEqual([]);
+    });
+  });
+
+  test("a file of only uivk and orchardOnlyAddress gives no warning, on mainnet too", () => {
+    const viewOnly = { orchardOnlyAddress: bech32("u"), uivk: bech32("uivk", 100) };
+    const path = keysFile(viewOnly, "view-only.json");
+    const config = loadConfig({
+      Z402_NETWORK: "mainnet",
+      Z402_LWD_URL: "https://127.0.0.1:9067",
+      Z402_FACILITATOR_TOKEN: "t",
+      Z402_MERCHANT_KEYS_FILE: path,
+    });
+    expect(config).toMatchObject({ payTo: viewOnly.orchardOnlyAddress, uivk: viewOnly.uivk, warnings: [] });
+  });
 });
 
 describe("paths", () => {
@@ -326,6 +389,68 @@ describe("endpoint and branch id", () => {
 
   test("an empty host is refused", () => {
     expect(refusal(env({ Z402_FACILITATOR_HOST: " " })).message).toMatch(/Z402_FACILITATOR_HOST/);
+  });
+});
+
+describe("plaintext http://", () => {
+  const TESTNET = { Z402_NETWORK: "testnet", Z402_PAY_TO: bech32("utest"), Z402_UIVK: bech32("uivktest", 100) };
+  const MAINNET = { Z402_NETWORK: "mainnet", Z402_PAY_TO: bech32("u"), Z402_UIVK: bech32("uivk", 100) };
+
+  const NETWORKS = { testnet: [TESTNET, NETWORK_TESTNET], mainnet: [MAINNET, NETWORK_MAINNET] } as const;
+
+  test.each([
+    ["testnet", "http://lwd.example:9067"],
+    ["mainnet", "http://lwd.example:9067"],
+    ["mainnet", "http://10.0.0.5:9067"],
+    ["testnet", "http://[::ffff:7f00:1]:9067"],
+  ] as const)("on %s to %s, which is not loopback, is refused", (name, url) => {
+    const [over, network] = NETWORKS[name];
+    expect(refusal(env({ ...over, Z402_LWD_URL: url })).message).toBe(
+      `Z402_LWD_URL: plaintext http:// is allowed only to a loopback host on ${network}; use https://`,
+    );
+  });
+
+  test.each(["http://127.0.0.1:9067", "http://127.8.9.10:9067", "http://localhost:9067", "http://[::1]:9067"])(
+    "on testnet to loopback %s is accepted",
+    (url) => {
+      expect(loadConfig(env({ ...TESTNET, Z402_LWD_URL: url })).lwdUrl).toBe(url);
+    },
+  );
+
+  test("on regtest to any host is accepted, as a compose network names its own", () => {
+    const config = loadConfig(env({ Z402_LWD_URL: "http://zaino:8137" }));
+    expect(config).toMatchObject({ lwdUrl: "http://zaino:8137", warnings: [] });
+  });
+});
+
+describe("warnings", () => {
+  const MAINNET = { Z402_NETWORK: "mainnet", Z402_PAY_TO: bech32("u"), Z402_UIVK: bech32("uivk", 100) };
+
+  test("a facilitator host that is not loopback is warned about once", () => {
+    expect(loadConfig(env({ Z402_FACILITATOR_HOST: "0.0.0.0" })).warnings).toEqual([
+      "Z402_FACILITATOR_HOST: 0.0.0.0 is not a loopback host, so the facilitator and its bearer token are reachable " +
+        "over plain http",
+    ]);
+  });
+
+  test.each(["127.0.0.1", "localhost", "::1"])("a facilitator host of %s is not warned about", (host) => {
+    expect(loadConfig(env({ Z402_FACILITATOR_HOST: host })).warnings).toEqual([]);
+  });
+
+  test("a mainnet endpoint that is not loopback is named in one warning", () => {
+    expect(loadConfig(env({ ...MAINNET, Z402_LWD_URL: "https://zec.rocks:443" })).warnings).toEqual([
+      "Z402_LWD_URL points at zec.rocks: the facilitator trusts it for whether a deposit exists and how deep it is " +
+        "mined; for real money use a node you operate",
+    ]);
+  });
+
+  test("a mainnet endpoint on loopback is not warned about", () => {
+    expect(loadConfig(env({ ...MAINNET, Z402_LWD_URL: "https://127.0.0.1:9067" })).warnings).toEqual([]);
+  });
+
+  test("a testnet endpoint is not warned about, as no real money is at stake", () => {
+    const testnet = { Z402_NETWORK: "testnet", Z402_PAY_TO: bech32("utest"), Z402_UIVK: bech32("uivktest", 100) };
+    expect(loadConfig(env(testnet)).warnings).toEqual([]);
   });
 });
 

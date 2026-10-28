@@ -376,6 +376,16 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(replies[proces
       expect(out.stdout).toBe("");
     });
 
+    test("each config warning goes to stderr before the startup checks run", { timeout: 30_000 }, async () => {
+      reply(withOutput({ valueZat: 1 }));
+      const { out, exited } = launch(configured({ Z402_LWD_URL: "https://lwd.invalid:443" }));
+      expect(await exited).toBe(1);
+      expect(out.stdout).toBe("");
+      const lines = out.stderr.trimEnd().split("\n");
+      expect(lines[0]).toMatch(/^facilitator: warning: Z402_LWD_URL points at lwd\.invalid: /);
+      expect(lines.slice(1).join("\n")).toMatch(/startup check failed \(self-test\)/);
+    });
+
     test("a failed check exits 1 naming the check and never prints the key", { timeout: 30_000 }, async () => {
       reply(withOutput({ valueZat: 1 }));
       const { out, exited } = launch(configured());
