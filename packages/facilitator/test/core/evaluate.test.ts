@@ -120,6 +120,34 @@ describe("evaluateDeposit value", () => {
   });
 });
 
+describe("evaluateDeposit at a newer tip than the deposit's first sighting at 1001", () => {
+  const insp: FoundInspection = {
+    found: true,
+    txid: "e1".repeat(32),
+    location: "mempool",
+    minedHeight: null,
+    expiryHeight: 1042,
+    hasTransparent: false,
+    outputs: [out(W, `${K}:1`)],
+  };
+
+  test("death is judged at the current tip", () => {
+    expect(evaluateDeposit(insp, K, DEMO_TERMS, 1042, 1001)).toEqual({ ok: false, code: "z402_deposit_dead" });
+  });
+
+  test("zero-conf is judged at the tip of the first sighting", () => {
+    expect(evaluateDeposit(insp, K, DEMO_TERMS, 1030, 1001)).toMatchObject({
+      ok: true,
+      status: "pending",
+      zeroConf: true,
+    });
+  });
+
+  test("without a reference tip, zero-conf is judged at the tip given", () => {
+    expect(evaluateDeposit(insp, K, DEMO_TERMS, 1030)).toMatchObject({ ok: true, zeroConf: false });
+  });
+});
+
 describe("evaluateDeposit status", () => {
   test("height ahead of tip is 1 confirmation", () => {
     expect(ev({ location: "mined", minedHeight: tip + 1 })).toMatchObject({

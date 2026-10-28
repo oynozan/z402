@@ -36,7 +36,8 @@ export class DepositResolver {
     this.#maxQueued = o.maxQueued ?? 16;
     this.#pollMs = o.pollMs ?? 1000;
     this.#negativeTtlMs = o.negativeTtlMs ?? 10_000;
-    this.#resultTtlMs = o.resultTtlMs ?? 600_000;
+    // Settle credits from peek(), and an older found result says nothing of whether the deposit is still in the mempool
+    this.#resultTtlMs = o.resultTtlMs ?? 30_000;
     this.#now = o.now ?? (() => Date.now());
     this.#sleep = o.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }

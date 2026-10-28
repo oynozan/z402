@@ -706,6 +706,97 @@ describe("deposits", () => {
   });
 });
 
+describe("stale lookup results", () => {
+  /** Session K at its 125000 limit on a confirmed D1, then a verify that needs D2 and finds it pending, expiry 1042 */
+  async function needingD2(r: Rig): Promise<string> {
+    await opened(r);
+    r.chain.mine();
+    await r.watcher.pollNow();
+    expect(await r.s.settle(pay(125000n), req())).toMatchObject({ success: true });
+    const d2 = send(r.chain, { memo: `${K}:2` });
+    expect((await r.s.verify(pay(125500n, { txid: d2 }), req())).isValid).toBe(true);
+    expect(r.resolver.peek(d2)).toMatchObject({ kind: "found", tip: 1001, inspection: { expiryHeight: 1042 } });
+    return d2;
+  }
+
+  test("a cached deposit that died since is dead at settle and at verify, and never credited", async () => {
+    const r = rig();
+    const d2 = await needingD2(r);
+    r.chain.hold(d2);
+    r.chain.mine(41);
+    await r.watcher.pollNow();
+    const inspect = vi.spyOn(r.view, "inspect");
+
+    const settled = await r.s.settle(pay(125500n, { txid: d2 }), req());
+    expect(settled).toMatchObject({ success: false, errorReason: REASON.depositDead, transaction: "" });
+    expect(sessionOf(settled).limitZat).toBe("125000");
+    const verdict = await r.s.verify(pay(125500n, { txid: d2 }), req());
+    expect(verdict).toMatchObject({ isValid: false, invalidReason: REASON.depositDead });
+
+    expect(creditedTxids(r.ledger)).not.toContain(d2);
+    expect(inspect).not.toHaveBeenCalled();
+  });
+
+  test("a found result older than 30 s is not evidence, so settle answers chain_unavailable", async () => {
+    const r = rig();
+    const d1 = send(r.chain);
+    expect((await r.s.verify(pay(500n, { txid: d1 }), req())).isValid).toBe(true);
+    r.clock.advance(30_001);
+
+    expect(await r.s.settle(pay(500n, { txid: d1 }), req())).toMatchObject({
+      success: false,
+      errorReason: REASON.chainUnavailable,
+      transaction: "",
+    });
+    expect(r.ledger.replay()).toEqual([]);
+
+    const inspect = vi.spyOn(r.view, "inspect");
+    expect((await r.s.verify(pay(500n, { txid: d1 }), req())).isValid).toBe(true);
+    expect(inspect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a cached definitive failure", () => {
+  test("is answered again by an over-limit verify with no new inspect", async () => {
+    const r = rig();
+    const txid = send(r.chain, { memo: `${OTHER_SESSION_KEY}:1` });
+    expect(await r.s.verify(pay(500n, { txid }), req())).toMatchObject({ invalidReason: REASON.depositMemoMismatch });
+    const inspect = vi.spyOn(r.view, "inspect");
+
+    expect(await r.s.verify(pay(500n, { txid }), req())).toMatchObject({
+      isValid: false,
+      invalidReason: REASON.depositMemoMismatch,
+    });
+    expect(inspect).not.toHaveBeenCalled();
+  });
+
+  test("lets a voucher that fits pass with no background lookup, and settle does not ack it", async () => {
+    const r = rig();
+    await opened(r);
+    const txid = send(r.chain, { memo: `${OTHER_SESSION_KEY}:1` });
+    expect((await r.s.verify(pay(1000n, { txid }), req())).isValid).toBe(true);
+    await until(() => r.resolver.peek(txid) !== undefined);
+    const background = vi.spyOn(r.resolver, "startBackground");
+
+    expect((await r.s.verify(pay(1000n, { txid }), req())).isValid).toBe(true);
+    expect(background).not.toHaveBeenCalled();
+    expect(await r.s.settle(pay(1000n, { txid }), req())).toMatchObject({ success: true, transaction: "" });
+    expect(creditedTxids(r.ledger)).not.toContain(txid);
+  });
+
+  test("a credited deposit that is orphaned is not live, so an over-limit verify asks for a deposit", async () => {
+    const r = rig();
+    const d1 = await opened(r);
+    r.chain.mine();
+    await r.watcher.pollNow();
+    r.chain.reorg(1);
+    await r.watcher.pollNow();
+    expect(r.state.deposit(d1)?.status).toBe("orphaned");
+
+    expect(await r.s.verify(pay(1000n), req())).toMatchObject({ isValid: false, invalidReason: REASON.depositRequired });
+  });
+});
+
 describe("settle atomicity", () => {
   test("20 concurrent settles of one voucher → exactly 1 success", async () => {
     const r = rig();

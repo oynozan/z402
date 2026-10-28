@@ -417,12 +417,12 @@ describe("startBackground and peek", () => {
     expect(resolver.peek(txidOf(2))).toMatchObject({ kind: "found" });
   });
 
-  test("a result is kept for 10 minutes and then dropped", async () => {
+  test("a result is kept for 30 s and then dropped", async () => {
     const { chain, clock, resolver } = rig();
     chain.script(T, [found(T)]);
     await resolver.lookup(T, 0);
 
-    clock.advance(599_999);
+    clock.advance(29_999);
     expect(resolver.peek(T)).toMatchObject({ kind: "found" });
     clock.advance(1);
 

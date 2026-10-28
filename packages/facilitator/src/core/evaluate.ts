@@ -26,7 +26,14 @@ export function chainPosition(
   return { status: at.location === "orphaned" ? "orphaned" : "pending", minedHeight: null, confirmations: 0 };
 }
 
-export function evaluateDeposit(insp: FoundInspection, sessionKey: string, terms: Terms, tip: number): Evaluation {
+/** Judges death and depth at `tip`, and zero-conf at `referenceTip`, the tip of the first sighting (protocol §5.3) */
+export function evaluateDeposit(
+  insp: FoundInspection,
+  sessionKey: string,
+  terms: Terms,
+  tip: number,
+  referenceTip = tip,
+): Evaluation {
   if (insp.hasTransparent) return { ok: false, code: REASON.depositTransparent };
   if (insp.outputs.length === 0) return { ok: false, code: REASON.depositNotToMerchant };
 
@@ -39,6 +46,6 @@ export function evaluateDeposit(insp: FoundInspection, sessionKey: string, terms
   if (at.status === "dead") return { ok: false, code: REASON.depositDead };
 
   const valueZat = matching.reduce((sum, out) => sum + out.valueZat, 0n);
-  const zeroConf = zeroConfEligible({ valueZat, expiryHeight: insp.expiryHeight, referenceTip: tip, terms });
+  const zeroConf = zeroConfEligible({ valueZat, expiryHeight: insp.expiryHeight, referenceTip, terms });
   return { ok: true, valueZat, zeroConf, ...at, expiryHeight: insp.expiryHeight };
 }

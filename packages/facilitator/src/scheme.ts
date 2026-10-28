@@ -261,9 +261,10 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     const cLast = this.#state.session(v.sessionKey)?.cLast ?? 0n;
     const credited = this.#state.depositsOf(v.sessionKey);
     const known = v.depositTxid === undefined ? undefined : (fresh ?? this.#resolver.peek(v.depositTxid));
-    const presented = this.#presented(v, known);
-    const deposits = presented.kind === "usable" ? [...credited, presented.record] : credited;
+    // The newest tip any read has seen, so an older lookup cannot keep a deposit alive past its expiry
     const tip = Math.max(this.#watcher.lastTip() ?? 0, known?.kind === "found" ? known.tip : 0);
+    const presented = this.#presented(v, known, tip);
+    const deposits = presented.kind === "usable" ? [...credited, presented.record] : credited;
     // Projected as if the presented deposit were credited, which the client never takes for an ack
     const snapshot = this.#snapshot(v.sessionKey, cLast, deposits, tip);
     const limit = computeLimit(deposits, terms).limitZat;
@@ -293,7 +294,9 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     const isNew = presented.kind === "usable" || presented.kind === "in_flight" || presented.kind === "unusable";
     const live =
       presented.kind === "usable" || presented.kind === "in_flight" || credited.some((d) => d.status === "pending");
-    const next = { needsLookup: isNew, refresh: live };
+    // A failure the chain has answered for good is not looked up again
+    const definitive = presented.kind === "unusable" && !presented.retry;
+    const next = { needsLookup: isNew && !definitive, refresh: live };
     if (presented.kind === "unusable") return refused(presented.refusal, snapshot, next);
     const over = `cumulativeZat ${v.cNew} is over the limit ${limit}`;
     return live
@@ -301,7 +304,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
       : refused({ code: REASON.depositRequired, message: `${over} with nothing pending` }, snapshot, next);
   }
 
-  #presented(v: Voucher, known: Lookup | undefined): Presented {
+  #presented(v: Voucher, known: Lookup | undefined, tip: number): Presented {
     const txid = v.depositTxid;
     if (txid === undefined) return { kind: "none" };
     const owner = this.#state.ownerOf(txid);
@@ -314,7 +317,7 @@ export class PrepaidVoucherFacilitatorScheme implements SchemeNetworkFacilitator
     }
 
     if (known?.kind === "found") {
-      const e = evaluateDeposit(known.inspection, v.sessionKey, this.#config.terms, known.tip);
+      const e = evaluateDeposit(known.inspection, v.sessionKey, this.#config.terms, tip, known.tip);
       if (!e.ok) return unusable(e.code, "the deposit cannot be credited", false);
       return { kind: "usable", record: creditedRecord(txid, v.sessionKey, e, known.tip) };
     }
