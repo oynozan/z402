@@ -20,9 +20,8 @@ x-logging: &logging
 
 x-hardened: &hardened
   cap_drop: [ALL]
-  security_opt: [no-new-privileges:true]
-  # No `init: true`: some hosts refuse to exec Docker's bind-mounted /sbin/docker-init ("operation not permitted",
-  # exit 255), so each image's own entrypoint is PID 1
+  # No no-new-privileges and no `init: true`: on some hosts (AppArmor) a container with no-new-privileges cannot exec
+  # anything, not /sbin/docker-init and not /bin/sh ("operation not permitted", exit 255)
   restart: unless-stopped
   logging: *logging
 
