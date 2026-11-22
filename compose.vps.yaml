@@ -21,7 +21,8 @@ x-logging: &logging
 x-hardened: &hardened
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
-  init: true
+  # No `init: true`: some hosts refuse to exec Docker's bind-mounted /sbin/docker-init ("operation not permitted",
+  # exit 255), so each image's own entrypoint is PID 1
   restart: unless-stopped
   logging: *logging
 
